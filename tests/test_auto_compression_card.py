@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from api.compression_anchor import visible_messages_for_anchor
+from api.models import Session
 from api.streaming import _is_fallback_lifecycle_message
 
 
@@ -457,6 +459,76 @@ def test_reference_message_inserted_before_future_assistant_anchor():
     assert "const anchorSeg=assistantSegments.get(anchorRawIdx);" in helper
     assert "blocks.insertBefore(node, anchorSeg);" in helper
     assert helper.index("blocks.insertBefore(node, anchorSeg);") < helper.index("const userRow=userRows.get(anchorRawIdx);")
+
+
+def test_frontend_uses_context_engine_metadata_for_indexed_context_copy():
+    src = _read("static/ui.js")
+    i18n = _read("static/i18n.js")
+
+    assert "function _compressionEngineForSession" in src
+    assert "S.session.compression_anchor_engine" in src
+    assert "S.session.context_engine" in src
+    assert "function _compressionModeForSession" in src
+    assert "S.session.compression_anchor_mode" in src
+    assert "function _engineAwareCompressionCopy" in src
+    assert "mode==='lossless_retrieval'" in src
+    assert "t('retrieval_context_label')" in src
+    assert "t('retrieval_context_preview')" in src
+    assert "retrieval_context_label" in i18n
+    assert "retrieval_context_preview" in i18n
+
+
+def test_session_model_round_trips_context_engine_metadata(tmp_path, monkeypatch):
+    import api.models as models
+
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+
+    session = Session(
+        session_id="lcm_metadata",
+        workspace=str(tmp_path),
+        context_engine="lcm",
+        compression_anchor_engine="lcm",
+        compression_anchor_mode="lossless_retrieval",
+        compression_anchor_details={"retrieval_tools": ["lcm_grep"]},
+        context_engine_state={"status": "indexed"},
+    )
+    session.save(touch_updated_at=False)
+
+    loaded = Session.load("lcm_metadata")
+    assert loaded.context_engine == "lcm"
+    assert loaded.compression_anchor_engine == "lcm"
+    assert loaded.compression_anchor_mode == "lossless_retrieval"
+    assert loaded.compression_anchor_details == {"retrieval_tools": ["lcm_grep"]}
+    assert loaded.context_engine_state == {"status": "indexed"}
+
+
+def test_backend_auto_anchor_count_excludes_compaction_marker_cards():
+    messages = [
+        {"role": "user", "content": "before compression"},
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+        {"role": "assistant", "content": "after compression"},
+        {"role": "tool", "content": "hidden tool output"},
+        {"role": "user", "content": "[Your active task list was preserved across context compression]"},
+    ]
+
+    visible = visible_messages_for_anchor(messages, auto_compression=True)
+
+    assert [m["content"] for m in visible] == ["before compression", "after compression"]
+
+
+def test_frontend_reference_insertion_skips_when_reference_is_before_render_window():
+    src = _read("static/ui.js")
+    start = src.find("function _insertCompressionLikeNodeByRawIdx")
+    assert start != -1, "raw-index insertion helper not found"
+    end = src.find("const preservedOnlyNode=", start)
+    assert end != -1, "raw-index insertion helper end not found"
+    helper = src[start:end]
+
+    assert "if(rawIdx<firstRenderedRawIdx) return;" in helper
 
 
 def test_reference_message_selection_prefers_latest_matching_marker():

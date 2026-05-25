@@ -78,7 +78,7 @@ def test_syncReasoningChip_called_on_session_load():
 
 
 def test_syncReasoningChip_called_on_model_change():
-    """Model picker changes must refresh reasoning chip after session model updates."""
+    """Model picker changes must refresh reasoning chip with or without a session."""
     with open("static/boot.js") as f:
         boot_src = f.read()
     marker = "$('modelSelect').onchange=async()=>{"
@@ -86,8 +86,11 @@ def test_syncReasoningChip_called_on_model_change():
     tail = boot_src[start:]
     assert "syncReasoningChip()" in tail, \
         "syncReasoningChip() must be called when modelSelect changes"
+    no_session = tail[tail.index("if(!S.session){"):tail.index("if(typeof _rememberPendingSessionModel")]
+    assert "syncReasoningChip()" in no_session, \
+        "syncReasoningChip() must also run for pre-session picker changes"
     model_assign = tail.index("S.session.model=modelState.model")
-    sync_call = tail.index("syncReasoningChip()")
+    sync_call = tail.index("syncReasoningChip()", model_assign)
     assert model_assign < sync_call, \
         "syncReasoningChip() must run after S.session.model is updated"
 

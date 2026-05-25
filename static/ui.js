@@ -967,11 +967,14 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
   if(applied) return applied;
+  const value=modelId;
   const opt=document.createElement('option');
   opt.value=modelId;
   opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
   opt.dataset.custom='1';
-  const provider=preferredProviderId||_providerFromModelValue(modelId)||'';
+  const badge=(window._configuredModelBadges||{})[value];
+  if(badge&&badge.provider) opt.dataset.provider=badge.provider;
+  const provider=preferredProviderId||(badge&&badge.provider)||_providerFromModelValue(modelId)||'';
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
   sel.value=modelId;
@@ -1554,7 +1557,8 @@ function renderModelDropdown(){
   _filterModels('');
 }
 
-async function selectModelFromDropdown(value, preferredProviderId){
+async function selectModelFromDropdown(value){
+  const preferredProviderId=arguments[1];
   const sel=$('modelSelect');
   if(!sel) { closeModelDropdown(); return; }
   const provider=String(preferredProviderId||'').trim()||null;
@@ -1673,7 +1677,8 @@ function _applyReasoningOptions(supportedEfforts){
   });
 }
 
-function _applyReasoningChip(eff, meta){
+function _applyReasoningChip(eff){
+  const meta=arguments[1]||null;
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
   if(meta&&Array.isArray(meta.supported_efforts)){
@@ -1685,8 +1690,11 @@ function _applyReasoningChip(eff, meta){
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
-  const supports=Array.isArray(_currentReasoningEffortsSupported)
-    ?_currentReasoningEffortsSupported.length>0
+  const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
+    ?null
+    :_currentReasoningEffortsSupported;
+  const supports=Array.isArray(supportedEfforts)
+    ?supportedEfforts.length>0
     :true;
   if(!supports){
     wrap.style.display='none';
@@ -1695,7 +1703,7 @@ function _applyReasoningChip(eff, meta){
   }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
-  _applyReasoningOptions(_currentReasoningEffortsSupported);
+  if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;

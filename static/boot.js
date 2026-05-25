@@ -1031,6 +1031,7 @@ $('modelSelect').onchange=async()=>{
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
   if(!S.session){
     if(typeof syncModelChip==='function') syncModelChip();
+    if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);

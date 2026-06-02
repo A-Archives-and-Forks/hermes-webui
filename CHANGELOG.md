@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.213] — 2026-06-02 — Release GG (stage-p2b — keep gateway context visible in chat transcripts)
+
+### Fixed
+- Gateway-backed chat now backfills model-context turns into the visible transcript before saving the latest reply, while keeping hidden `[context compaction]` markers out of the visible transcript. Previously a context-compacted gateway session could collapse the sidebar/header message count to a two-message conversation (and drop older visible turns) while the assistant was responding to hidden prior context. Older visible turns are preserved and compaction markers stay hidden from `saved.messages` (#3300, @AJV20).
+
 ## [v0.51.212] — 2026-06-02 — Release GF (stage-batch2 — i18n regenerate-title strings + self-restart argv + todos cold-load)
 
 ### Fixed

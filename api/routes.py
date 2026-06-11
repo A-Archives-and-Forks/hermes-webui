@@ -7484,6 +7484,8 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         if getattr(s, "read_only", False) or getattr(s, "is_imported", False):
             return bad(handler, "Read-only imported sessions cannot be renamed", 403)
         next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
@@ -7590,6 +7592,8 @@ def handle_post(handler, parsed) -> bool:
                 s = get_session(sid)
             except KeyError:
                 return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
             draft = getattr(s, "composer_draft", {}) or {}
             return j(handler, {"draft": draft})
         # POST
@@ -7617,6 +7621,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(sid)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
             return bad(handler, "Session not found", 404)
         unchanged = False
         with _get_session_agent_lock(sid):
@@ -8587,9 +8593,13 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
+            if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
         except KeyError:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
+                return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(cli_meta.get("profile") or None, handler):
                 return bad(handler, "Session not found", 404)
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
@@ -11907,6 +11917,8 @@ def _handle_btw(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+        return bad(handler, "Session not found", 404)
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
@@ -12855,6 +12867,11 @@ def _handle_chat_start(handler, body, diag=None):
                 # currently-selected profile instead of the stale one stamped at
                 # creation time.
                 s.profile = requested_profile
+        # Active-profile boundary: after the empty-placeholder retag, a caller
+        # scoped to one profile must not be able to start a turn on (and thus
+        # read/append to) another profile's session by id.
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:
@@ -12962,7 +12979,12 @@ def _normalize_chat_attachments(raw_attachments):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
-    s = get_session(body["session_id"])
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+        return bad(handler, "Session not found", 404)
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)

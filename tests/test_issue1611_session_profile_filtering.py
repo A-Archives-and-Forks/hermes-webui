@@ -780,6 +780,168 @@ def test_session_import_cli_fresh_rejects_session_from_inactive_profile():
     assert "json" not in captured
 
 
+# ── Turn-start / derive paths must also honor active profile (LX class sweep r2) ──
+#
+# chat/start, chat (sync fallback), btw, archive, draft (GET+POST), and
+# title/regenerate all loaded a session by id and read/appended/derived from its
+# transcript without the active-profile boundary.
+
+
+def test_chat_start_rejects_session_from_inactive_profile():
+    """POST /api/chat/start must not start a turn on a foreign-profile session."""
+    import api.routes as routes
+
+    captured, fake_bad, fake_j = _post_capture()
+    started = {"run": False}
+
+    def _start_run(*a, **k):
+        started["run"] = True
+        return {}
+
+    foreign = SimpleNamespace(
+        profile="other", messages=[{"role": "user", "content": "x"}],
+        context_messages=[], pending_user_message=None,
+    )
+    body = {"session_id": "foreign_cs_001", "message": "hi"}
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes._start_run", side_effect=_start_run), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_chat_start(SimpleNamespace(headers={}), body)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert started["run"] is False, "a turn must not start on a foreign-profile session"
+
+
+def test_chat_start_allows_empty_placeholder_retagged_to_active_profile():
+    """An empty placeholder session retagged to the active profile must NOT be rejected."""
+    import api.routes as routes
+
+    captured, fake_bad, fake_j = _post_capture()
+    started = {"run": False}
+
+    def _start_run(*a, **k):
+        started["run"] = True
+        return {"ok": True}
+
+    # Empty placeholder (no persisted turns) created under a stale profile.
+    placeholder = SimpleNamespace(
+        profile="stale", messages=[], context_messages=[], pending_user_message=None,
+        session_id="ph_001", model="m", model_provider="p", workspace="/tmp/ws",
+    )
+    body = {"session_id": "ph_001", "message": "hi", "profile": "default"}
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=placeholder), \
+         patch("api.routes._normalize_chat_attachments", return_value=[]), \
+         patch("api.routes._resolve_chat_workspace_with_recovery", return_value="/tmp/ws"), \
+         patch("api.routes._read_profile_model_config", return_value=(None, None)), \
+         patch("api.routes._resolve_compatible_session_model_state", return_value=("m", "p", "m")), \
+         patch("api.routes._start_run", side_effect=_start_run), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_chat_start(SimpleNamespace(headers={}), body)
+
+    # Retag set placeholder.profile to "default" (== active) so the guard passes.
+    assert placeholder.profile == "default"
+    assert started["run"] is True, "placeholder retagged to active profile must start normally"
+    assert "bad" not in captured or captured.get("bad", {}).get("status") != 404
+
+
+def test_chat_sync_rejects_session_from_inactive_profile():
+    """POST /api/chat (sync fallback) must not read/return a foreign-profile transcript."""
+    import api.routes as routes
+
+    captured, fake_bad, fake_j = _post_capture()
+    foreign = SimpleNamespace(profile="other", messages=[{"role": "user", "content": "x"}], workspace="/tmp")
+    body = {"session_id": "foreign_csync_001", "message": "hi"}
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_chat_sync(SimpleNamespace(headers={}), body)
+
+    assert captured.get("bad", {}).get("status") == 404
+
+
+def test_btw_rejects_session_from_inactive_profile():
+    """POST /api/btw must not derive an answer from a foreign-profile transcript."""
+    import api.routes as routes
+
+    captured, fake_bad, fake_j = _post_capture()
+    foreign = SimpleNamespace(profile="other", messages=[{"role": "user", "content": "x"}], active_stream_id=None)
+    body = {"session_id": "foreign_btw_001", "question": "what?"}
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_btw(SimpleNamespace(headers={}), body)
+
+    assert captured.get("bad", {}).get("status") == 404
+
+
+def test_session_archive_rejects_session_from_inactive_profile():
+    """POST /api/session/archive must not archive a foreign-profile session."""
+    import api.routes as routes
+
+    captured, fake_bad, fake_j = _post_capture()
+    foreign = SimpleNamespace(profile="other", _loaded_metadata_only=False, archived=False)
+    parsed = urlparse("/api/session/archive")
+    body = {"session_id": "foreign_arch_001"}
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes._check_csrf", return_value=True), \
+         patch("api.routes.read_body", return_value=body), \
+         patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_post(SimpleNamespace(headers={}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+
+
+def test_session_draft_get_rejects_session_from_inactive_profile():
+    """GET /api/session/draft must not return a foreign-profile draft."""
+    import api.routes as routes
+
+    captured, fake_bad, fake_j = _post_capture()
+    foreign = SimpleNamespace(profile="other", composer_draft={"text": "secret draft"})
+    parsed = urlparse("/api/session/draft?session_id=foreign_dr_001")
+    handler = SimpleNamespace(headers={}, command="GET")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes._check_csrf", return_value=True), \
+         patch("api.routes.read_body", return_value={}), \
+         patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_post(handler, parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile draft must not be returned"
+
+
+def test_session_title_regenerate_rejects_session_from_inactive_profile():
+    """POST /api/session/title/regenerate must not derive a title from a foreign transcript."""
+    import api.routes as routes
+
+    captured, fake_bad, fake_j = _post_capture()
+    foreign = SimpleNamespace(profile="other", read_only=False, is_imported=False,
+                              messages=[{"role": "user", "content": "x"}])
+    parsed = urlparse("/api/session/title/regenerate")
+    body = {"session_id": "foreign_tr_001"}
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes._check_csrf", return_value=True), \
+         patch("api.routes.read_body", return_value=body), \
+         patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes._ensure_full_session_before_mutation", return_value=foreign), \
+         patch("api.routes.generate_session_title_for_session", return_value=("LEAKED", "ok", "raw")), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_post(SimpleNamespace(headers={}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile title must not be generated/returned"
+
+
 # ── Cleanup ────────────────────────────────────────────────────────────────
 
 

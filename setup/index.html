@@ -2,7 +2,6 @@
 <html lang="en" data-theme="dark">
 <head>
   <script>
-    // Canonical URL: strip trailing index.html so links always show the clean path
     (function(){
       var p = window.location.pathname;
       if (p.endsWith('/index.html')) {
@@ -14,70 +13,41 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Set up Hermes WebUI — on every device</title>
-<meta name="description" content="The complete setup guide for Hermes WebUI: run the server once, then get a beautiful client app on web, Windows, Linux, macOS, iOS, and Android.">
+<meta name="description" content="The complete setup guide for Hermes WebUI: run the server once, then connect a native client on web, Windows, Linux, macOS, iOS, and Android.">
 <meta property="og:title" content="Set up Hermes WebUI — on every device">
-<meta property="og:description" content="Run the server once, then get a native client on every device. The full cross-platform setup guide for Hermes WebUI.">
+<meta property="og:description" content="Run the server once, then connect a native client on every device. The full cross-platform setup guide for Hermes WebUI.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://get-hermes.ai/setup/">
 <meta property="og:image" content="https://get-hermes.ai/images/ui-hero.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Set up Hermes WebUI — on every device">
-<meta name="twitter:description" content="Run the server once, then get a native client on every device.">
+<meta name="twitter:description" content="Run the server once, then connect a native client on every device.">
 <meta name="twitter:image" content="https://get-hermes.ai/images/ui-hero.png">
 <style>
   :root {
-    --bg-primary: #0d1117;
-    --bg-secondary: #161b22;
-    --bg-tertiary: #21262d;
-    --bg-card: #161b22;
-    --border: #30363d;
-    --text-primary: #e6edf3;
-    --text-secondary: #8b949e;
-    --text-muted: #6e7681;
-    --accent: #f0a500;
-    --accent-dim: #c88800;
-    --accent-glow: rgba(240,165,0,0.15);
-    --green: #3fb950;
-    --blue: #58a6ff;
-    --purple: #bc8cff;
-    --red: #f85149;
+    --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-tertiary: #21262d;
+    --bg-card: #161b22; --border: #30363d;
+    --text-primary: #e6edf3; --text-secondary: #8b949e; --text-muted: #6e7681;
+    --accent: #f0a500; --accent-dim: #c88800; --accent-glow: rgba(240,165,0,0.15);
+    --green: #3fb950; --blue: #58a6ff; --purple: #bc8cff; --red: #f85149;
     --nav-height: 64px;
+    --c-apple: #e6edf3; --c-windows: #2f9bff; --c-android: #3DDC84; --c-linux: #f0a500; --c-web: #58a6ff;
   }
   [data-theme="light"] nav { background: rgba(246, 248, 250, 0.95); }
   [data-theme="light"] {
-    --bg-primary: #ffffff;
-    --bg-secondary: #f6f8fa;
-    --bg-tertiary: #eaeef2;
-    --bg-card: #ffffff;
-    --border: #d0d7de;
-    --text-primary: #1f2328;
-    --text-secondary: #656d76;
-    --text-muted: #9198a1;
-    --accent: #c07800;
-    --accent-dim: #9a6200;
-    --accent-glow: rgba(192,120,0,0.12);
+    --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-tertiary: #eaeef2;
+    --bg-card: #ffffff; --border: #d0d7de;
+    --text-primary: #1f2328; --text-secondary: #656d76; --text-muted: #9198a1;
+    --accent: #c07800; --accent-dim: #9a6200; --accent-glow: rgba(192,120,0,0.12);
+    --c-apple: #1f2328; --c-windows: #0067c0;
   }
-
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    line-height: 1.6;
-    min-height: 100vh;
-  }
+  html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.6; min-height: 100vh; overflow-x: hidden; }
   a { color: var(--accent); }
 
   /* NAV */
-  nav {
-    position: sticky; top: 0; height: var(--nav-height);
-    background: rgba(13, 17, 23, 0.92);
-    border-bottom: 1px solid var(--border);
-    backdrop-filter: blur(12px);
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0 24px; z-index: 100;
-  }
+  nav { position: sticky; top: 0; height: var(--nav-height); background: rgba(13,17,23,0.92); border-bottom: 1px solid var(--border); backdrop-filter: blur(12px); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; z-index: 100; }
   .nav-logo { font-size: 1.1rem; font-weight: 700; color: var(--accent); text-decoration: none; display: flex; align-items: center; gap: 8px; }
   .nav-logo span { font-size: 1.4rem; }
   .nav-right { display: flex; align-items: center; gap: 12px; }
@@ -85,164 +55,213 @@
   .nav-back:hover { color: var(--text-primary); }
   #theme-toggle { background: none; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 1rem; color: var(--text-primary); transition: border-color 0.2s; }
   #theme-toggle:hover { border-color: var(--accent); }
-  .btn-cta { background: var(--accent); color: #000; border: none; border-radius: 8px; padding: 8px 18px; font-size: 0.85rem; font-weight: 600; cursor: pointer; text-decoration: none; transition: opacity 0.2s; }
-  .btn-cta:hover { opacity: 0.85; }
-
+  .btn-cta { background: var(--accent); color: #000; border: none; border-radius: 8px; padding: 8px 18px; font-size: 0.85rem; font-weight: 600; cursor: pointer; text-decoration: none; transition: opacity 0.2s, transform 0.15s; }
+  .btn-cta:hover { opacity: 0.9; transform: translateY(-1px); }
   .hamburger { display: none; flex-direction: column; gap: 5px; background: none; border: 1px solid var(--border); border-radius: 6px; padding: 9px 8px; cursor: pointer; transition: border-color 0.15s; flex-shrink: 0; }
   .hamburger:hover { border-color: var(--accent); }
   .hamburger span { display: block; width: 20px; height: 2px; background: var(--text-secondary); border-radius: 2px; transition: transform 0.2s, opacity 0.2s; }
   .hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
   .hamburger.open span:nth-child(2) { opacity: 0; }
   .hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
-  #setup-mobile-menu {
-    display: none; position: fixed; top: var(--nav-height); left: 0; right: 0;
-    background: var(--bg-secondary); border-bottom: 1px solid var(--border);
-    padding: 16px 24px; z-index: 999; flex-direction: column; gap: 4px;
-  }
+  #setup-mobile-menu { display: none; position: fixed; top: var(--nav-height); left: 0; right: 0; background: var(--bg-secondary); border-bottom: 1px solid var(--border); padding: 16px 24px; z-index: 999; flex-direction: column; gap: 4px; }
   #setup-mobile-menu.open { display: flex; }
   #setup-mobile-menu a { color: var(--text-secondary); font-size: 0.95rem; font-weight: 500; padding: 10px 12px; border-radius: 6px; transition: color 0.15s, background 0.15s; text-decoration: none; }
   #setup-mobile-menu a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
   #setup-mobile-menu a.accent { color: var(--accent); }
 
-  .wrap { max-width: 920px; margin: 0 auto; padding: 0 24px; }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 24px; }
+
+  /* ICON SYSTEM */
+  .bi { width: 1em; height: 1em; display: inline-block; vertical-align: -0.125em; fill: currentColor; }
+  .icon-tile { width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center; background: var(--bg-card); border: 1px solid var(--border); flex-shrink: 0; transition: transform 0.2s ease, border-color 0.2s ease; }
+  .icon-tile svg { width: 26px; height: 26px; fill: var(--text-primary); transition: transform 0.2s ease; }
 
   /* HERO */
-  .hero { text-align: center; padding: 72px 24px 40px; position: relative; overflow: hidden; }
-  .hero::before {
-    content: ''; position: absolute; top: -40%; left: 50%; transform: translateX(-50%);
-    width: 680px; height: 680px; background: radial-gradient(circle, var(--accent-glow) 0%, transparent 60%);
-    pointer-events: none; z-index: 0;
-  }
+  .hero { text-align: center; padding: 88px 24px 52px; position: relative; overflow: hidden; }
+  .hero::before { content: ''; position: absolute; inset: -50% 0 auto 0; height: 760px; left: 50%; width: 880px; transform: translateX(-50%); background: radial-gradient(closest-side, var(--accent-glow) 0%, transparent 75%); pointer-events: none; z-index: 0; animation: heroPulse 9s ease-in-out infinite; }
+  @keyframes heroPulse { 0%,100% { opacity: 0.7; transform: translateX(-50%) scale(1); } 50% { opacity: 1; transform: translateX(-50%) scale(1.08); } }
   .hero > * { position: relative; z-index: 1; }
-  .hero-badge {
-    display: inline-block; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.04em;
-    text-transform: uppercase; color: var(--accent); background: var(--accent-glow);
-    border: 1px solid var(--accent-dim); border-radius: 999px; padding: 5px 14px; margin-bottom: 22px;
-  }
-  .hero h1 { font-size: clamp(2rem, 5vw, 3.1rem); font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; margin-bottom: 18px; }
-  .hero h1 em { color: var(--accent); font-style: normal; }
-  .hero-sub { font-size: clamp(1.02rem, 2.2vw, 1.22rem); color: var(--text-secondary); max-width: 660px; margin: 0 auto 14px; }
+  .hero-badge { display: inline-flex; align-items:center; gap:7px; font-size: 0.76rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); background: var(--accent-glow); border: 1px solid var(--accent-dim); border-radius: 999px; padding: 6px 15px; margin-bottom: 24px; }
+  .hero-badge::before { content:''; width:6px; height:6px; border-radius:50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: blink 2s ease-in-out infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .hero h1 { font-size: clamp(2.1rem, 6vw, 3.4rem); font-weight: 800; line-height: 1.08; letter-spacing: -0.025em; margin-bottom: 20px; }
+  .hero h1 em { color: var(--accent); font-style: normal; position: relative; }
+  .hero-sub { font-size: clamp(1.02rem, 2.4vw, 1.2rem); color: var(--text-secondary); max-width: 600px; margin: 0 auto; }
 
-  /* TWO-STEP FLOW STRIP */
-  .flowstrip { display: flex; align-items: stretch; justify-content: center; gap: 0; flex-wrap: wrap; margin: 40px auto 8px; max-width: 760px; }
-  .flowstep {
-    flex: 1; min-width: 220px; background: var(--bg-tertiary); border: 1px solid var(--border);
-    border-radius: 14px; padding: 22px 22px; text-align: left; position: relative;
-  }
-  .flowstep .fs-num { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
-  .flowstep h3 { font-size: 1.12rem; margin: 6px 0 6px; }
+  /* FLOW STRIP (the two-step intro) */
+  .flowstrip { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch; gap: 18px; margin: 48px auto 0; max-width: 720px; }
+  .flowstep { display: block; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 16px; padding: 24px; text-align: left; text-decoration: none; color: inherit; position: relative; transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; }
+  .flowstep:hover { transform: translateY(-4px); border-color: var(--accent-dim); box-shadow: 0 12px 32px rgba(0,0,0,0.28); }
+  .flowstep:hover .icon-tile { transform: scale(1.06); border-color: var(--accent-dim); }
+  .flowstep:hover .icon-tile svg { transform: scale(1.08); }
+  .flowstep .fs-top { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+  .flowstep .icon-tile svg { fill: var(--accent); }
+  .flowstep .fs-num { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+  .flowstep h3 { font-size: 1.18rem; margin: 2px 0 0; }
   .flowstep p { font-size: 0.92rem; color: var(--text-secondary); margin: 0; }
-  .flowstep .fs-emoji { font-size: 1.6rem; position: absolute; top: 18px; right: 20px; }
-  .flowarrow { display: flex; align-items: center; justify-content: center; color: var(--accent); font-size: 1.6rem; padding: 0 14px; flex-shrink: 0; }
-  @media (max-width: 620px) { .flowarrow { transform: rotate(90deg); padding: 8px 0; } }
+  .flowarrow { display: flex; align-items: center; justify-content: center; color: var(--accent); flex-shrink: 0; }
+  .flowarrow svg { width: 26px; height: 26px; fill: var(--accent); }
+  @media (max-width: 640px) {
+    .flowstrip { grid-template-columns: 1fr; gap: 14px; margin-top: 36px; }
+    .flowarrow { transform: rotate(90deg); padding: 2px 0; }
+    .flowarrow svg { width: 22px; height: 22px; }
+  }
 
   /* SECTION */
-  .section { padding: 56px 0 8px; }
-  .section-head { margin-bottom: 26px; }
-  .step-eyebrow { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); display: flex; align-items: center; gap: 10px; }
-  .step-eyebrow .step-dot { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #000; font-weight: 800; font-size: 0.85rem; }
-  .section h2 { font-size: clamp(1.5rem, 3.5vw, 2rem); font-weight: 800; letter-spacing: -0.01em; margin: 12px 0 8px; }
-  .section .lead { font-size: 1.02rem; color: var(--text-secondary); max-width: 700px; }
-  .section h3.sub { font-size: 1.1rem; margin: 28px 0 8px; }
+  .section { padding: 60px 0 8px; }
+  .section-head { margin-bottom: 28px; }
+  .step-eyebrow { font-size: 0.76rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); display: flex; align-items: center; gap: 12px; }
+  .step-eyebrow .step-dot { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: #000; font-weight: 800; font-size: 0.92rem; box-shadow: 0 0 0 5px var(--accent-glow); }
+  .section h2 { font-size: clamp(1.55rem, 4vw, 2.05rem); font-weight: 800; letter-spacing: -0.015em; margin: 14px 0 8px; }
+  .section .lead { font-size: 1.02rem; color: var(--text-secondary); max-width: 720px; }
+  .section h3.sub { font-size: 1.12rem; margin: 30px 0 8px; }
   .section p { color: var(--text-secondary); margin-bottom: 12px; }
-  .section p code, li code { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-size: 0.86em; color: var(--text-primary); font-family: 'SF Mono', ui-monospace, Menlo, monospace; }
+  code { font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; }
+  .section p code, li code, td code { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-size: 0.86em; color: var(--text-primary); }
 
-  /* ARCHITECTURE EXPLAINER */
-  .archcard { background: var(--bg-tertiary); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 12px; padding: 20px 22px; margin: 8px 0 4px; }
+  .archcard { display:flex; gap:16px; align-items:flex-start; background: var(--bg-tertiary); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 14px; padding: 22px 24px; }
+  .archcard .icon-tile svg { fill: var(--accent); }
   .archcard b { color: var(--text-primary); }
 
   /* CODE BLOCK */
-  .code { position: relative; background: #0d1117; border: 1px solid var(--border); border-radius: 10px; margin: 10px 0 18px; overflow: hidden; }
-  [data-theme="light"] .code { background: #0d1117; }
+  .code { position: relative; background: #0d1117; border: 1px solid #30363d; border-radius: 10px; margin: 10px 0 18px; overflow: hidden; }
   .code-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid #21262d; background: #161b22; }
   .code-label { font-size: 0.74rem; color: #8b949e; font-family: 'SF Mono', ui-monospace, Menlo, monospace; letter-spacing: 0.02em; }
-  .code-copy { background: none; border: 1px solid #30363d; color: #8b949e; border-radius: 6px; padding: 3px 10px; font-size: 0.74rem; cursor: pointer; transition: all 0.15s; }
+  .code-copy { background: none; border: 1px solid #30363d; color: #8b949e; border-radius: 6px; padding: 3px 12px; font-size: 0.74rem; cursor: pointer; transition: all 0.15s; }
   .code-copy:hover { border-color: var(--accent); color: var(--accent); }
   .code pre { margin: 0; padding: 14px 16px; overflow-x: auto; }
-  .code code { font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 0.85rem; line-height: 1.7; color: #e6edf3; white-space: pre; }
+  .code code { font-size: 0.85rem; line-height: 1.7; color: #e6edf3; white-space: pre; }
   .code .c-cmt { color: #6e7681; }
-  .code .c-flag { color: #79c0ff; }
   .code .c-str { color: #a5d6ff; }
 
   /* PLATFORM GRID */
-  .your-device-banner {
-    display: none; align-items: center; gap: 10px; background: var(--accent-glow);
-    border: 1px solid var(--accent-dim); border-radius: 10px; padding: 12px 16px; margin: 4px 0 22px;
-    font-size: 0.92rem; color: var(--text-primary);
-  }
+  .your-device-banner { display: none; align-items: center; gap: 12px; background: var(--accent-glow); border: 1px solid var(--accent-dim); border-radius: 12px; padding: 13px 18px; margin: 4px 0 24px; font-size: 0.93rem; color: var(--text-primary); }
   .your-device-banner.show { display: flex; }
   .your-device-banner b { color: var(--accent); }
+  .your-device-banner .icon-tile { width: 38px; height: 38px; border-radius: 10px; }
+  .your-device-banner .icon-tile svg { width: 19px; height: 19px; fill: var(--accent); }
   .platform-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 6px 0 8px; }
   .platform-grid > * { min-width: 0; }
-  @media (max-width: 760px) { .platform-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 460px) { .platform-grid { grid-template-columns: 1fr; } }
-  .pcard {
-    display: flex; flex-direction: column; background: var(--bg-tertiary); border: 1px solid var(--border);
-    border-radius: 14px; padding: 20px; text-decoration: none; color: var(--text-primary);
-    transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s; position: relative; overflow: hidden;
-  }
-  .pcard:hover { transform: translateY(-3px); border-color: var(--accent-dim); box-shadow: 0 8px 28px rgba(0,0,0,0.25); }
-  .pcard.is-you { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-dim); }
-  .pcard .p-emoji { font-size: 2rem; line-height: 1; margin-bottom: 12px; }
-  .pcard .p-name { font-size: 1.12rem; font-weight: 700; margin-bottom: 3px; }
-  .pcard .p-meta { font-size: 0.82rem; color: var(--text-muted); margin-bottom: 14px; }
-  .pcard .p-desc { font-size: 0.9rem; color: var(--text-secondary); flex: 1; margin-bottom: 16px; }
-  .pcard .p-link { font-size: 0.88rem; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 5px; }
-  .pcard .p-badge { position: absolute; top: 14px; right: 14px; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #000; background: var(--accent); border-radius: 999px; padding: 3px 9px; opacity: 0; transition: opacity 0.15s; }
-  .pcard.is-you .p-badge { opacity: 1; }
+  @media (max-width: 780px) { .platform-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 480px) { .platform-grid { grid-template-columns: 1fr; } }
+  .pcard { display: flex; flex-direction: column; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 16px; padding: 22px; text-decoration: none; color: var(--text-primary); transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; position: relative; overflow: hidden; }
+  .pcard::after { content: ''; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--p-color, var(--accent)); opacity: 0; transition: opacity 0.18s ease; }
+  .pcard:hover { transform: translateY(-4px); border-color: var(--p-color, var(--accent-dim)); box-shadow: 0 12px 34px rgba(0,0,0,0.3); }
+  .pcard:hover::after { opacity: 1; }
+  .pcard:hover .icon-tile { transform: scale(1.07); }
+  .pcard:hover .p-link svg { transform: translate(2px,-2px); }
+  .pcard.is-you { border-color: var(--p-color, var(--accent)); box-shadow: 0 0 0 1px var(--p-color, var(--accent-dim)), 0 8px 28px rgba(0,0,0,0.25); }
+  .pcard.is-you::after { opacity: 1; }
+  .pcard .icon-tile { margin-bottom: 16px; }
+  .pcard .icon-tile svg { fill: var(--p-color, var(--text-primary)); }
+  .pcard .p-name { font-size: 1.14rem; font-weight: 700; margin-bottom: 3px; }
+  .pcard .p-meta { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 14px; }
+  .pcard .p-desc { font-size: 0.89rem; color: var(--text-secondary); flex: 1; margin-bottom: 18px; }
+  .pcard .p-link { font-size: 0.88rem; font-weight: 600; color: var(--p-color, var(--accent)); display: inline-flex; align-items: center; gap: 6px; }
+  .pcard .p-link svg { width: 13px; height: 13px; fill: currentColor; transition: transform 0.18s ease; }
+  .pcard .p-badge { position: absolute; top: 16px; right: 16px; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #000; background: var(--accent); border-radius: 999px; padding: 3px 10px; opacity: 0; transform: translateY(-4px); transition: opacity 0.2s, transform 0.2s; }
+  .pcard.is-you .p-badge { opacity: 1; transform: none; }
+  .pcard[data-os="web"]     { --p-color: var(--c-web); }
+  .pcard[data-os="windows"] { --p-color: var(--c-windows); }
+  .pcard[data-os="linux"]   { --p-color: var(--c-linux); }
+  .pcard[data-os="mac"]     { --p-color: var(--c-apple); }
+  .pcard[data-os="ios"]     { --p-color: var(--c-apple); }
+  .pcard[data-os="android"] { --p-color: var(--c-android); }
 
-  /* TWO-COL OPTIONS (reachable) */
-  .opt-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 8px 0; }
+  /* OPTIONS (reachable) */
+  .opt-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 8px 0; }
   .opt-grid > * { min-width: 0; }
-  @media (max-width: 720px) { .opt-grid { grid-template-columns: 1fr; } }
-  .opt { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
-  .opt h4 { font-size: 1rem; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
-  .opt .opt-tag { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 999px; }
+  @media (max-width: 860px) { .opt-grid { grid-template-columns: 1fr; } }
+  .opt { display: flex; flex-direction: column; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 14px; padding: 20px; transition: border-color 0.18s ease, transform 0.18s ease; }
+  .opt:hover { border-color: var(--accent-dim); transform: translateY(-3px); }
+  .opt h4 { font-size: 1.02rem; margin-bottom: 8px; display: flex; align-items: center; gap: 9px; }
+  .opt h4 svg { width: 18px; height: 18px; fill: var(--accent); flex-shrink: 0; }
+  .opt .opt-tag { font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 8px; border-radius: 999px; margin-left: auto; }
   .opt .opt-tag.public { background: rgba(88,166,255,0.15); color: var(--blue); border: 1px solid rgba(88,166,255,0.3); }
   .opt .opt-tag.private { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.3); }
-  .opt p { font-size: 0.9rem; margin-bottom: 8px; }
+  .opt .opt-tag.vps { background: rgba(188,140,255,0.15); color: var(--purple); border: 1px solid rgba(188,140,255,0.3); }
+  .opt p { font-size: 0.88rem; margin-bottom: 8px; }
+  .opt .code { margin-top: auto; }
+
+  /* WHICH-URL TABLE */
+  .urltable-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; margin: 8px 0 4px; }
+  table.urltable { width: 100%; border-collapse: collapse; font-size: 0.9rem; min-width: 520px; }
+  table.urltable th, table.urltable td { text-align: left; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+  table.urltable thead th { background: var(--bg-secondary); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 700; }
+  table.urltable tr:last-child td { border-bottom: none; }
+  table.urltable td:first-child { color: var(--text-primary); font-weight: 600; white-space: nowrap; }
+  table.urltable td .where-sub { display:block; font-weight: 400; color: var(--text-muted); font-size: 0.8rem; }
+  table.urltable code { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; padding: 2px 7px; font-size: 0.82rem; color: var(--accent); white-space: nowrap; }
 
   /* ECOSYSTEM */
   .eco-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 8px; }
   .eco-grid > * { min-width: 0; }
   @media (max-width: 720px) { .eco-grid { grid-template-columns: 1fr; } }
-  .eco { display: flex; gap: 16px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 14px; padding: 20px; text-decoration: none; color: var(--text-primary); transition: transform 0.15s, border-color 0.15s; }
-  .eco:hover { transform: translateY(-3px); border-color: var(--accent-dim); }
-  .eco .eco-emoji { font-size: 1.9rem; line-height: 1; }
+  .eco { display: flex; gap: 16px; align-items: flex-start; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 16px; padding: 22px; text-decoration: none; color: var(--text-primary); transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; }
+  .eco:hover { transform: translateY(-4px); border-color: var(--accent-dim); box-shadow: 0 12px 30px rgba(0,0,0,0.28); }
+  .eco:hover .icon-tile { transform: scale(1.07); }
+  .eco .icon-tile svg { fill: var(--accent); }
   .eco h4 { font-size: 1.05rem; margin-bottom: 4px; }
   .eco p { font-size: 0.88rem; color: var(--text-secondary); margin: 0; }
-  .eco .eco-link { font-size: 0.84rem; color: var(--accent); font-weight: 600; margin-top: 8px; display: inline-block; }
+  .eco .eco-link { font-size: 0.84rem; color: var(--accent); font-weight: 600; margin-top: 10px; display: inline-flex; align-items: center; gap: 6px; }
+  .eco .eco-link svg { width: 12px; height: 12px; fill: currentColor; }
 
   /* CALLOUT */
-  .callout { background: var(--accent-glow); border: 1px solid var(--accent-dim); border-radius: 12px; padding: 16px 20px; margin: 18px 0; font-size: 0.94rem; }
+  .callout { display:flex; gap:14px; align-items:flex-start; background: var(--accent-glow); border: 1px solid var(--accent-dim); border-radius: 14px; padding: 16px 20px; margin: 20px 0; font-size: 0.93rem; }
+  .callout .icon-tile { width:38px; height:38px; border-radius:10px; background: transparent; border: none; }
+  .callout .icon-tile svg { width: 22px; height: 22px; fill: var(--accent); }
   .callout b { color: var(--accent); }
+  .callout.success { background: rgba(63,185,80,0.1); border-color: rgba(63,185,80,0.4); }
+  .callout.success .icon-tile svg, .callout.success b { fill: var(--green); color: var(--green); }
 
   /* TROUBLESHOOT */
   .faq { border-top: 1px solid var(--border); }
   .faq details { border-bottom: 1px solid var(--border); }
-  .faq summary { cursor: pointer; padding: 16px 4px; font-weight: 600; font-size: 0.98rem; list-style: none; display: flex; justify-content: space-between; align-items: center; }
+  .faq summary { cursor: pointer; padding: 17px 4px; font-weight: 600; font-size: 0.98rem; list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 16px; transition: color 0.15s; }
+  .faq summary:hover { color: var(--accent); }
   .faq summary::-webkit-details-marker { display: none; }
-  .faq summary::after { content: '+'; color: var(--accent); font-size: 1.3rem; font-weight: 400; }
+  .faq summary::after { content: '+'; color: var(--accent); font-size: 1.4rem; font-weight: 400; transition: transform 0.2s; flex-shrink: 0; }
   .faq details[open] summary::after { content: '−'; }
-  .faq details p { font-size: 0.92rem; padding: 0 4px 18px; margin: 0; }
+  .faq details p { font-size: 0.92rem; padding: 0 4px 18px; margin: 0; color: var(--text-secondary); }
 
   /* FINAL CTA */
-  .final-cta { text-align: center; padding: 56px 24px 40px; }
-  .final-cta h2 { font-size: 1.6rem; margin-bottom: 10px; }
-  .final-cta p { color: var(--text-secondary); margin-bottom: 22px; }
+  .final-cta { text-align: center; padding: 64px 24px 48px; position: relative; }
+  .final-cta h2 { font-size: 1.7rem; margin-bottom: 10px; }
+  .final-cta p { color: var(--text-secondary); margin-bottom: 24px; }
   .btn-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-  .btn-primary { background: var(--accent); color: #000; font-weight: 700; padding: 12px 26px; border-radius: 10px; text-decoration: none; font-size: 0.98rem; transition: opacity 0.15s; }
-  .btn-primary:hover { opacity: 0.88; }
-  .btn-ghost { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); font-weight: 600; padding: 12px 26px; border-radius: 10px; text-decoration: none; font-size: 0.98rem; transition: border-color 0.15s; }
-  .btn-ghost:hover { border-color: var(--accent); }
+  .btn-primary { background: var(--accent); color: #000; font-weight: 700; padding: 13px 28px; border-radius: 10px; text-decoration: none; font-size: 0.98rem; transition: opacity 0.15s, transform 0.15s; }
+  .btn-primary:hover { opacity: 0.9; transform: translateY(-2px); }
+  .btn-ghost { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); font-weight: 600; padding: 13px 28px; border-radius: 10px; text-decoration: none; font-size: 0.98rem; transition: border-color 0.15s, transform 0.15s; }
+  .btn-ghost:hover { border-color: var(--accent); transform: translateY(-2px); }
 
   footer { text-align: center; padding: 40px 24px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.88rem; }
   footer a { color: var(--accent); text-decoration: none; }
 
+  /* SCROLL REVEAL */
+  .reveal { opacity: 0; transform: translateY(22px); transition: opacity 0.6s cubic-bezier(0.16,1,0.3,1), transform 0.6s cubic-bezier(0.16,1,0.3,1); }
+  .reveal.in { opacity: 1; transform: none; }
+  .stagger > * { opacity: 0; transform: translateY(20px); transition: opacity 0.5s cubic-bezier(0.16,1,0.3,1), transform 0.5s cubic-bezier(0.16,1,0.3,1); }
+  .stagger.in > * { opacity: 1; transform: none; }
+  .stagger.in > *:nth-child(2) { transition-delay: 0.06s; }
+  .stagger.in > *:nth-child(3) { transition-delay: 0.12s; }
+  .stagger.in > *:nth-child(4) { transition-delay: 0.18s; }
+  .stagger.in > *:nth-child(5) { transition-delay: 0.24s; }
+  .stagger.in > *:nth-child(6) { transition-delay: 0.30s; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .reveal, .stagger > * { opacity: 1 !important; transform: none !important; transition: none !important; }
+    .hero::before { animation: none; }
+    .hero-badge::before { animation: none; }
+  }
+
   @media (max-width: 640px) {
+    .wrap { padding: 0 18px; }
+    .hero { padding: 60px 20px 40px; }
+    .section { padding: 46px 0 8px; }
     .hamburger { display: flex; }
     .btn-cta { display: none; }
     .nav-back { display: none; }
+    .archcard { padding: 18px; }
   }
 </style>
 </head>
@@ -264,7 +283,7 @@
   <a href="../">⚡ Hermes Home</a>
   <a href="#server">1 · Run the server</a>
   <a href="#reach">2 · Make it reachable</a>
-  <a href="#apps">3 · Get your app</a>
+  <a href="#apps">3 · Connect your app</a>
   <a href="#ecosystem">Ecosystem</a>
   <a href="#troubleshooting">Troubleshooting</a>
   <a href="../eli5/" class="accent">🧠 ELI5 — What is Hermes?</a>
@@ -276,20 +295,22 @@
 <section class="hero">
   <div class="hero-badge">Setup guide</div>
   <h1>Hermes, on <em>every</em> device</h1>
-  <p class="hero-sub">Hermes WebUI is your personal Hermes backend — run it once, then reach it from a clean, native client on the web, your desktop, and your phone. A Claude- or Codex-style experience everywhere, no terminal required.</p>
-  <div class="flowstrip">
-    <a class="flowstep" href="#server" style="text-decoration:none;color:inherit">
-      <span class="fs-emoji">🚀</span>
-      <div class="fs-num">Step 1</div>
-      <h3>Run the server</h3>
-      <p>One clone, one command. This is the brain — your sessions, memory, and agent live here.</p>
+  <p class="hero-sub">Run one server. Connect a native app from your laptop, your phone, or any browser. Your sessions, memory, and agent travel with you.</p>
+  <div class="flowstrip stagger reveal">
+    <a class="flowstep" href="#server">
+      <div class="fs-top">
+        <span class="icon-tile"><svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M64 32C28.7 32 0 60.7 0 96l0 64c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-64c0-35.3-28.7-64-64-64L64 32zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm48 24a24 24 0 1 1 48 0 24 24 0 1 1 -48 0zM64 288c-35.3 0-64 28.7-64 64l0 64c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-64c0-35.3-28.7-64-64-64L64 288zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm56 24a24 24 0 1 1 48 0 24 24 0 1 1 -48 0z"/></svg></span>
+        <div><div class="fs-num">Step 1</div><h3>Run the server</h3></div>
+      </div>
+      <p>One clone, one command. This is the brain — your data and agent live here.</p>
     </a>
-    <div class="flowarrow">→</div>
-    <a class="flowstep" href="#apps" style="text-decoration:none;color:inherit">
-      <span class="fs-emoji">📲</span>
-      <div class="fs-num">Step 2</div>
-      <h3>Get your app</h3>
-      <p>Install a client on each device you use and point it at your server. That's it.</p>
+    <div class="flowarrow"><svg viewBox="0 0 448 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M438.6 150.6c12.5-12.5 12.5-32.8 0-45.3l-96-96c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L338.7 96 32 96C14.3 96 0 110.3 0 128s14.3 32 32 32l306.7 0-41.4 41.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l96-96zm-333.3 352c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 416 416 416c17.7 0 32-14.3 32-32s-14.3-32-32-32l-306.7 0 41.4-41.4c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-96 96c-12.5 12.5-12.5 32.8 0 45.3l96 96z"/></svg></div>
+    <a class="flowstep" href="#apps">
+      <div class="fs-top">
+        <span class="icon-tile"><svg viewBox="0 0 384 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M16 64C16 28.7 44.7 0 80 0L304 0c35.3 0 64 28.7 64 64l0 384c0 35.3-28.7 64-64 64L80 512c-35.3 0-64-28.7-64-64L16 64zM224 448a32 32 0 1 0 -64 0 32 32 0 1 0 64 0zM304 64L80 64l0 320 224 0 0-320z"/></svg></span>
+        <div><div class="fs-num">Step 2</div><h3>Connect an app</h3></div>
+      </div>
+      <p>Install a client on each device and point it at your server. Done.</p>
     </a>
   </div>
 </section>
@@ -297,8 +318,9 @@
 <!-- ARCHITECTURE -->
 <section class="section" id="how">
   <div class="wrap">
-    <div class="archcard">
-      <p style="margin:0;color:var(--text-secondary)"><b>How it fits together.</b> Hermes WebUI is a complete Hermes backend API — one server that holds your conversations, memory, scheduled jobs, workspace, and the full power of the Hermes Agent. Every app below is a <b>client</b> that connects to that one server, so your context follows you from laptop to phone to browser. Set the server up once; add as many clients as you like.</p>
+    <div class="archcard reveal">
+      <span class="icon-tile"><svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M64 32C28.7 32 0 60.7 0 96l0 64c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-64c0-35.3-28.7-64-64-64L64 32zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm48 24a24 24 0 1 1 48 0 24 24 0 1 1 -48 0zM64 288c-35.3 0-64 28.7-64 64l0 64c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-64c0-35.3-28.7-64-64-64L64 288zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm56 24a24 24 0 1 1 48 0 24 24 0 1 1 -48 0z"/></svg></span>
+      <p style="margin:0;color:var(--text-secondary)"><b>How it fits together.</b> Hermes WebUI is a full Hermes backend — one server holding your conversations, memory, scheduled jobs, workspace, and the whole Hermes Agent. Every app below is a <b>client</b> that connects to that server, so the same Hermes follows you across devices. Set the server up once, then connect as many clients as you want.</p>
     </div>
   </div>
 </section>
@@ -306,74 +328,88 @@
 <!-- STEP 1 — SERVER -->
 <section class="section" id="server">
   <div class="wrap">
-    <div class="section-head">
+    <div class="section-head reveal">
       <div class="step-eyebrow"><span class="step-dot">1</span> Run the server</div>
       <h2>Stand up Hermes WebUI</h2>
-      <p class="lead">On any machine you control — macOS, Linux, or Windows via WSL2 — with <code>Python 3.11+</code> and <code>git</code>. The bootstrap finds or installs Hermes Agent for you, sets up the environment, and walks you through first-run onboarding.</p>
+      <p class="lead">On any machine you control — macOS, Linux, or Windows via WSL2 — with <code>Python 3.11+</code> and <code>git</code>. The bootstrap finds or installs Hermes Agent, sets up the environment, and walks you through first-run onboarding.</p>
     </div>
 
-    <div class="code">
+    <div class="code reveal">
       <div class="code-head"><span class="code-label">bash — clone &amp; start</span><button class="code-copy">Copy</button></div>
       <pre><code>git clone https://github.com/nesquena/hermes-webui.git
 cd hermes-webui
 python3 bootstrap.py</code></pre>
     </div>
-    <p>By default the server listens on <code>127.0.0.1:8787</code> — local-only until you expose it in Step 2. Open that URL in any browser and you already have the full Web UI. To relaunch later, run <code>./start.sh</code> from the repo.</p>
+    <p class="reveal">By default the server listens on <code>127.0.0.1:8787</code> — local-only until you expose it in Step 2. Open that URL in any browser and the full Web UI is already there. To relaunch later, run <code>./start.sh</code>.</p>
 
-    <h3 class="sub">Need Hermes Agent first?</h3>
-    <p>Hermes WebUI runs on top of the <a href="https://hermes-agent.nousresearch.com/" target="_blank">Hermes Agent</a>. If it's not already installed, <code>bootstrap.py</code> offers to install it — or set it up directly:</p>
-    <div class="code">
+    <h3 class="sub reveal">Need Hermes Agent first?</h3>
+    <p class="reveal">Hermes WebUI runs on the <a href="https://hermes-agent.nousresearch.com/" target="_blank">Hermes Agent</a>. If it isn't installed, <code>bootstrap.py</code> offers to install it — or set it up directly:</p>
+    <div class="code reveal">
       <div class="code-head"><span class="code-label">bash — install Hermes Agent</span><button class="code-copy">Copy</button></div>
       <pre><code>curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 source ~/.bashrc      <span class="c-cmt"># reload your shell</span>
 hermes model          <span class="c-cmt"># choose your LLM provider</span></code></pre>
     </div>
-    <p>Full agent walkthrough: <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank">the Hermes installation guide →</a></p>
+    <p class="reveal">Full walkthrough: <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank">the Hermes installation guide →</a></p>
 
-    <h3 class="sub">Set a password before you expose it</h3>
-    <p>Auth is off by default on localhost. Before putting the server on a network (Step 2), set a password — either in the Web UI's Settings panel, or inline:</p>
-    <div class="code">
+    <h3 class="sub reveal">Set a password before you expose it</h3>
+    <p class="reveal">Auth is off by default on localhost. Before putting the server on a network (Step 2), set a password — in the Web UI's Settings panel, or inline:</p>
+    <div class="code reveal">
       <div class="code-head"><span class="code-label">bash — start with a password</span><button class="code-copy">Copy</button></div>
-      <pre><code>HERMES_WEBUI_PASSWORD=<span class="c-str">your-secret</span> ./start.sh</code></pre>
+      <pre><code>HERMES_WEBUI_PASSWORD&#61;your-secret ./start.sh</code></pre>
     </div>
 
-    <h3 class="sub">Verify it's up</h3>
-    <div class="code">
+    <h3 class="sub reveal">Verify it's running</h3>
+    <div class="code reveal">
       <div class="code-head"><span class="code-label">bash — health check</span><button class="code-copy">Copy</button></div>
       <pre><code>curl http://127.0.0.1:8787/health</code></pre>
     </div>
-    <div class="callout">🎉 <b>That's the whole server.</b> If you only ever use Hermes in a browser on the same machine, you're done — open <code>http://127.0.0.1:8787</code> and start chatting. Want it on your phone or other devices? Continue below.</div>
+    <div class="callout success reveal">
+      <span class="icon-tile"><svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M64 32C28.7 32 0 60.7 0 96l0 64c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-64c0-35.3-28.7-64-64-64L64 32zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm48 24a24 24 0 1 1 48 0 24 24 0 1 1 -48 0zM64 288c-35.3 0-64 28.7-64 64l0 64c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-64c0-35.3-28.7-64-64-64L64 288zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm56 24a24 24 0 1 1 48 0 24 24 0 1 1 -48 0z"/></svg></span>
+      <div><b>That's the whole server.</b> If you only use Hermes in a browser on this same machine, you're done — open <code>http://127.0.0.1:8787</code> and start. To reach it from your phone or another computer, keep going.</div>
+    </div>
   </div>
 </section>
 
 <!-- STEP 2 — REACHABLE -->
 <section class="section" id="reach">
   <div class="wrap">
-    <div class="section-head">
+    <div class="section-head reveal">
       <div class="step-eyebrow"><span class="step-dot">2</span> Make it reachable</div>
-      <h2>Expose your server (for remote &amp; mobile clients)</h2>
-      <p class="lead">To reach the server from another device — your phone, a second laptop — give it a URL. Pick one path; both end with an address you paste into your client app. Skip this if you only use the browser on the same machine.</p>
+      <h2>Reach your server from anywhere</h2>
+      <p class="lead">On the same machine, <code>127.0.0.1:8787</code> already works — skip ahead. To connect from another device (your phone, a second laptop) or to a server in the cloud (a VPS), give it an address those devices can reach. Pick one path:</p>
     </div>
-    <div class="opt-grid">
+    <div class="opt-grid stagger reveal">
       <div class="opt">
-        <h4>🌩️ Cloudflare Tunnel <span class="opt-tag public">Public HTTPS</span></h4>
-        <p><a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank">Cloudflare Tunnel</a> dials out from your machine, so nothing is port-forwarded and TLS terminates at the edge — real HTTPS, anywhere.</p>
+        <h4><svg viewBox="0 0 640 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M256 64l128 0 0 64-128 0 0-64zM240 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l48 0 0 32L32 224c-17.7 0-32 14.3-32 32s14.3 32 32 32l96 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 256 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 96 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-256 0 0-32 48 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48L240 0zM96 448l0-64 128 0 0 64L96 448zm320-64l128 0 0 64-128 0 0-64z"/></svg> Tailscale <span class="opt-tag private">Easiest</span></h4>
+        <p><a href="https://tailscale.com/download" target="_blank">Tailscale</a> puts your devices on one private network — nothing is exposed to the internet. Install on both, sign into the same tailnet, then bind the server to all interfaces:</p>
         <div class="code">
-          <div class="code-head"><span class="code-label">bash — instant tunnel</span><button class="code-copy">Copy</button></div>
-          <pre><code>brew install cloudflared
-cloudflared tunnel --url http://localhost:8787</code></pre>
+          <div class="code-head"><span class="code-label">on the server</span><button class="code-copy">Copy</button></div>
+          <pre><code>HERMES_WEBUI_HOST=0.0.0.0 \
+HERMES_WEBUI_PASSWORD&#61;secret ./start.sh
+tailscale ip -4   <span class="c-cmt"># your 100.x address</span></code></pre>
         </div>
-        <p style="margin:0">Prints a <code>trycloudflare.com</code> URL. Your password is <b>required</b> here — the hostname is public.</p>
       </div>
       <div class="opt">
-        <h4>🔒 Tailscale <span class="opt-tag private">Private</span></h4>
-        <p><a href="https://tailscale.com/download" target="_blank">Tailscale</a> puts your server and devices on one private WireGuard network — nothing is exposed to the public internet. Install it on both, sign into the same tailnet, then:</p>
+        <h4><svg viewBox="0 0 640 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M256 64l128 0 0 64-128 0 0-64zM240 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l48 0 0 32L32 224c-17.7 0-32 14.3-32 32s14.3 32 32 32l96 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 256 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 96 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-256 0 0-32 48 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48L240 0zM96 448l0-64 128 0 0 64L96 448zm320-64l128 0 0 64-128 0 0-64z"/></svg> SSH tunnel <span class="opt-tag vps">For a VPS</span></h4>
+        <p>Already SSH into a remote box or VPS? Forward the port over your existing SSH connection — no extra software, nothing public. Run this <b>on your local machine</b>:</p>
         <div class="code">
-          <div class="code-head"><span class="code-label">bash — bind to the tailnet</span><button class="code-copy">Copy</button></div>
-          <pre><code>HERMES_WEBUI_HOST=0.0.0.0 HERMES_WEBUI_PASSWORD=<span class="c-str">your-secret</span> ./start.sh
-tailscale ip -4   <span class="c-cmt"># your server's 100.x address</span></code></pre>
+          <div class="code-head"><span class="code-label">on your laptop</span><button class="code-copy">Copy</button></div>
+          <pre><code>ssh -L 8787:localhost:8787 \
+    you@your-server</code></pre>
         </div>
-        <p style="margin:0">Your URL is <code>http://&lt;tailscale-ip&gt;:8787</code>. Plain HTTP is fine — WireGuard encrypts the wire.</p>
+        <p style="margin:0">Now <code>http://127.0.0.1:8787</code> on your laptop reaches the remote server.</p>
+      </div>
+      <div class="opt">
+        <h4><svg viewBox="0 0 640 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M256 64l128 0 0 64-128 0 0-64zM240 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l48 0 0 32L32 224c-17.7 0-32 14.3-32 32s14.3 32 32 32l96 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 256 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 96 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-256 0 0-32 48 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48L240 0zM96 448l0-64 128 0 0 64L96 448zm320-64l128 0 0 64-128 0 0-64z"/></svg> Cloudflare Tunnel <span class="opt-tag public">Public HTTPS</span></h4>
+        <p><a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank">Cloudflare Tunnel</a> dials out from your machine — no port-forwarding, real HTTPS at a public hostname.</p>
+        <div class="code">
+          <div class="code-head"><span class="code-label">on the server</span><button class="code-copy">Copy</button></div>
+          <pre><code>brew install cloudflared
+cloudflared tunnel \
+  --url http://localhost:8787</code></pre>
+        </div>
+        <p style="margin:0">Prints a public <code>trycloudflare.com</code> URL. Your password is <b>required</b> here.</p>
       </div>
     </div>
   </div>
@@ -382,98 +418,117 @@ tailscale ip -4   <span class="c-cmt"># your server's 100.x address</span></code
 <!-- STEP 3 — APPS -->
 <section class="section" id="apps">
   <div class="wrap">
-    <div class="section-head">
-      <div class="step-eyebrow"><span class="step-dot">3</span> Get your app</div>
-      <h2>Install a client on every device</h2>
-      <p class="lead">Each app is a thin, native client for the server you just stood up. Install it, paste your server URL, sign in with your password — and your Hermes goes with you. Use as many as you like; they all talk to the same backend.</p>
+    <div class="section-head reveal">
+      <div class="step-eyebrow"><span class="step-dot">3</span> Connect your app</div>
+      <h2>Get a client on every device</h2>
+      <p class="lead">Each app is a thin native client for the server you just stood up. Install it, enter your server URL, sign in — and your Hermes is there. Run as many as you like; they all share one backend.</p>
     </div>
 
-    <div class="your-device-banner" id="device-banner">
-      <span>🎯</span><span>Looks like you're on <b id="device-name">your device</b> — we've highlighted the best app for you below.</span>
+    <div class="your-device-banner reveal" id="device-banner">
+      <span class="icon-tile" id="device-icon"><svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M352 256c0 22.2-1.2 43.6-3.3 64l-185.3 0c-2.2-20.4-3.3-41.8-3.3-64s1.2-43.6 3.3-64l185.3 0c2.2 20.4 3.3 41.8 3.3 64zm28.8-64l123.1 0c5.3 20.5 8.1 41.9 8.1 64s-2.8 43.5-8.1 64l-123.1 0c2.1-20.6 3.2-42 3.2-64s-1.1-43.4-3.2-64zm112.6-32l-116.7 0c-10-63.9-29.8-117.4-55.3-151.6c78.3 20.7 142 77.5 171.9 151.6zm-149.1 0l-176.6 0c6.1-36.4 15.5-68.6 27-94.7c10.5-23.6 22.2-40.7 33.5-51.5C239.4 3.2 248.7 0 256 0s16.6 3.2 27.8 13.8c11.3 10.8 23 27.9 33.5 51.5c11.6 26 20.9 58.2 27 94.7zm-209 0L18.6 160C48.6 85.9 112.2 29.1 190.6 8.4C165.1 42.6 145.3 96.1 135.3 160zM8.1 192l123.1 0c-2.1 20.6-3.2 42-3.2 64s1.1 43.4 3.2 64L8.1 320C2.8 299.5 0 278.1 0 256s2.8-43.5 8.1-64zM194.7 446.6c-11.6-26-20.9-58.2-27-94.6l176.6 0c-6.1 36.4-15.5 68.6-27 94.6c-10.5 23.6-22.2 40.7-33.5 51.5C272.6 508.8 263.3 512 256 512s-16.6-3.2-27.8-13.8c-11.3-10.8-23-27.9-33.5-51.5zM135.3 352c10 63.9 29.8 117.4 55.3 151.6C112.2 482.9 48.6 426.1 18.6 352l116.7 0zm358.1 0c-30 74.1-93.6 130.9-171.9 151.6c25.5-34.2 45.2-87.7 55.3-151.6l116.7 0z"/></svg></span>
+      <span>You're on <b id="device-name">your device</b> — we floated the best app to the front.</span>
     </div>
 
-    <div class="platform-grid">
+    <div class="platform-grid stagger reveal">
       <a class="pcard" data-os="web" href="https://github.com/nesquena/hermes-webui" target="_blank">
-        <span class="p-badge">Recommended</span>
-        <span class="p-emoji">🌐</span>
+        <span class="p-badge">You</span>
+        <span class="icon-tile"><svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M352 256c0 22.2-1.2 43.6-3.3 64l-185.3 0c-2.2-20.4-3.3-41.8-3.3-64s1.2-43.6 3.3-64l185.3 0c2.2 20.4 3.3 41.8 3.3 64zm28.8-64l123.1 0c5.3 20.5 8.1 41.9 8.1 64s-2.8 43.5-8.1 64l-123.1 0c2.1-20.6 3.2-42 3.2-64s-1.1-43.4-3.2-64zm112.6-32l-116.7 0c-10-63.9-29.8-117.4-55.3-151.6c78.3 20.7 142 77.5 171.9 151.6zm-149.1 0l-176.6 0c6.1-36.4 15.5-68.6 27-94.7c10.5-23.6 22.2-40.7 33.5-51.5C239.4 3.2 248.7 0 256 0s16.6 3.2 27.8 13.8c11.3 10.8 23 27.9 33.5 51.5c11.6 26 20.9 58.2 27 94.7zm-209 0L18.6 160C48.6 85.9 112.2 29.1 190.6 8.4C165.1 42.6 145.3 96.1 135.3 160zM8.1 192l123.1 0c-2.1 20.6-3.2 42-3.2 64s1.1 43.4 3.2 64L8.1 320C2.8 299.5 0 278.1 0 256s2.8-43.5 8.1-64zM194.7 446.6c-11.6-26-20.9-58.2-27-94.6l176.6 0c-6.1 36.4-15.5 68.6-27 94.6c-10.5 23.6-22.2 40.7-33.5 51.5C272.6 508.8 263.3 512 256 512s-16.6-3.2-27.8-13.8c-11.3-10.8-23-27.9-33.5-51.5zM135.3 352c10 63.9 29.8 117.4 55.3 151.6C112.2 482.9 48.6 426.1 18.6 352l116.7 0zm358.1 0c-30 74.1-93.6 130.9-171.9 151.6c25.5-34.2 45.2-87.7 55.3-151.6l116.7 0z"/></svg></span>
         <div class="p-name">Web</div>
         <div class="p-meta">Any browser · zero install</div>
-        <div class="p-desc">The Web UI is built into the server. Just open your server URL in any browser — desktop or mobile — and you're in. Nothing else to install.</div>
-        <span class="p-link">Open your server URL ↗</span>
+        <div class="p-desc">The Web UI ships inside the server. Open your server URL in any browser, desktop or mobile, and you're in.</div>
+        <span class="p-link">Open your server URL <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
       </a>
 
       <a class="pcard" data-os="windows" href="https://github.com/hermes-webui/hermes-desktop-rust/releases" target="_blank">
-        <span class="p-badge">Recommended</span>
-        <span class="p-emoji">🪟</span>
+        <span class="p-badge">You</span>
+        <span class="icon-tile"><svg viewBox="0 0 448 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M0 93.7l183.6-25.3v177.4H0V93.7zm0 324.6l183.6 25.3V268.4H0v149.9zm203.8 28L448 480V268.4H203.8v177.9zm0-380.6v180.1H448V32L203.8 65.7z"/></svg></span>
         <div class="p-name">Windows</div>
         <div class="p-meta">Native desktop app</div>
-        <div class="p-desc">A fast native desktop wrapper with tabs, tray, and window management. Grab the latest installer from releases.</div>
-        <span class="p-link">Download from Releases ↗</span>
+        <div class="p-desc">A fast native desktop app with tabs, tray, and window management. Grab the latest installer.</div>
+        <span class="p-link">Download from Releases <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
       </a>
 
       <a class="pcard" data-os="linux" href="https://github.com/hermes-webui/hermes-desktop-rust/releases" target="_blank">
-        <span class="p-badge">Recommended</span>
-        <span class="p-emoji">🐧</span>
+        <span class="p-badge">You</span>
+        <span class="icon-tile"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.529 3.405h.013c.213 0 .396.062.584.198.19.135.33.332.438.533.105.259.158.459.166.724 0-.02.006-.04.006-.06v.105a.086.086 0 01-.004-.021l-.004-.024a1.807 1.807 0 01-.15.706.953.953 0 01-.213.335.71.71 0 00-.088-.042c-.104-.045-.198-.064-.284-.133a1.312 1.312 0 00-.22-.066c.05-.06.146-.133.183-.198.053-.128.082-.264.088-.402v-.02a1.21 1.21 0 00-.061-.4c-.045-.134-.101-.2-.183-.333-.084-.066-.167-.132-.267-.132h-.016c-.093 0-.176.03-.262.132a.8.8 0 00-.205.334 1.18 1.18 0 00-.09.4v.019c.002.089.008.179.02.267-.193-.067-.438-.135-.607-.202a1.635 1.635 0 01-.018-.2v-.02a1.772 1.772 0 01.15-.768c.082-.22.232-.406.43-.533a.985.985 0 01.594-.2zm-2.962.059h.036c.142 0 .27.048.399.135.146.129.264.288.344.465.09.199.14.4.153.667v.004c.007.134.006.2-.002.266v.08c-.03.007-.056.018-.083.024-.152.055-.274.135-.393.2.012-.09.013-.18.003-.267v-.015c-.012-.133-.04-.2-.082-.333a.613.613 0 00-.166-.267.248.248 0 00-.183-.064h-.021c-.071.006-.13.04-.186.132a.552.552 0 00-.12.27.944.944 0 00-.023.33v.015c.012.135.037.2.08.334.046.134.098.2.166.268.01.009.02.018.034.024-.07.057-.117.07-.176.136a.304.304 0 01-.131.068 2.62 2.62 0 01-.275-.402 1.772 1.772 0 01-.155-.667 1.759 1.759 0 01.08-.668 1.43 1.43 0 01.283-.535c.128-.133.26-.2.418-.2zm1.37 1.706c.332 0 .733.065 1.216.399.293.2.523.269 1.052.468h.003c.255.136.405.266.478.399v-.131a.571.571 0 01.016.47c-.123.31-.516.643-1.063.842v.002c-.268.135-.501.333-.775.465-.276.135-.588.292-1.012.267a1.139 1.139 0 01-.448-.067 3.566 3.566 0 01-.322-.198c-.195-.135-.363-.332-.612-.465v-.005h-.005c-.4-.246-.616-.512-.686-.71-.07-.268-.005-.47.193-.6.224-.135.38-.271.483-.336.104-.074.143-.102.176-.131h.002v-.003c.169-.202.436-.47.839-.601.139-.036.294-.065.466-.065zm2.8 2.142c.358 1.417 1.196 3.475 1.735 4.473.286.534.855 1.659 1.102 3.024.156-.005.33.018.513.064.646-1.671-.546-3.467-1.089-3.966-.22-.2-.232-.335-.123-.335.59.534 1.365 1.572 1.646 2.757.13.535.16 1.104.021 1.67.067.028.135.06.205.067 1.032.534 1.413.938 1.23 1.537v-.043c-.06-.003-.12 0-.18 0h-.016c.151-.467-.182-.825-1.065-1.224-.915-.4-1.646-.336-1.77.465-.008.043-.013.066-.018.135-.068.023-.139.053-.209.064-.43.268-.662.669-.793 1.187-.13.533-.17 1.156-.205 1.869v.003c-.02.334-.17.838-.319 1.35-1.5 1.072-3.58 1.538-5.348.334a2.645 2.645 0 00-.402-.533 1.45 1.45 0 00-.275-.333c.182 0 .338-.03.465-.067a.615.615 0 00.314-.334c.108-.267 0-.697-.345-1.163-.345-.467-.931-.995-1.788-1.521-.63-.4-.986-.87-1.15-1.396-.165-.534-.143-1.085-.015-1.645.245-1.07.873-2.11 1.274-2.763.107-.065.037.135-.408.974-.396.751-1.14 2.497-.122 3.854a8.123 8.123 0 01.647-2.876c.564-1.278 1.743-3.504 1.836-5.268.048.036.217.135.289.202.218.133.38.333.59.465.21.201.477.335.876.335.039.003.075.006.11.006.412 0 .73-.134.997-.268.29-.134.52-.334.74-.4h.005c.467-.135.835-.402 1.044-.7zm2.185 8.958c.037.6.343 1.245.882 1.377.588.134 1.434-.333 1.791-.765l.211-.01c.315-.007.577.01.847.268l.003.003c.208.199.305.53.391.876.085.4.154.78.409 1.066.486.527.645.906.636 1.14l.003-.007v.018l-.003-.012c-.015.262-.185.396-.498.595-.63.401-1.746.712-2.457 1.57-.618.737-1.37 1.14-2.036 1.191-.664.053-1.237-.2-1.574-.898l-.005-.003c-.21-.4-.12-1.025.056-1.69.176-.668.428-1.344.463-1.897.037-.714.076-1.335.195-1.814.12-.465.308-.797.641-.984l.045-.022zm-10.814.049h.01c.053 0 .105.005.157.014.376.055.706.333 1.023.752l.91 1.664.003.003c.243.533.754 1.064 1.189 1.637.434.598.77 1.131.729 1.57v.006c-.057.744-.48 1.148-1.125 1.294-.645.135-1.52.002-2.395-.464-.968-.536-2.118-.469-2.857-.602-.369-.066-.61-.2-.723-.4-.11-.2-.113-.602.123-1.23v-.004l.002-.003c.117-.334.03-.752-.027-1.118-.055-.401-.083-.71.043-.94.16-.334.396-.4.69-.533.294-.135.64-.202.915-.47h.002v-.002c.256-.268.445-.601.668-.838.19-.201.38-.336.663-.336zm7.159-9.074c-.435.201-.945.535-1.488.535-.542 0-.97-.267-1.28-.466-.154-.134-.28-.268-.373-.335-.164-.134-.144-.333-.074-.333.109.016.129.134.199.2.096.066.215.2.36.333.292.2.68.467 1.167.467.485 0 1.053-.267 1.398-.466.195-.135.445-.334.648-.467.156-.136.149-.267.279-.267.128.016.034.134-.147.332a8.097 8.097 0 01-.69.468zm-1.082-1.583V5.64c-.006-.02.013-.042.029-.05.074-.043.18-.027.26.004.063 0 .16.067.15.135-.006.049-.085.066-.135.066-.055 0-.092-.043-.141-.068-.052-.018-.146-.008-.163-.065zm-.551 0c-.02.058-.113.049-.166.066-.047.025-.086.068-.14.068-.05 0-.13-.02-.136-.068-.01-.066.088-.133.15-.133.08-.031.184-.047.259-.005.019.009.036.03.03.05v.02h.003z"/></svg></span>
         <div class="p-name">Linux</div>
         <div class="p-meta">Native desktop app</div>
-        <div class="p-desc">The same cross-platform Rust desktop app, packaged for Linux. Download the latest build from releases.</div>
-        <span class="p-link">Download from Releases ↗</span>
+        <div class="p-desc">The same cross-platform Rust desktop app, packaged for Linux. Download the latest build.</div>
+        <span class="p-link">Download from Releases <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
       </a>
 
       <a class="pcard" data-os="mac" href="https://github.com/hermes-webui/hermes-swift-mac/releases" target="_blank">
-        <span class="p-badge">Recommended</span>
-        <span class="p-emoji">🍎</span>
+        <span class="p-badge">You</span>
+        <span class="icon-tile"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg></span>
         <div class="p-name">macOS</div>
         <div class="p-meta">Native Swift app</div>
-        <div class="p-desc">A polished native macOS client built in Swift — menu bar, notifications, the works. Download the latest <code>.dmg</code> from releases.</div>
-        <span class="p-link">Download from Releases ↗</span>
+        <div class="p-desc">A polished native macOS client built in Swift — menu bar, notifications, the works. Download the <code>.dmg</code>.</div>
+        <span class="p-link">Download from Releases <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
       </a>
 
       <a class="pcard" data-os="ios" href="https://apps.apple.com/us/app/hermex/id6767006319" target="_blank">
-        <span class="p-badge">Recommended</span>
-        <span class="p-emoji">📱</span>
+        <span class="p-badge">You</span>
+        <span class="icon-tile"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg></span>
         <div class="p-name">iOS</div>
         <div class="p-meta">iPhone &amp; iPad · App Store</div>
-        <div class="p-desc">Hermex is a beautiful native iOS client — store your server URL in the Keychain and steer Hermes from your pocket. Free on the App Store.</div>
-        <span class="p-link">Download on the App Store ↗</span>
+        <div class="p-desc">Hermex is a native iOS client — your server URL lives in the Keychain, and Hermes is a tap away. Free on the App Store.</div>
+        <span class="p-link">Download on the App Store <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
       </a>
 
       <a class="pcard" data-os="android" href="https://github.com/hermes-webui/hermes-android/releases" target="_blank">
-        <span class="p-badge">Recommended</span>
-        <span class="p-emoji">🤖</span>
+        <span class="p-badge">You</span>
+        <span class="icon-tile"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M18.4395 5.5586c-.675 1.1664-1.352 2.3318-2.0274 3.498-.0366-.0155-.0742-.0286-.1113-.043-1.8249-.6957-3.484-.8-4.42-.787-1.8551.0185-3.3544.4643-4.2597.8203-.084-.1494-1.7526-3.021-2.0215-3.4864a1.1451 1.1451 0 0 0-.1406-.1914c-.3312-.364-.9054-.4859-1.379-.203-.475.282-.7136.9361-.3886 1.5019 1.9466 3.3696-.0966-.2158 1.9473 3.3593.0172.031-.4946.2642-1.3926 1.0177C2.8987 12.176.452 14.772 0 18.9902h24c-.119-1.1108-.3686-2.099-.7461-3.0683-.7438-1.9118-1.8435-3.2928-2.7402-4.1836a12.1048 12.1048 0 0 0-2.1309-1.6875c.6594-1.122 1.312-2.2559 1.9649-3.3848.2077-.3615.1886-.7956-.0079-1.1191a1.1001 1.1001 0 0 0-.8515-.5332c-.5225-.0536-.9392.3128-1.0488.5449zm-.0391 8.461c.3944.5926.324 1.3306-.1563 1.6503-.4799.3197-1.188.0985-1.582-.4941-.3944-.5927-.324-1.3307.1563-1.6504.4727-.315 1.1812-.1086 1.582.4941zM7.207 13.5273c.4803.3197.5506 1.0577.1563 1.6504-.394.5926-1.1038.8138-1.584.4941-.48-.3197-.5503-1.0577-.1563-1.6504.4008-.6021 1.1087-.8106 1.584-.4941z"/></svg></span>
         <div class="p-name">Android</div>
         <div class="p-meta">Native app · early access</div>
-        <div class="p-desc">A native Android client for Hermes WebUI. Grab the latest APK from releases (Play Store listing coming soon).</div>
-        <span class="p-link">Download from Releases ↗</span>
+        <div class="p-desc">A native Android client for Hermes WebUI. Grab the latest APK from releases — Play Store listing soon.</div>
+        <span class="p-link">Download from Releases <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
       </a>
     </div>
 
-    <div class="callout" style="margin-top:24px">📲 <b>Connecting any app:</b> open it, paste your <b>Server URL</b> from Step 2 (or <code>http://127.0.0.1:8787</code> on the same machine), tap <b>Test Connection</b>, then sign in with your password. Your URL is stored on-device; your data stays on your server.</div>
+    <!-- WHICH URL -->
+    <h3 class="sub reveal">Which URL do I enter?</h3>
+    <p class="reveal">In any app, tap where it asks for your <b>Server URL</b>, enter the address that matches where you're connecting from, then sign in with your password. The web client uses the same URLs in your browser's address bar.</p>
+    <div class="urltable-wrap reveal">
+      <table class="urltable">
+        <thead><tr><th>Connecting from</th><th>Server URL to enter</th></tr></thead>
+        <tbody>
+          <tr><td>Same machine as the server</td><td><code>http://127.0.0.1:8787</code></td></tr>
+          <tr><td>Another device on your<span class="where-sub">home / office network (LAN)</span></td><td><code>http://&lt;server-local-ip&gt;:8787</code></td></tr>
+          <tr><td>Anywhere, via Tailscale</td><td><code>http://&lt;tailscale-100.x-ip&gt;:8787</code></td></tr>
+          <tr><td>A VPS, via SSH tunnel</td><td><code>http://127.0.0.1:8787</code> <span class="where-sub">(once the tunnel from Step 2 is open)</span></td></tr>
+          <tr><td>Anywhere, via Cloudflare</td><td><code>https://your-hostname</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout reveal">
+      <span class="icon-tile"><svg viewBox="0 0 384 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M16 64C16 28.7 44.7 0 80 0L304 0c35.3 0 64 28.7 64 64l0 384c0 35.3-28.7 64-64 64L80 512c-35.3 0-64-28.7-64-64L16 64zM224 448a32 32 0 1 0 -64 0 32 32 0 1 0 64 0zM304 64L80 64l0 320 224 0 0-320z"/></svg></span>
+      <div>Most people on a phone use their <b>Tailscale</b> address or <b>Cloudflare</b> hostname — <code>127.0.0.1</code> only works on the same machine as the server. After entering the URL, tap <b>Test Connection</b>, then sign in. Your URL is stored on-device; your data stays on your server.</div>
+    </div>
   </div>
 </section>
 
 <!-- ECOSYSTEM -->
 <section class="section" id="ecosystem">
   <div class="wrap">
-    <div class="section-head">
+    <div class="section-head reveal">
       <h2>Extend &amp; explore</h2>
-      <p class="lead">Hermes WebUI is an open ecosystem — augment your install with extensions, and peek behind the curtain at how the whole thing is maintained.</p>
+      <p class="lead">Hermes WebUI is an open ecosystem — add extensions, and see how the whole thing is maintained.</p>
     </div>
-    <div class="eco-grid">
+    <div class="eco-grid stagger reveal">
       <a class="eco" href="https://github.com/hermes-webui/hermes-webui-extensions" target="_blank">
-        <span class="eco-emoji">🧩</span>
+        <span class="icon-tile"><svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M192 104.8c0-9.2-5.8-17.3-13.2-22.8C167.2 73.3 160 61.3 160 48c0-26.5 28.7-48 64-48s64 21.5 64 48c0 13.3-7.2 25.3-18.8 34c-7.4 5.5-13.2 13.6-13.2 22.8c0 12.8 10.4 23.2 23.2 23.2l56.8 0c26.5 0 48 21.5 48 48l0 56.8c0 12.8 10.4 23.2 23.2 23.2c9.2 0 17.3-5.8 22.8-13.2c8.7-11.6 20.7-18.8 34-18.8c26.5 0 48 28.7 48 64s-21.5 64-48 64c-13.3 0-25.3-7.2-34-18.8c-5.5-7.4-13.6-13.2-22.8-13.2c-12.8 0-23.2 10.4-23.2 23.2L384 464c0 26.5-21.5 48-48 48l-56.8 0c-12.8 0-23.2-10.4-23.2-23.2c0-9.2 5.8-17.3 13.2-22.8c11.6-8.7 18.8-20.7 18.8-34c0-26.5-28.7-48-64-48s-64 21.5-64 48c0 13.3 7.2 25.3 18.8 34c7.4 5.5 13.2 13.6 13.2 22.8c0 12.8-10.4 23.2-23.2 23.2L48 512c-26.5 0-48-21.5-48-48L0 343.2C0 330.4 10.4 320 23.2 320c9.2 0 17.3 5.8 22.8 13.2C54.7 344.8 66.7 352 80 352c26.5 0 48-28.7 48-64s-21.5-64-48-64c-13.3 0-25.3 7.2-34 18.8C40.5 250.2 32.4 256 23.2 256C10.4 256 0 245.6 0 232.8L0 176c0-26.5 21.5-48 48-48l120.8 0c12.8 0 23.2-10.4 23.2-23.2z"/></svg></span>
         <div>
           <h4>Extensions library</h4>
-          <p>A growing collection of extensions that augment your Web UI in all kinds of ways — install the ones you want, build your own.</p>
-          <span class="eco-link">Browse extensions ↗</span>
+          <p>A growing set of extensions that add to your Web UI — install the ones you want, or build your own.</p>
+          <span class="eco-link">Browse extensions <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
         </div>
       </a>
       <a class="eco" href="https://nesquena.github.io/steward-os/" target="_blank">
-        <span class="eco-emoji">📔</span>
+        <span class="icon-tile"><svg viewBox="0 0 576 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M249.6 471.5c10.8 3.8 22.4-4.1 22.4-15.5l0-377.4c0-4.2-1.6-8.4-5-11C247.4 52 202.4 32 144 32C93.5 32 46.3 45.3 18.1 56.1C6.8 60.5 0 71.7 0 83.8L0 454.1c0 11.9 12.8 20.2 24.1 16.5C55.6 460.1 105.5 448 144 448c33.9 0 79 14 105.6 23.5zm76.8 0C353 462 398.1 448 432 448c38.5 0 88.4 12.1 119.9 22.6c11.3 3.8 24.1-4.6 24.1-16.5l0-370.3c0-12.1-6.8-23.3-18.1-27.6C529.7 45.3 482.5 32 432 32c-58.4 0-103.4 20-123 35.6c-3.3 2.6-5 6.8-5 11L304 456c0 11.4 11.7 19.3 22.4 15.5z"/></svg></span>
         <div>
           <h4>StewardOS</h4>
-          <p>WebUI is maintained by Hermes agents — and the meta open-source framework that runs that whole operation is documented openly.</p>
-          <span class="eco-link">Read StewardOS ↗</span>
+          <p>WebUI is maintained by Hermes agents. The open framework behind that whole operation is documented here.</p>
+          <span class="eco-link">Read StewardOS <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l82.7 0L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3l0 82.7c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160c0-17.7-14.3-32-32-32L320 0zM80 32C35.8 32 0 67.8 0 112L0 432c0 44.2 35.8 80 80 80l320 0c44.2 0 80-35.8 80-80l0-112c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 112c0 8.8-7.2 16-16 16L80 448c-8.8 0-16-7.2-16-16l0-320c0-8.8 7.2-16 16-16l112 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L80 32z"/></svg></span>
         </div>
       </a>
     </div>
@@ -483,40 +538,40 @@ tailscale ip -4   <span class="c-cmt"># your server's 100.x address</span></code
 <!-- TROUBLESHOOTING -->
 <section class="section" id="troubleshooting">
   <div class="wrap">
-    <div class="section-head"><h2>Troubleshooting</h2></div>
-    <div class="faq">
+    <div class="section-head reveal"><h2>Troubleshooting</h2></div>
+    <div class="faq reveal">
       <details>
         <summary>An app can't reach the server</summary>
-        <p>Work outward. On the server, check <code>curl http://127.0.0.1:8787/health</code>. If that works, open your public/Tailscale URL in another device's browser. Whichever hop fails is the one to fix.</p>
+        <p>Work outward. On the server, run <code>curl http://127.0.0.1:8787/health</code>. If that's fine, open your Tailscale or Cloudflare URL in another device's browser. Whichever hop fails is the one to fix — and remember <code>127.0.0.1</code> only works on the server's own machine.</p>
+      </details>
+      <details>
+        <summary>I'm on my phone — what URL do I use?</summary>
+        <p>Not <code>127.0.0.1</code> — that points the phone at itself. Use your server's Tailscale address (<code>http://100.x.x.x:8787</code>) or your Cloudflare hostname (<code>https://…</code>). See the "Which URL do I enter?" table above.</p>
+      </details>
+      <details>
+        <summary>My server is a VPS in the cloud</summary>
+        <p>Two clean options: open an <b>SSH tunnel</b> (<code>ssh -L 8787:localhost:8787 you@vps</code>) and connect to <code>http://127.0.0.1:8787</code> locally, or run <b>Cloudflare Tunnel</b> on the VPS for a public HTTPS hostname you can use from any device. Avoid exposing port 8787 directly to the internet.</p>
       </details>
       <details>
         <summary>The Cloudflare tunnel URL stopped working</summary>
-        <p>Quick tunnels (<code>trycloudflare.com</code>) get a new URL every time <code>cloudflared</code> restarts. For a stable hostname, create a named tunnel on a domain you've added to Cloudflare, and keep <code>cloudflared</code> running.</p>
-      </details>
-      <details>
-        <summary>The Tailscale address doesn't respond</summary>
-        <p>Confirm both devices are signed into the same tailnet and show as connected. Then make sure the server was started with <code>HERMES_WEBUI_HOST=0.0.0.0</code> — the default localhost binding isn't reachable over the tailnet.</p>
+        <p>Quick tunnels (<code>trycloudflare.com</code>) get a new URL each restart. For a stable hostname, create a named tunnel on a domain you've added to Cloudflare, and keep <code>cloudflared</code> running.</p>
       </details>
       <details>
         <summary>Sign-in keeps failing</summary>
-        <p>The password in your app must match <code>HERMES_WEBUI_PASSWORD</code> on the server (or the one set in Settings). An inline variable only applies to that launch — persist it in the server's <code>.env</code> for daemon restarts.</p>
+        <p>The password in your app must match <code>HERMES_WEBUI_PASSWORD</code> on the server (or the one set in Settings). An inline variable only applies to that launch — persist it in the server's <code>.env</code> for restarts.</p>
       </details>
       <details>
         <summary>Port 8787 is already taken</summary>
-        <p>Start on another port with <code>HERMES_WEBUI_PORT=8788 ./start.sh</code> and use that port in your client URL and tunnel command.</p>
-      </details>
-      <details>
-        <summary>Profile switching is disabled / only one profile shows</summary>
-        <p>That's isolated-profile mode. On a normal single-user install it should be off by default — update to the latest WebUI if you see it unexpectedly.</p>
+        <p>Start on another port with <code>HERMES_WEBUI_PORT=8788 ./start.sh</code>, and use that port everywhere — your client URL, the tunnel command, and the SSH forward.</p>
       </details>
     </div>
   </div>
 </section>
 
 <!-- FINAL CTA -->
-<section class="final-cta">
+<section class="final-cta reveal">
   <h2>Ready to go everywhere?</h2>
-  <p>Run the server, grab your apps, and take Hermes with you.</p>
+  <p>Run the server, connect your apps, take Hermes with you.</p>
   <div class="btn-row">
     <a class="btn-primary" href="https://github.com/nesquena/hermes-webui" target="_blank">Get Hermes WebUI →</a>
     <a class="btn-ghost" href="../">Back to home</a>
@@ -528,7 +583,6 @@ tailscale ip -4   <span class="c-cmt"># your server's 100.x address</span></code
 </footer>
 
 <script>
-  // Theme toggle
   var themeToggle = document.getElementById('theme-toggle');
   function setTheme(t) {
     document.documentElement.setAttribute('data-theme', t);
@@ -540,7 +594,6 @@ tailscale ip -4   <span class="c-cmt"># your server's 100.x address</span></code
     setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
   });
 
-  // Hamburger
   var ham = document.getElementById('setup-hamburger');
   var menu = document.getElementById('setup-mobile-menu');
   if (ham && menu) {
@@ -557,11 +610,9 @@ tailscale ip -4   <span class="c-cmt"># your server's 100.x address</span></code
     menu.querySelectorAll('a').forEach(function(a){ a.addEventListener('click', function(){ menu.classList.remove('open'); ham.classList.remove('open'); }); });
   }
 
-  // Copy buttons
   document.querySelectorAll('.code-copy').forEach(function(btn) {
     btn.addEventListener('click', function() {
-      var code = btn.closest('.code').querySelector('code');
-      var text = code.innerText;
+      var text = btn.closest('.code').querySelector('code').innerText;
       navigator.clipboard.writeText(text).then(function() {
         var old = btn.textContent; btn.textContent = 'Copied!';
         setTimeout(function(){ btn.textContent = old; }, 1400);
@@ -569,24 +620,33 @@ tailscale ip -4   <span class="c-cmt"># your server's 100.x address</span></code
     });
   });
 
-  // OS detection — highlight the visitor's platform card
+  // Scroll reveal
+  (function(){
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if (e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); } });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+    document.querySelectorAll('.reveal, .stagger').forEach(function(el){ io.observe(el); });
+  })();
+
+  // OS detection — float visitor's platform to the front + tag it
   (function() {
-    var ua = navigator.userAgent || '';
-    var plat = navigator.platform || '';
-    var os = null, label = null;
-    if (/Android/i.test(ua)) { os = 'android'; label = 'Android'; }
-    else if (/iPhone|iPad|iPod/i.test(ua) || (plat === 'MacIntel' && navigator.maxTouchPoints > 1)) { os = 'ios'; label = 'iOS'; }
-    else if (/Macintosh|Mac OS X/i.test(ua)) { os = 'mac'; label = 'macOS'; }
-    else if (/Windows/i.test(ua)) { os = 'windows'; label = 'Windows'; }
-    else if (/Linux/i.test(ua)) { os = 'linux'; label = 'Linux'; }
+    var ua = navigator.userAgent || '', plat = navigator.platform || '';
+    var os = null, label = null, iconOs = null;
+    if (/Android/i.test(ua)) { os='android'; label='Android'; }
+    else if (/iPhone|iPad|iPod/i.test(ua) || (plat==='MacIntel' && navigator.maxTouchPoints>1)) { os='ios'; label='iOS'; }
+    else if (/Macintosh|Mac OS X/i.test(ua)) { os='mac'; label='macOS'; }
+    else if (/Windows/i.test(ua)) { os='windows'; label='Windows'; }
+    else if (/Linux/i.test(ua)) { os='linux'; label='Linux'; }
     if (os) {
-      var card = document.querySelector('.pcard[data-os="' + os + '"]');
+      var card = document.querySelector('.pcard[data-os="'+os+'"]');
       if (card) {
         card.classList.add('is-you');
-        var grid = card.parentNode;
-        grid.insertBefore(card, grid.firstChild); // float the visitor's platform to the top
+        card.parentNode.insertBefore(card, card.parentNode.firstChild);
+        var srcIcon = card.querySelector('.icon-tile');
         var banner = document.getElementById('device-banner');
         document.getElementById('device-name').textContent = label;
+        var di = document.getElementById('device-icon');
+        if (srcIcon && di) { di.innerHTML = srcIcon.innerHTML; }
         banner.classList.add('show');
       }
     }

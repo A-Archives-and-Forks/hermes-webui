@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.652] — 2026-06-25 — Release XH (background subagent results return to chat)
+
+### Fixed
+
+- **Background `delegate_task` subagent results now re-enter the conversation instead of being silently dropped.** When a subagent dispatched via `delegate_task` finished, the WebUI showed it as perpetually "running" and its consolidated result never appeared in chat. The wakeup-prompt builder only recognized `completion` and watch-pattern events, so the `async_delegation` completion event a finished subagent emits hit the catch-all and was discarded before the server-side wakeup turn could start. The builder now renders `async_delegation` events (via the shared agent-side notification formatter), so the subagent's result is delivered back into the parent conversation. Genuinely-unrecognized event types are still skipped. Thanks @mydelren for the report and root-cause. (#4912)
+
 ## [v0.51.651] — 2026-06-25 — Release XG (force update no longer aborts on undeletable Windows files)
 
 ### Fixed

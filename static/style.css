@@ -4743,8 +4743,8 @@ main.main > #mainPlugin{display:none;}
 .extension-gallery-perms pre{margin:6px 0 0;padding:8px;background:var(--code-bg);border-radius:4px;font-size:11px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;}
 .extension-gallery-actions{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap;}
 .extension-gallery-install-btn,.extension-gallery-uninstall-btn{padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:background .15s,color .15s;}
-.extension-gallery-install-btn{background:var(--accent,#7c3aed);color:#fff;border-color:var(--accent,#7c3aed);}
-.extension-gallery-install-btn:hover:not(:disabled){filter:brightness(1.1);}
+.extension-gallery-install-btn{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent);}
+.extension-gallery-install-btn:hover:not(:disabled){background:var(--accent-bg-strong);color:var(--accent-text);}
 .extension-gallery-uninstall-btn{background:var(--card-bg,var(--sidebar-bg));color:var(--error,#ef4444);border-color:var(--error,#ef4444);}
 .extension-gallery-uninstall-btn:hover:not(:disabled){background:rgba(239,68,68,.08);}
 .extension-gallery-install-btn:disabled,.extension-gallery-uninstall-btn:disabled{opacity:.5;cursor:not-allowed;}

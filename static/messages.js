@@ -1299,7 +1299,7 @@ async function send(){
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
           showToast(t('busy_interrupt_confirm'),2000);
-          await cancelStream();
+          await cancelStream('busy-interrupt');
         } else {
           showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
         }
@@ -7528,7 +7528,49 @@ function _startClarifyFallbackPoll(sid) {
       else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
     } catch(e) {
       const msg = String((e && e.message) || "");
-      if (!_clarifyMissingEndpointWarned && /(^|\b)(404|not found)(\b|$)/i.test(msg)) {
+      // `api()` attaches the raw HTTP status on the thrown Error (err.status).
+      // Branch on that structured value instead of scraping the message string
+      // so an unrelated stale-session or lifecycle error can never masquerade as
+      // a missing clarify endpoint. (#5345)
+      const status = (e && typeof e.status === "number") ? e.status : null;
+      const currentSid = (S.session && S.session.session_id) || null;
+      // Structured diagnostics: a clarify poll failure should be inspectable
+      // without guessing from a toast — log the failed path, HTTP status (if
+      // any), the session id we were polling, and the current active session
+      // id. (#5345)
+      if (typeof console !== "undefined" && console.warn) {
+        console.warn("[clarify] pending poll failed", {
+          path: "/api/clarify/pending",
+          status: status,
+          pollingSessionId: sid,
+          currentSessionId: currentSid,
+          message: msg,
+        });
+      }
+      // A 404 whose body is "Session not found" is a STALE-SESSION signal — e.g.
+      // the old profile's session still polling briefly after a profile switch,
+      // or a session deleted server-side — NOT a missing clarify endpoint. Stop
+      // this stale poll and hide its card silently instead of telling the user
+      // to restart the server. (#5343 / #5345)
+      if (status === 404 && /session\s+not\s+found/i.test(msg)) {
+        _clearClarifyPendingForSession(sid);
+        _hideClarifyCardIfOwner(sid, true, 'session');
+        stopClarifyPolling();
+        return;
+      }
+      // Only a GENUINE missing-endpoint 404 (the route-not-found fall-through,
+      // body {"error":"not found"}, from a server build that predates
+      // /api/clarify/pending) should surface the restart-server warning. The
+      // previous code matched arbitrary "404"/"not found" text in ANY caught
+      // error message, so an unrelated stale-session 404 or a transient network
+      // error produced a false "Clarify endpoint unavailable" toast even though
+      // the endpoint is present and returning HTTP 200 on every request. Gate
+      // strictly on the structured status + a route-not-found body that is not
+      // a session-scoped 404. (#5345)
+      const isMissingEndpoint = status === 404
+        && /(^|\b)not\s+found(\b|$)/i.test(msg)
+        && !/session/i.test(msg);
+      if (!_clarifyMissingEndpointWarned && isMissingEndpoint) {
         _clarifyMissingEndpointWarned = true;
         setComposerStatus("Clarify unavailable on current server build. Restart server.");
         if (typeof showToast === "function") {

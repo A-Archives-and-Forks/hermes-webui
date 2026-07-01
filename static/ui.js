@@ -6437,7 +6437,7 @@ async function handleComposerPrimaryAction(){
   const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
   if(action==='disabled') return;
   if(action==='stop'){
-    if(typeof cancelStream==='function') await cancelStream();
+    if(typeof cancelStream==='function') await cancelStream('composer-stop');
     return;
   }
   await send();

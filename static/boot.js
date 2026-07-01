@@ -14,10 +14,21 @@
 // cancelStream: stop the active chat stream.
 // See docs/rfcs/webui-run-state-consistency-contract.md (Invariants #2, #4)
 // for the owner-aware + terminal-settle rationale.
-async function cancelStream(){
+async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return;
+  // Interrupt provenance: log WHY the active run is being cancelled so operators
+  // can tell an explicit Stop / interrupt from any other trigger when they see a
+  // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
+  // this function (Stop button, /stop, /interrupt, busy-interrupt); passive
+  // lifecycle events — session switch, tab hide, page unload — tear down the
+  // LOCAL SSE transport via closeLiveStream() and never call /api/chat/cancel,
+  // so they never interrupt the backend agent/tool run. (#5345)
+  const _reason = reason || 'explicit-cancel';
+  if(typeof console !== 'undefined' && console.info){
+    console.info('[stream] cancel requested', {reason:_reason, streamId, sessionId:sid});
+  }
   let respBody=null;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
@@ -54,6 +65,11 @@ async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
   if(!streamId||!sid) return;
+  // Explicit sidebar "Stop response" — log provenance for the same reason as
+  // cancelStream(). (#5345)
+  if(typeof console !== 'undefined' && console.info){
+    console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
+  }
   try{
     await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
   }catch(e){/* close local stream; keep UI state honest below */}

@@ -296,3 +296,17 @@ def test_compression_recovery_ui_wires_card_action_and_send_intercept():
     assert "function shouldInterceptCompressionRecoveryContinuation" in ui
     assert "shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)" in messages
     assert "_compressionRecovery:recovery||undefined" in messages
+
+
+def test_compression_recovery_ui_skips_message_fallback_after_session_clear():
+    ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
+    start = ui.index("function _activeCompressionRecoveryPayload(){")
+    end = ui.index("function isGenericCompressionContinuationIntent", start)
+    body = ui[start:end]
+
+    session_guard = "Object.prototype.hasOwnProperty.call(S.session,'compression_recovery')"
+    message_scan = "const messages=Array.isArray(S.messages)?S.messages:[]"
+
+    assert session_guard in body
+    assert message_scan in body
+    assert body.index(session_guard) < body.index(message_scan)

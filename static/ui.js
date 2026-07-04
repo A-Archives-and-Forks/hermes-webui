@@ -440,6 +440,9 @@ function _activeCompressionRecoveryPayload(){
   if(!S||!S.session) return null;
   const recovery=S.session.compression_recovery;
   if(recovery&&typeof recovery==='object'&&String(recovery.terminal_state||'')==='compression_exhausted') return recovery;
+  // A cleared session-level recovery payload is authoritative. Only scan
+  // message metadata for older sessions that never exposed this field.
+  if(Object.prototype.hasOwnProperty.call(S.session,'compression_recovery')) return null;
   const messages=Array.isArray(S.messages)?S.messages:[];
   for(let i=messages.length-1;i>=0;i--){
     const msg=messages[i];

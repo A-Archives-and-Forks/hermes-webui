@@ -8644,7 +8644,13 @@ async function loadSettingsPanel(){
       }else{
         modelSel.value=_settingsHermesDefaultModelOnOpen;
       }
+      if(typeof closeSettingsModelDropdown==='function') closeSettingsModelDropdown();
+      if(typeof mountSettingsModelPicker==='function') mountSettingsModelPicker();
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
+      if(!modelSel._settingsChipSyncBound){
+        modelSel._settingsChipSyncBound=true;
+        modelSel.addEventListener('change',()=>{if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();},{once:false});
+      }
     }
     // Auxiliary models — load task assignments and provider/model options
     _bindMainAdvancedOptionsButton();

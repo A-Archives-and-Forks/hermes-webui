@@ -2430,23 +2430,36 @@ function _refreshOpenModelDropdown(){
     renderModelDropdown();
     if(typeof _positionModelDropdown==='function') _positionModelDropdown();
   }
+  const sdd=$('settingsModelDropdown');
+  if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
+    renderModelDropdown({
+      dropdownId:'settingsModelDropdown',
+      selectId:'settingsModel',
+      forceOpenKey:'settingsModel',
+      closeDropdown:closeSettingsModelDropdown,
+      selectModel:selectSettingsModelFromDropdown,
+      scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
+    });
+  }
 }
 function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
-  const currentState=(sel.id==='modelSelect'&&typeof _modelStateForSelect==='function')
+  const isRichPickerSelect=sel.id==='modelSelect'||sel.id==='settingsModel';
+  const currentState=(isRichPickerSelect&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, sel.value)
     : null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
-    if(sel.id==='modelSelect'){
+    if(isRichPickerSelect){
       const resolvedState=typeof _modelStateForSelect==='function'
         ? _modelStateForSelect(sel, resolved)
         : {model:resolved,model_provider:preferredProviderId||null};
       const pickerChanged= !!(opts&&opts.forceRefresh) || !currentState
         || String(currentState.model||'')!==String(resolvedState.model||'')
         || String(currentState.model_provider||'')!==String(resolvedState.model_provider||'');
-      if(typeof syncModelChip==='function') syncModelChip();
+      if(sel.id==='modelSelect'&&typeof syncModelChip==='function') syncModelChip();
+      if(sel.id==='settingsModel'&&typeof syncSettingsModelChip==='function') syncSettingsModelChip();
       if(pickerChanged) _refreshOpenModelDropdown();
     }
     return resolved;
@@ -2470,6 +2483,10 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   sel.value=modelId;
   if(sel.id==='modelSelect'){
     if(typeof syncModelChip==='function') syncModelChip();
+    _refreshOpenModelDropdown();
+  }
+  if(sel.id==='settingsModel'){
+    if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
     _refreshOpenModelDropdown();
   }
   return modelId;
@@ -3078,9 +3095,16 @@ function _mountSearchableModelSelect(opts={}){
 }
 
 function renderModelDropdown(){
-  const dd=$('composerModelDropdown');
-  const sel=$('modelSelect');
+  const opts=arguments[0]||{};
+  const dd=$(opts.dropdownId||'composerModelDropdown');
+  const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  const selectFromDropdown=typeof opts.selectModel==='function'
+    ? opts.selectModel
+    : (value,provider)=>selectModelFromDropdown(value,provider);
+  const closeDropdown=typeof opts.closeDropdown==='function'
+    ? opts.closeDropdown
+    : closeModelDropdown;
   // Group(s) that must render OPEN even though they aren't the selected group —
   // set when the user expands a group's overflow via "Show more" so a later full
   // re-render doesn't re-collapse it (_groupOpenState is rebuilt per render, so
@@ -3089,8 +3113,10 @@ function renderModelDropdown(){
   // #3691 node test driver evals the function body without module scope).
   const _forceOpenGroups=(()=>{
     const _g=(typeof window!=='undefined')?window:(typeof globalThis!=='undefined'?globalThis:{});
-    if(!_g.__modelGroupForceOpen) _g.__modelGroupForceOpen=new Set();
-    return _g.__modelGroupForceOpen;
+    const key=opts.forceOpenKey||'composer';
+    if(!_g.__modelGroupForceOpenByPicker) _g.__modelGroupForceOpenByPicker={};
+    if(!_g.__modelGroupForceOpenByPicker[key]) _g.__modelGroupForceOpenByPicker[key]=new Set();
+    return _g.__modelGroupForceOpenByPicker[key];
   })();
   const _modelData=[];
   const _groupMeta=new Map();
@@ -3187,7 +3213,7 @@ function renderModelDropdown(){
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
   _scopeNote.className='model-scope-note';
-  _scopeNote.textContent=t('model_scope_advisory')||'Applies to this conversation from your next message.';
+  _scopeNote.textContent=opts.scopeNoteText||(t('model_scope_advisory')||'Applies to this conversation from your next message.');
   const _searchRow=document.createElement('div');
   _searchRow.className='model-search-row';
   _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
@@ -3227,7 +3253,7 @@ function renderModelDropdown(){
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-    row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+    row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
   const _expandOverflowGroup=(groupMetaEntry)=>{
@@ -3251,7 +3277,7 @@ function renderModelDropdown(){
     // expander gone, search term reapplied.
     const _fullReRender=()=>{
       const _term=(_si&&_si.value)||'';
-      renderModelDropdown();
+      renderModelDropdown(opts);
       const ns=dd.querySelector('.model-search-input');
       if(ns){ ns.value=_term; (ns._listeners&&ns._listeners.input)?ns._listeners.input():ns.dispatchEvent(new Event('input')); }
     };
@@ -3280,7 +3306,7 @@ function renderModelDropdown(){
       for(const m of extraModels){
         if(!m||!m.id) continue;
         if(_alreadyShown.has(esc(m.id))) continue;
-        const row=_buildModelRow({value:m.id,name:m.label||m.id,id:m.id,group:_plainLabel,groupKey,providerId:(og.dataset&&og.dataset.provider)||''},$('modelSelect'),false);
+        const row=_buildModelRow({value:m.id,name:m.label||m.id,id:m.id,group:_plainLabel,groupKey,providerId:(og.dataset&&og.dataset.provider)||''},sel,false);
         wrap.insertBefore(row,moreEl);
         if(!firstNewRow) firstNewRow=row;
       }
@@ -3346,7 +3372,7 @@ function renderModelDropdown(){
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-    row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+    row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
   const _filterModels=(term)=>{
@@ -3441,7 +3467,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
+        row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
     }
@@ -3609,7 +3635,7 @@ function renderModelDropdown(){
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
   };
   _si.addEventListener('keydown',e=>{
-    if(e.key==='Escape'){closeModelDropdown();return;}
+    if(e.key==='Escape'){closeDropdown();return;}
     if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
       const rows=_visibleModelRows();
       if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
@@ -3626,9 +3652,9 @@ function renderModelDropdown(){
   _si.addEventListener('click',e=>e.stopPropagation());
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
-  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
+  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
@@ -3693,12 +3719,105 @@ function closeModelDropdown(){
   if(mobileAction) mobileAction.classList.remove('active');
 }
 
+function closeSettingsModelDropdown(){
+  const dd=$('settingsModelDropdown');
+  const chip=$('settingsModelChip');
+  if(dd) dd.classList.remove('open');
+  if(chip){
+    chip.classList.remove('active');
+    chip.setAttribute('aria-expanded','false');
+  }
+}
+
+function syncSettingsModelChip(){
+  const sel=$('settingsModel');
+  const chip=$('settingsModelChip');
+  if(!sel||!chip) return;
+  const opt=sel.selectedOptions&&sel.selectedOptions[0];
+  const text=(opt&&opt.textContent)||getModelLabel(sel.value||'')||t('settings_label_model')||'Default Model';
+  chip.textContent=text;
+  chip.title=sel.value||text;
+}
+
+function selectSettingsModelFromDropdown(value,preferredProviderId){
+  const sel=$('settingsModel');
+  if(!sel){closeSettingsModelDropdown();return;}
+  const provider=String(preferredProviderId||'').trim()||null;
+  if(typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(value,sel,provider);
+  }else{
+    sel.value=value;
+    if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
+  }
+  closeSettingsModelDropdown();
+  try{
+    if(typeof Event==='function') sel.dispatchEvent(new Event('change',{bubbles:true}));
+    else if(typeof sel.onchange==='function') sel.onchange();
+  }catch(_){}
+}
+
+function openSettingsModelDropdown(){
+  const dd=$('settingsModelDropdown');
+  const sel=$('settingsModel');
+  const chip=$('settingsModelChip');
+  if(!dd||!sel) return;
+  renderModelDropdown({
+    dropdownId:'settingsModelDropdown',
+    selectId:'settingsModel',
+    forceOpenKey:'settingsModel',
+    closeDropdown:closeSettingsModelDropdown,
+    selectModel:selectSettingsModelFromDropdown,
+    scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
+  });
+  dd.classList.add('open');
+  if(chip){
+    chip.classList.add('active');
+    chip.setAttribute('aria-expanded','true');
+  }
+  setTimeout(()=>{
+    const input=dd.querySelector('.model-search-input');
+    if(input) input.focus();
+  },0);
+}
+
+function toggleSettingsModelDropdown(){
+  const dd=$('settingsModelDropdown');
+  if(dd&&dd.classList.contains('open')){closeSettingsModelDropdown();return;}
+  openSettingsModelDropdown();
+}
+
+function mountSettingsModelPicker(){
+  const chip=$('settingsModelChip');
+  const sel=$('settingsModel');
+  if(!chip||!sel) return;
+  syncSettingsModelChip();
+  if(!chip._settingsModelPickerBound){
+    chip._settingsModelPickerBound=true;
+    chip.addEventListener('click',e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSettingsModelDropdown();
+    });
+    chip.addEventListener('keydown',e=>{
+      if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+        e.preventDefault();
+        toggleSettingsModelDropdown();
+      }
+    });
+  }
+}
+
 document.addEventListener('click',e=>{
   if(
     !e.target.closest('#composerModelChip') &&
     !e.target.closest('#composerMobileModelAction') &&
     !e.target.closest('#composerModelDropdown')
   ) closeModelDropdown();
+  if(
+    !e.target.closest('#settingsModelChip') &&
+    !e.target.closest('#settingsModel') &&
+    !e.target.closest('#settingsModelDropdown')
+  ) closeSettingsModelDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');

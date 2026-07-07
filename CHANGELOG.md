@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **The message composer no longer hides behind the on-screen keyboard on iPad.** On touch tablets (iPad Safari), the soft keyboard shrinks the visual viewport but not the layout viewport, so the bottom-docked composer was left covered by the keyboard. The composer now lifts to sit just above the keyboard, tracking it as it shows and hides, and drops back to normal when the keyboard closes. It's a no-op on desktop, on devices with a hardware keyboard/trackpad, and while the page is pinch-zoomed. Thanks @rodboev. (#5701)
+
 - **Turns no longer fail with an HTTP 400 from strict providers on empty tool-call history.** Some stored assistant messages carry an empty `tool_calls: []` array, which DeepSeek v4 and newer OpenAI models reject outright ("empty array. Expected an array with minimum length 1"). The model-facing history sanitizer now drops an empty `tool_calls` key on every path that builds the API payload, so a session that accumulated such a message can still send. Populated tool-call chains and their linked results are untouched. Thanks @Swanzb. (#5737)
 
 - **Switching profiles no longer occasionally sticks a session to the wrong provider.** When you switched profiles or tabs while the model dropdown was mid-rebuild, the app could read the *previous* profile's selected model and stamp its provider (e.g. `ollama`) onto a model that doesn't belong to it. That wrong provider got saved to the session and re-sent on every turn, bricking it with a "Provider 'X' is set… but no API key was found" error for a provider the session never used. The provider is now resolved from the dropdown option whose value actually matches the model being sent, so the mismatch can't happen. Credit @b3nw for the root-cause trace. (#5567)

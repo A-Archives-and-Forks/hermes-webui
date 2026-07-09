@@ -1355,14 +1355,18 @@ def _credential_secret_fingerprint(secret: str) -> str:
     value = str(secret or "").strip()
     if not value:
         return ""
-    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()
+    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
 def _entry_secret_fingerprint(entry: dict) -> str:
     value = str(entry.get("secret_fingerprint") or "").strip().lower()
     if value.startswith("sha256:"):
         value = value[len("sha256:"):]
-    return value
+    if not value:
+        return ""
+    if all(ch in "0123456789abcdef" for ch in value):
+        return value[:16]
+    return ""
 
 
 def _pool_entry_currently_unusable(entry: dict) -> bool:
@@ -1388,12 +1392,14 @@ def provider_has_process_wakeup_recovery_credential(provider_id: str, *, refresh
     configured_fingerprint = _credential_secret_fingerprint(configured_key)
     if not configured_fingerprint:
         return False
+    has_unusable_pool_entry = False
     for entry in _pool_entry_payloads(provider):
         if not _pool_entry_currently_unusable(entry):
             continue
+        has_unusable_pool_entry = True
         if _entry_secret_fingerprint(entry) == configured_fingerprint:
             return False
-    return True
+    return has_unusable_pool_entry
 
 
 def _active_provider_id() -> str | None:

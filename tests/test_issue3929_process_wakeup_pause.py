@@ -7,6 +7,7 @@ from pathlib import Path
 import queue
 import hashlib
 import sys
+import threading
 import types
 from unittest import mock
 
@@ -456,7 +457,7 @@ def test_process_wakeup_pause_keeps_pause_when_config_key_matches_exhausted_pool
     assert pause is not None
     session.save()
     models.SESSIONS[session.session_id] = session
-    exhausted_fingerprint = hashlib.sha256(b"same-key").hexdigest()
+    exhausted_fingerprint = hashlib.sha256(b"same-key").hexdigest()[:16]
     monkeypatch.setattr(providers, "_get_provider_api_key", lambda _provider: "same-key")
     monkeypatch.setattr(
         providers,
@@ -487,6 +488,55 @@ def test_process_wakeup_pause_keeps_pause_when_config_key_matches_exhausted_pool
     response = routes.start_session_turn(
         session.session_id,
         "[IMPORTANT: Background process completed with same exhausted config key.]",
+        source="process_wakeup",
+    )
+
+    assert response["_status"] == 409
+    assert response["error"] == PROCESS_WAKEUP_PAUSE_ERROR
+    saved = Session.load(session.session_id)
+    assert saved is not None
+    assert saved.process_wakeup_pause["suppressed_count"] == 1
+
+
+def test_process_wakeup_pause_keeps_pause_when_config_key_has_no_pool_evidence(tmp_path, monkeypatch):
+    session = Session(
+        session_id="wakeup_pause_config_key_no_pool_evidence",
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+    )
+    pause = models.record_process_wakeup_provider_unavailable_pause(
+        session,
+        classification="credential_pool_empty",
+        model="test-model",
+        provider="test-provider",
+    )
+    assert pause is not None
+    session.save()
+    models.SESSIONS[session.session_id] = session
+    monkeypatch.setattr(providers, "_get_provider_api_key", lambda _provider: "generic-config-key")
+    monkeypatch.setattr(providers, "_pool_entry_payloads", lambda _provider: [])
+    monkeypatch.setattr(
+        routes,
+        "provider_has_process_wakeup_recovery_credential",
+        providers.provider_has_process_wakeup_recovery_credential,
+    )
+
+    def _unexpected_start_run(*_args, **_kwargs):
+        raise AssertionError("a generic configured key is not pool-lane recovery evidence")
+
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _p: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", "test-provider", False),
+    )
+    monkeypatch.setattr(routes, "_start_run", _unexpected_start_run)
+
+    response = routes.start_session_turn(
+        session.session_id,
+        "[IMPORTANT: Background process completed with generic config key.]",
         source="process_wakeup",
     )
 
@@ -559,6 +609,80 @@ def test_process_wakeup_pause_clears_when_config_key_differs_from_exhausted_pool
         "model": "test-model",
         "model_provider": "test-provider",
     }
+    saved = Session.load(session.session_id)
+    assert saved is not None
+    assert saved.process_wakeup_pause == {}
+
+
+def test_process_wakeup_pause_successful_clear_serializes_against_concurrent_suppression(tmp_path, monkeypatch):
+    session = Session(
+        session_id="wakeup_pause_clear_vs_suppress_race",
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+    )
+    pause = models.record_process_wakeup_provider_unavailable_pause(
+        session,
+        classification="credential_pool_empty",
+        model="test-model",
+        provider="test-provider",
+    )
+    assert pause is not None
+    session.save()
+    models.SESSIONS[session.session_id] = session
+
+    recovery_revalidating = threading.Event()
+    release_recovery = threading.Event()
+    responses = {}
+    starts = []
+    starts_lock = threading.Lock()
+
+    def _provider_has_recovery(_session, **_kwargs):
+        if threading.current_thread().name == "pause-clear":
+            recovery_revalidating.set()
+            assert release_recovery.wait(timeout=3)
+            return True
+        return False
+
+    def _fake_start_run(s, **kwargs):
+        with starts_lock:
+            starts.append((threading.current_thread().name, kwargs.get("source")))
+        return {"stream_id": f"stream-{threading.current_thread().name}", "session_id": s.session_id, "_status": 200}
+
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _p: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", "test-provider", False),
+    )
+    monkeypatch.setattr(routes, "_process_wakeup_provider_has_recovery_credential", _provider_has_recovery)
+    monkeypatch.setattr(routes, "_start_run", _fake_start_run)
+
+    def _run(name):
+        responses[name] = routes.start_session_turn(
+            session.session_id,
+            f"[IMPORTANT: {name}]",
+            source="process_wakeup",
+        )
+
+    clear_thread = threading.Thread(target=_run, args=("clear",), name="pause-clear")
+    clear_thread.start()
+    assert recovery_revalidating.wait(timeout=3)
+
+    suppress_thread = threading.Thread(target=_run, args=("suppress",), name="pause-suppress")
+    suppress_thread.start()
+    release_recovery.set()
+
+    clear_thread.join(timeout=3)
+    suppress_thread.join(timeout=3)
+    assert not clear_thread.is_alive()
+    assert not suppress_thread.is_alive()
+
+    assert responses["clear"]["_status"] == 200
+    assert responses["suppress"]["_status"] == 200
+    assert all(resp.get("error") != PROCESS_WAKEUP_PAUSE_ERROR for resp in responses.values())
+    assert starts
     saved = Session.load(session.session_id)
     assert saved is not None
     assert saved.process_wakeup_pause == {}

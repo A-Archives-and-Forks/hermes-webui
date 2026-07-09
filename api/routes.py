@@ -20503,111 +20503,118 @@ def start_session_turn(
         profile_config=_pp_cfg,
         prefer_cached_catalog=True,
     )
-    if clear_process_wakeup_pause_if_model_changed(
-        s,
-        model=model,
-        provider=model_provider,
-    ):
+    _paused_wakeup_response = None
+    with _get_session_agent_lock(s.session_id):
         try:
-            s.save(touch_updated_at=False)
-        except Exception:
-            logger.debug(
-                "failed to persist process_wakeup pause reset for session %s",
-                session_id,
-                exc_info=True,
-            )
-    _paused_wakeup = None
-    if turn_source == "process_wakeup":
-        _credential_state_changed = False
-        try:
-            _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
-        except Exception:
-            logger.debug(
-                "failed to compare process_wakeup credential state for session %s",
-                session_id,
-                exc_info=True,
-            )
-        if process_wakeup_pause_matches(
+            s = get_session(session_id)
+        except KeyError:
+            return {"error": "Session not found", "_status": 404}
+        if clear_process_wakeup_pause_if_model_changed(
             s,
             model=model,
             provider=model_provider,
-            classification='credential_pool_empty',
         ):
-            _credential_recovered = False
-            _credential_revalidation_provider = _process_wakeup_revalidation_provider(
-                model,
-                model_provider,
-            )
             try:
-                _credential_recovered = _process_wakeup_provider_has_recovery_credential(
-                    s,
-                    model=model,
-                    provider=model_provider,
-                    provider_id=_credential_revalidation_provider,
-                )
+                s.save(touch_updated_at=False)
             except Exception:
                 logger.debug(
-                    "failed to revalidate process_wakeup credential availability for session %s",
+                    "failed to persist process_wakeup pause reset for session %s",
                     session_id,
                     exc_info=True,
                 )
-            if _credential_recovered:
-                _recovery_reason = (
-                    'credential_state_changed'
-                    if _credential_state_changed
-                    else 'credential_recovered'
+        if turn_source == "process_wakeup":
+            _credential_state_changed = False
+            try:
+                _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
+            except Exception:
+                logger.debug(
+                    "failed to compare process_wakeup credential state for session %s",
+                    session_id,
+                    exc_info=True,
                 )
-                if clear_process_wakeup_pause(s, reason=_recovery_reason):
-                    try:
-                        s.save(touch_updated_at=False)
-                    except Exception:
-                        logger.debug(
-                            "failed to persist process_wakeup credential recovery reset for session %s",
-                            session_id,
-                            exc_info=True,
-                        )
-            elif _credential_state_changed:
-                if _refresh_process_wakeup_pause_credential_fingerprint(s):
-                    try:
-                        s.save(touch_updated_at=False)
-                    except Exception:
-                        logger.debug(
-                            "failed to persist process_wakeup credential-state fingerprint refresh for session %s",
-                            session_id,
-                            exc_info=True,
-                        )
-        _paused_wakeup = suppress_process_wakeup_for_provider_pause(
-            s,
-            model=model,
-            provider=model_provider,
-            classification='credential_pool_empty',
-        )
-    if _paused_wakeup is not None:
-        try:
-            PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-        except Exception:
-            logger.debug(
-                "failed to discard pending bg-task marker for paused wakeup %s",
-                session_id,
-                exc_info=True,
+            if process_wakeup_pause_matches(
+                s,
+                model=model,
+                provider=model_provider,
+                classification='credential_pool_empty',
+            ):
+                _credential_recovered = False
+                _credential_revalidation_provider = _process_wakeup_revalidation_provider(
+                    model,
+                    model_provider,
+                )
+                try:
+                    _credential_recovered = _process_wakeup_provider_has_recovery_credential(
+                        s,
+                        model=model,
+                        provider=model_provider,
+                        provider_id=_credential_revalidation_provider,
+                    )
+                except Exception:
+                    logger.debug(
+                        "failed to revalidate process_wakeup credential availability for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                if _credential_recovered:
+                    _recovery_reason = (
+                        'credential_state_changed'
+                        if _credential_state_changed
+                        else 'credential_recovered'
+                    )
+                    if clear_process_wakeup_pause(s, reason=_recovery_reason):
+                        try:
+                            s.save(touch_updated_at=False)
+                        except Exception:
+                            logger.debug(
+                                "failed to persist process_wakeup credential recovery reset for session %s",
+                                session_id,
+                                exc_info=True,
+                            )
+                elif _credential_state_changed:
+                    if _refresh_process_wakeup_pause_credential_fingerprint(s):
+                        try:
+                            s.save(touch_updated_at=False)
+                        except Exception:
+                            logger.debug(
+                                "failed to persist process_wakeup credential-state fingerprint refresh for session %s",
+                                session_id,
+                                exc_info=True,
+                            )
+            _paused_wakeup = suppress_process_wakeup_for_provider_pause(
+                s,
+                model=model,
+                provider=model_provider,
+                classification='credential_pool_empty',
             )
-        try:
-            s.save(touch_updated_at=False)
-        except Exception:
-            logger.debug(
-                "failed to persist process_wakeup suppression for session %s",
-                session_id,
-                exc_info=True,
-            )
-        return {
-            "error": PROCESS_WAKEUP_PAUSE_ERROR,
-            "message": (
-                "Automatic process wakeups are paused for this session because "
-                "the provider credential pool is unavailable."
-            ),
-            "process_wakeup_pause": _paused_wakeup,
-            "_status": 409,
-        }
+            if _paused_wakeup is not None:
+                try:
+                    PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+                except Exception:
+                    logger.debug(
+                        "failed to discard pending bg-task marker for paused wakeup %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                try:
+                    s.save(touch_updated_at=False)
+                except Exception:
+                    logger.debug(
+                        "failed to persist process_wakeup suppression for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                _paused_wakeup_response = {
+                    "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                    "message": (
+                        "Automatic process wakeups are paused for this session because "
+                        "the provider credential pool is unavailable."
+                    ),
+                    "process_wakeup_pause": _paused_wakeup,
+                    "_status": 409,
+                }
+    if _paused_wakeup_response is not None:
+        return _paused_wakeup_response
     resp = _start_run(
         s,
         msg=msg,

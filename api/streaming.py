@@ -9512,6 +9512,16 @@ def _run_agent_streaming(
                     logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+            try:
+                _latest_pause_owner = get_session(getattr(s, 'session_id', session_id))
+                s.process_wakeup_pause = dict(
+                    getattr(_latest_pause_owner, 'process_wakeup_pause', {}) or {}
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to re-read process wakeup pause before success clear",
+                    exc_info=True,
+                )
             _process_wakeup_pause_before_clear = dict(getattr(s, 'process_wakeup_pause', {}) or {})
             if clear_process_wakeup_pause(s, reason='run_completed'):
                 if cancel_event.is_set():
@@ -9539,6 +9549,10 @@ def _run_agent_streaming(
                     s.save(touch_updated_at=False)
                 if cancel_event.is_set():
                     s.process_wakeup_pause = dict(_process_wakeup_pause_before_clear)
+                    try:
+                        s.save(touch_updated_at=False)
+                    except Exception:
+                        logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
                         append_turn_journal_event_for_stream(

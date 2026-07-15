@@ -13368,6 +13368,46 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "stream_id required")
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
+        gateway_stop_blocked = False
+        try:
+            from api.gateway_chat import _STREAM_RUN_IDS, gateway_run_id_pending, stop_gateway_run
+
+            run_id = _STREAM_RUN_IDS.get(stream_id)
+            pending_run_id = False
+            if not run_id:
+                import time as _time
+
+                pending_run_id = gateway_run_id_pending(stream_id)
+                attempts_remaining = 10
+                while not run_id and pending_run_id and attempts_remaining > 0:
+                    _time.sleep(0.05)
+                    run_id = _STREAM_RUN_IDS.get(stream_id)
+                    pending_run_id = gateway_run_id_pending(stream_id)
+                    attempts_remaining -= 1
+            if run_id:
+                if stop_gateway_run(stream_id):
+                    owner_sid = stream_owner_session_id(stream_id)
+                    if owner_sid:
+                        retire_gateway_pending_mirror(owner_sid, run_id=run_id)
+                else:
+                    gateway_stop_blocked = True
+            elif pending_run_id:
+                gateway_stop_blocked = True
+        except Exception:
+            logger.debug("Failed to stop gateway run during chat cancellation", exc_info=True)
+            gateway_stop_blocked = True
+        if gateway_stop_blocked:
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "cancelled": False,
+                    "stream_id": stream_id,
+                    "error": "Gateway stop failed",
+                },
+                status=502,
+            )
+
         from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
         if runtime_adapter_enabled():
@@ -23749,7 +23789,7 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
-def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
+def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
     Slice 3b keeps the RuntimeAdapter as a protocol translator: it delegates to
@@ -23760,6 +23800,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     pending = None
     found_target = False
     gateway_keys = []
+    gateway_head_matches_target = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
@@ -23767,10 +23808,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
             if approval_id:
                 # Find and remove the specific entry by approval_id.
                 for i, entry in enumerate(queue):
-                    if entry.get("approval_id") == approval_id:
-                        pending = queue.pop(i)
-                        found_target = True
-                        break
+                    if entry.get("approval_id") != approval_id:
+                        continue
+                    if run_id and str(entry.get("run_id") or "").strip() != run_id:
+                        continue
+                    pending = queue.pop(i)
+                    found_target = True
+                    break
                 else:
                     # A stale explicit id must not accidentally approve the
                     # oldest queued command; duplicate/stale responses are
@@ -23783,7 +23827,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 _pending.pop(sid, None)
         elif queue:
             # Legacy single-dict value.
-            if not approval_id or queue.get("approval_id") == approval_id:
+            if (
+                not approval_id
+                or (
+                    queue.get("approval_id") == approval_id
+                    and (not run_id or str(queue.get("run_id") or "").strip() == run_id)
+                )
+            ):
                 pending = _pending.pop(sid, None)
                 found_target = pending is not None
         # When no _pending entry found AND no explicit approval_id was
@@ -23806,6 +23856,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 # idempotent over the session key set so the outcome is
                 # the same regardless of which entry wins the race.
                 found_target = True
+        elif approval_id:
+            gw_queue = _gateway_queues.get(sid)
+            if gw_queue and len(gw_queue) > 0:
+                gw_entry = gw_queue[0]
+                gw_data = getattr(gw_entry, "data", None) or {}
+                gw_approval_id = str(gw_data.get("approval_id") or "").strip()
+                gw_run_id = str(gw_data.get("run_id") or "").strip()
+                if run_id:
+                    gateway_head_matches_target = gw_approval_id == approval_id and gw_run_id == run_id
+                else:
+                    gateway_head_matches_target = gw_approval_id == approval_id
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -23837,7 +23898,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
     gateway_resolved = 0
-    if found_target or not approval_id:
+    should_resolve_gateway = (
+        not approval_id
+        or (
+            found_target
+            and (
+                not run_id
+                or gateway_head_matches_target
+            )
+        )
+    )
+    if should_resolve_gateway:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
@@ -23920,20 +23991,50 @@ def _handle_approval_respond(handler, body):
             active_sid = getattr(s, "active_stream_id", None)
             if active_sid:
                 _candidate_run_id = _STREAM_RUN_IDS.get(active_sid)
-        matched_mirror = gateway_pending_mirror(sid, approval_id=approval_id, run_id=_candidate_run_id)
-        _run_id = matched_mirror["run_id"] if matched_mirror else None
-        if not matched_mirror and approval_id:
+        local_match = False
+        run_backed_gateway_matches = 0
+        if approval_id:
             with _lock:
                 queue = _pending.get(sid)
                 entries = queue if isinstance(queue, list) else [queue] if queue else []
                 local_match = any(
                     isinstance(entry, dict)
                     and entry.get("approval_id") == approval_id
-                    and not entry.get(_GATEWAY_MIRROR_FLAG)
+                    and (
+                        not entry.get(_GATEWAY_MIRROR_FLAG)
+                        or not str(entry.get("run_id") or "").strip()
+                    )
                     for entry in entries
+                )
+                run_backed_gateway_matches = sum(
+                    1
+                    for entry in entries
+                    if isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and entry.get(_GATEWAY_MIRROR_FLAG)
+                    and str(entry.get("run_id") or "").strip()
                 )
             if local_match:
                 _candidate_run_id = None
+        matched_mirror = gateway_pending_mirror(
+            sid, approval_id=approval_id, run_id=_candidate_run_id
+        ) if approval_id else None
+        _run_id = matched_mirror["run_id"] if matched_mirror else None
+        if not matched_mirror and approval_id:
+            if local_match:
+                _candidate_run_id = None
+            elif run_backed_gateway_matches > 1 and not _candidate_run_id:
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "choice": choice,
+                        "relayed": False,
+                        "code": "gateway_run_unavailable",
+                        "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                    },
+                    status=409,
+                )
         if _run_id:
             from api.runner_client import HttpRunnerClient, RunnerClientError
             _cfg = _get_config()
@@ -23949,10 +24050,10 @@ def _handle_approval_respond(handler, body):
             # still needs the same cleanup path so the parked entry, mirrored
             # card, and agent signal all settle here too.
             cleanup_approval_id = matched_mirror["approval_id"]
-            _resolve_approval_legacy(sid, cleanup_approval_id, choice)
+            _resolve_approval_legacy(sid, cleanup_approval_id, choice, run_id=_run_id)
             retire_gateway_pending_mirror(sid, approval_id=cleanup_approval_id, run_id=_run_id)
             return j(handler, {"ok": True, "choice": choice, "relayed": True})
-        if _candidate_run_id or approval_id.startswith("gwrun:"):
+        if _candidate_run_id:
             return j(handler, {"ok": False, "choice": choice, "relayed": False,
                                "code": "gateway_run_unavailable",
                                "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)

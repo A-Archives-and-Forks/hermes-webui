@@ -40,6 +40,7 @@ import pytest
 # Import order matters: tools.* will not resolve until api.config has run.
 from api import routes
 from api import models
+from api.gateway_chat import _STREAM_RUN_IDS
 
 try:
     import tools.approval as ta
@@ -179,6 +180,101 @@ def test_local_mirrored_approval_deny_resolves():
         assert entry.event.is_set()
         assert entry.result == "deny"
     finally:
+        _cleanup(sid)
+
+
+def test_local_mirrored_approval_with_gwrun_prefix_still_resolves():
+    """A local approval id that happens to start with gwrun: stays local."""
+    sid = f"local-approval-prefixed-{uuid.uuid4().hex[:8]}"
+    _register_session(sid)
+    try:
+        entry, _approval_id = _seed_local_pending_approval(sid)
+        with ta._lock:
+            head = ta._pending[sid][0]
+            head["approval_id"] = "gwrun:local-test"
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False):
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": "gwrun:local-test"},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("code") != "gateway_run_unavailable"
+        assert entry.event.is_set()
+        assert entry.result == "once"
+    finally:
+        _cleanup(sid)
+
+
+def test_local_live_head_does_not_inherit_stale_remote_run():
+    """A stale remote mirror cannot seize a live local approval with the same id."""
+    sid = f"local-approval-collision-{uuid.uuid4().hex[:8]}"
+    _register_session(sid)
+    try:
+        entry, approval_id = _seed_local_pending_approval(sid)
+        with ta._lock:
+            local_queue = ta._pending.get(sid)
+            local_entries = list(local_queue) if isinstance(local_queue, list) else [local_queue]
+            ta._pending[sid] = [{
+                ra._GATEWAY_MIRROR_FLAG: True,
+                "run_id": "remote-run",
+                "approval_id": approval_id,
+                "command": "stale-remote",
+            }, *local_entries]
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": approval_id},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("relayed") is not True
+        respond_approval.assert_not_called()
+        assert entry.event.is_set()
+        assert entry.result == "once"
+    finally:
+        _cleanup(sid)
+
+
+def test_local_live_head_beats_active_remote_candidate_run():
+    """A local approval still wins when an active remote run shares its id."""
+    sid = f"local-approval-active-remote-{uuid.uuid4().hex[:8]}"
+    session = _register_session(sid)
+    stream_id = f"remote-stream-{uuid.uuid4().hex[:8]}"
+    session.active_stream_id = stream_id
+    _STREAM_RUN_IDS[stream_id] = "remote-run"
+    try:
+        entry, approval_id = _seed_local_pending_approval(sid)
+        with ta._lock:
+            local_queue = ta._pending.get(sid)
+            local_entries = list(local_queue) if isinstance(local_queue, list) else [local_queue]
+            ta._pending[sid] = [{
+                ra._GATEWAY_MIRROR_FLAG: True,
+                "run_id": "remote-run",
+                "approval_id": approval_id,
+                "command": "remote-collision",
+            }, *local_entries]
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": approval_id},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("relayed") is not True
+        respond_approval.assert_not_called()
+        assert entry.event.is_set()
+        assert entry.result == "once"
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
         _cleanup(sid)
 
 

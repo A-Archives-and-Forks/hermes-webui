@@ -4,6 +4,7 @@ import copy
 import random
 
 import api.session_ops as session_ops
+import pytest
 
 
 def _old_matcher(context, display, keep):
@@ -361,3 +362,93 @@ def test_alignment_prefilters_timestamp_candidates_once():
     ]
     session_ops.truncate_context_for_display_keep(context, display, 125)
     assert counter["id_gets"] <= len(context) + 2
+
+
+def test_alignment_preserves_reached_raising_context_signature():
+    context = [
+        {
+            "role": "assistant",
+            "content": "reached",
+            "tool_calls": [{1: "integer key", "string key": "mixed keys"}],
+        },
+        {"role": "assistant", "content": "context-tail", "id": "tail"},
+    ]
+    display = [
+        {"role": "assistant", "content": "display-head"},
+        {"role": "assistant", "content": "display-tail"},
+        {"role": "assistant", "content": "display-extra"},
+    ]
+
+    with pytest.raises(TypeError):
+        _old_matcher(context, display, 1)
+    with pytest.raises(TypeError):
+        session_ops.truncate_context_for_display_keep(context, display, 1)
+
+
+def test_alignment_defers_unreachable_raising_context_signature():
+    context = [
+        {"role": "assistant", "content": "first", "id": "first"},
+        {"role": "assistant", "content": "second", "id": "second"},
+        {
+            "role": "assistant",
+            "content": "unreachable",
+            "tool_calls": [{1: "integer key", "string key": "mixed keys"}],
+        },
+    ]
+    display = [
+        {"role": "assistant", "content": "first", "id": "first"},
+        {"role": "assistant", "content": "second", "id": "second"},
+    ]
+
+    expected = _old_matcher(context, display, 1)
+    actual = session_ops.truncate_context_for_display_keep(context, display, 1)
+
+    assert expected == context[:1]
+    assert actual == expected
+
+
+class _UnsafeEquality:
+    def __eq__(self, other):
+        raise AssertionError("unsafe equality was reached")
+
+    __hash__ = object.__hash__
+
+
+def test_alignment_stops_before_unsafe_id_after_weak_ambiguity():
+    context = [
+        {"role": "assistant", "content": "same"},
+        {"role": "assistant", "content": "same"},
+        {"role": "assistant", "content": "same", "id": _UnsafeEquality()},
+    ]
+    display = [
+        {"role": "assistant", "content": "same", "id": "target"},
+        {"role": "assistant", "content": "tail"},
+    ]
+
+    expected = _old_matcher(context, display, 1)
+    actual = session_ops.truncate_context_for_display_keep(context, display, 1)
+
+    assert expected == context[:2]
+    assert actual == expected
+
+
+def test_alignment_stops_before_unsafe_timestamp_after_weak_ambiguity():
+    context = [
+        {"role": "assistant", "content": "same"},
+        {"role": "assistant", "content": "same"},
+        {
+            "role": "assistant",
+            "content": "same",
+            "timestamp": _UnsafeEquality(),
+        },
+    ]
+    display = [
+        {"role": "assistant", "content": "same", "timestamp": 7},
+        {"role": "assistant", "content": "tail"},
+    ]
+
+    expected = _old_matcher(context, display, 1)
+    actual = session_ops.truncate_context_for_display_keep(context, display, 1)
+
+    assert expected == context[:2]
+    assert actual == expected

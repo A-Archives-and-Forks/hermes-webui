@@ -146,10 +146,17 @@ def truncate_context_for_display_keep(
         )
 
     # Materialize signatures once.  The matcher deliberately keeps the original
-    # rows in ``ctx``; these records are only an alignment index.
-    context_records = [
-        (row, _row_signature(row)) for row in ctx
-    ]
+    # rows in ``ctx``; these records are only an alignment index. A signature
+    # failure is deferred because the old matcher may return before reaching it.
+    context_records = []
+    deferred_signature_positions: list[int] = []
+    for idx, row in enumerate(ctx):
+        try:
+            row_signature = _row_signature(row)
+        except Exception:
+            row_signature = None
+            deferred_signature_positions.append(idx)
+        context_records.append((row, row_signature))
     message_signatures = [_row_signature(message) for message in msgs]
     id_positions: dict[Any, list[int]] = {}
     signature_positions: dict[tuple[str, ...], list[int]] = {}
@@ -225,6 +232,39 @@ def truncate_context_for_display_keep(
         offset = bisect_left(positions, start_idx)
         return positions[offset] if offset < len(positions) else None
 
+    def _lazy_first_match_from(
+        message: Any,
+        start_idx: int,
+    ) -> tuple[int | None, int | None]:
+        """Match exactly as the original ordered scan did."""
+        msg_sig = _row_signature(message)
+        if msg_sig is None:
+            return None, None
+        weak_matches: list[int] = []
+        for idx in range(start_idx, len(ctx)):
+            context_row = ctx[idx]
+            context_sig = _row_signature(context_row)
+            if context_sig is None or not isinstance(context_row, dict):
+                continue
+            context_id = context_row.get('id')
+            msg_id = message.get('id')
+            if context_id is not None and msg_id is not None:
+                if context_id == msg_id:
+                    return idx, None
+                continue
+            if context_sig != msg_sig:
+                continue
+            context_ts = context_row.get('timestamp')
+            msg_ts = message.get('timestamp')
+            if context_ts is not None and msg_ts is not None:
+                if context_ts == msg_ts:
+                    return idx, None
+                continue
+            weak_matches.append(idx)
+            if len(weak_matches) > 1:
+                return None, weak_matches[0]
+        return (weak_matches[0], None) if len(weak_matches) == 1 else (None, None)
+
     def _first_match_from(
         message_idx: int,
         message: Any,
@@ -235,65 +275,45 @@ def truncate_context_for_display_keep(
             return None, None
         msg_id = message.get('id')
         msg_ts = message.get('timestamp')
+        deferred_reachable = _first_at_or_after(
+            deferred_signature_positions, start_idx
+        ) is not None
+        unsafe_id_reachable = (
+            msg_id is not None
+            and _first_at_or_after(unsafe_id_positions, start_idx) is not None
+        )
+        unsafe_timestamp_candidates = (
+            unsafe_timestamp_no_id_positions.get(msg_sig, [])
+            if msg_id is not None
+            else unsafe_timestamp_positions.get(msg_sig, [])
+        )
+        unsafe_timestamp_reachable = (
+            msg_ts is not None
+            and _first_at_or_after(unsafe_timestamp_candidates, start_idx) is not None
+        )
         if not _safe_raw_value(msg_id) or not _safe_raw_value(msg_ts):
-            weak_matches: list[int] = []
-            for idx in range(start_idx, len(ctx)):
-                context_row, context_sig = context_records[idx]
-                if context_sig is None or not isinstance(context_row, dict):
-                    continue
-                context_id = context_row.get('id')
-                if context_id is not None and msg_id is not None:
-                    if context_id == msg_id:
-                        return idx, None
-                    continue
-                if context_sig != msg_sig:
-                    continue
-                context_ts = context_row.get('timestamp')
-                if context_ts is not None and msg_ts is not None:
-                    if context_ts == msg_ts:
-                        return idx, None
-                    continue
-                weak_matches.append(idx)
-                if len(weak_matches) > 1:
-                    return None, weak_matches[0]
-            return (weak_matches[0], None) if len(weak_matches) == 1 else (None, None)
+            return _lazy_first_match_from(message, start_idx)
+        if deferred_reachable or unsafe_id_reachable or unsafe_timestamp_reachable:
+            return _lazy_first_match_from(message, start_idx)
 
         exact_positions: list[int] = []
         if msg_id is not None:
             id_idx = _first_at_or_after(id_positions.get(msg_id), start_idx)
             if id_idx is not None:
                 exact_positions.append(id_idx)
-            for idx in unsafe_id_positions:
-                if idx < start_idx:
-                    continue
-                if ctx[idx].get('id') == msg_id:
-                    exact_positions.append(idx)
-                    break
         if msg_ts is not None:
             timestamp_key = (msg_sig, msg_ts)
             if msg_id is not None:
                 timestamp_positions = signature_timestamp_no_id_positions.get(
                     timestamp_key, []
                 )
-                unsafe_timestamp_candidates = (
-                    unsafe_timestamp_no_id_positions.get(msg_sig, [])
-                )
             else:
                 timestamp_positions = signature_timestamp_positions.get(
                     timestamp_key, []
                 )
-                unsafe_timestamp_candidates = unsafe_timestamp_positions.get(
-                    msg_sig, []
-                )
             timestamp_idx = _first_at_or_after(timestamp_positions, start_idx)
             if timestamp_idx is not None:
                 exact_positions.append(timestamp_idx)
-            for idx in unsafe_timestamp_candidates:
-                if idx < start_idx:
-                    continue
-                if ctx[idx].get('timestamp') == msg_ts:
-                    exact_positions.append(idx)
-                    break
         exact_idx = min(exact_positions, default=None)
 
         if msg_id is not None and msg_ts is not None:

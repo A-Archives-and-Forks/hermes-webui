@@ -638,11 +638,11 @@ class TestApprovalHTTPEndpoints:
                 r._gateway_queues.pop(sid, None)
                 _STREAM_RUN_IDS.pop(stream_id, None)
 
-    def test_gateway_no_run_mirror_stays_visible_when_exact_local_producer_is_gone(self, monkeypatch):
-        """A tokenized no-run mirror stays live when its parked producer already vanished."""
+    def test_gateway_no_run_mirror_survives_pending_and_attention_reads_until_explicit_teardown(self, monkeypatch):
+        """A missing-producer 409 stays visible until a real teardown retires it."""
         from api import routes as r
         from api import route_approvals as ra
-        from api.gateway_chat import _STREAM_RUN_IDS
+        from api.gateway_chat import _STREAM_RUN_IDS, _cleanup_gateway_pending_mirror
 
         sid = f"http-gateway-race-{uuid.uuid4().hex[:8]}"
         stream_id = f"stream-race-{uuid.uuid4().hex[:8]}"
@@ -680,13 +680,76 @@ class TestApprovalHTTPEndpoints:
                 "error": r._GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
             }
             assert not entry.event.is_set()
-            with _lock:
-                pending_queue = r._pending.get(sid)
-                assert isinstance(pending_queue, list)
-                assert len(pending_queue) == 1
-                assert pending_queue[0]["approval_id"] == approval_id
+            pending = r._handle_approval_pending(
+                object(), urllib.parse.urlparse(
+                    f"/api/approval/pending?session_id={urllib.parse.quote(sid)}"
+                )
+            )
+            assert pending["pending"]["approval_id"] == approval_id
+            assert pending["pending_count"] == 1
+            assert r._session_attention_summary(sid) == {
+                "kind": "approval", "count": 1, "severity": "critical"
+            }
+            _cleanup_gateway_pending_mirror(sid)
+            pending = r._handle_approval_pending(
+                object(), urllib.parse.urlparse(
+                    f"/api/approval/pending?session_id={urllib.parse.quote(sid)}"
+                )
+            )
+            assert pending == {"pending": None, "pending_count": 0}
+            assert r._session_attention_summary(sid) is None
         finally:
             with _lock:
                 r._pending.pop(sid, None)
                 r._gateway_queues.pop(sid, None)
                 _STREAM_RUN_IDS.pop(stream_id, None)
+
+    def test_gateway_no_run_non_head_response_resolves_only_exact_producer(self, monkeypatch):
+        """An exact non-head response wakes only its matching producer."""
+        from api import routes as r
+        from api import route_approvals as ra
+
+        sid = f"http-gateway-non-head-{uuid.uuid4().hex[:8]}"
+        approval_a = {"command": "rm -rf /tmp/a", "description": "a"}
+        approval_b = {"command": "rm -rf /tmp/b", "description": "b"}
+        entry_a = _ApprovalEntry(approval_a)
+        entry_b = _ApprovalEntry(approval_b)
+        captured = {}
+
+        def fake_j(handler, data, status=200, extra_headers=None):
+            captured["payload"] = data
+            captured["status"] = status
+            return data
+
+        monkeypatch.setattr(r, "j", fake_j)
+        monkeypatch.setattr(r, "get_session", lambda _sid: SimpleNamespace(active_stream_id=None))
+        monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+        with _lock:
+            r._pending.pop(sid, None)
+            r._gateway_queues[sid] = [entry_a, entry_b]
+        try:
+            ra.submit_gateway_pending_mirror(sid, approval_a)
+            ra.submit_gateway_pending_mirror(sid, approval_b)
+            with _lock:
+                approval_b_id = next(
+                    item["approval_id"] for item in r._pending[sid]
+                    if item["command"] == approval_b["command"]
+                )
+            r._handle_approval_respond(
+                object(), {"session_id": sid, "choice": "once", "approval_id": approval_b_id}
+            )
+            assert captured["status"] == 200
+            assert entry_b.event.is_set()
+            assert entry_b.result == "once"
+            assert not entry_a.event.is_set()
+            pending = r._handle_approval_pending(
+                object(), urllib.parse.urlparse(
+                    f"/api/approval/pending?session_id={urllib.parse.quote(sid)}"
+                )
+            )
+            assert pending["pending"]["command"] == approval_a["command"]
+            assert pending["pending_count"] == 1
+        finally:
+            with _lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)

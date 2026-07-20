@@ -46,6 +46,7 @@ except ImportError:
 _approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
 _GATEWAY_MIRROR_FLAG = "_gateway_mirror"
 _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
+_GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
 _GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
 
@@ -219,6 +220,10 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
             changed = True
             continue
 
+        if entry.get(_GATEWAY_MIRROR_RETAINED):
+            rebuilt.append(entry)
+            continue
+
         if matches_live_head and not live_mirror_present:
             if entry_token != live_token:
                 entry[_GATEWAY_MIRROR_TOKEN] = live_token
@@ -334,7 +339,11 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
                 entry for entry in entries
                 if _is_gateway_mirror_entry(entry)
                 and str(entry.get("run_id") or "").strip() == normalized_run_id
-            ] if normalized_run_id else []
+            ] if normalized_run_id else [
+                entry for entry in entries
+                if _is_gateway_mirror_entry(entry)
+                and not str(entry.get("run_id") or "").strip()
+            ]
             if normalized_run_id:
                 retained_gateway_queue = []
                 for entry in gateway_queue:
@@ -344,10 +353,11 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
                         continue
                     retained_gateway_queue.append(entry)
         if not retired and not gateway_queue_changed:
-            if approval_id:
-                head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
-                _approval_sse_notify_locked(session_key, head, total)
-            return False
+            head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
+            _approval_sse_notify_locked(session_key, head, total)
+            if changed:
+                publish_session_list_changed("attention_resolved")
+            return changed
         for match in retired:
             entries.remove(match)
         if normalized_run_id and not approval_id:
@@ -546,6 +556,7 @@ def resolve_gateway_pending_local_no_run_mirror(
                 target = gateway_queue.pop(index)
                 break
         if target is None:
+            matched_mirror[_GATEWAY_MIRROR_RETAINED] = True
             return True, 0, entries[0] if entries else None, len(entries)
 
         if gateway_queue:

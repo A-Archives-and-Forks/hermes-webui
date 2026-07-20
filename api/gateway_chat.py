@@ -347,6 +347,8 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     run_id = str(payload.get("run_id") or "").strip()
     raw_approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
     approval_id = raw_approval_id
+    if not approval_id:
+        approval_id = uuid.uuid4().hex
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
     allow_permanent = payload.get("allow_permanent")
@@ -703,14 +705,10 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
 def _cleanup_gateway_pending_mirror(session_id: str) -> None:
     try:
         from api.route_approvals import (
-            _approval_sse_notify_locked,
-            _lock as _approval_lock,
-            reconcile_gateway_pending_mirror_locked,
+            retire_gateway_pending_mirror,
         )
 
-        with _approval_lock:
-            head, total, _ = reconcile_gateway_pending_mirror_locked(session_id)
-            _approval_sse_notify_locked(session_id, head, total)
+        retire_gateway_pending_mirror(session_id)
     except Exception:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 

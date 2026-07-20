@@ -432,13 +432,19 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
 def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
     """A normalized fallback browser ID must not become authoritative Agent identity."""
     from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT
-    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
+    from api.gateway_chat import _STREAM_RUN_IDS, _gateway_runs_approval_event, _run_gateway_runs_api_streaming
     from api import routes
     import api.route_approvals as approvals
 
     sid = "sid-live-empty-ingress"
     stream_id = "stream-live-empty-ingress"
     events = []
+    normalized = _gateway_runs_approval_event({
+        "command": "rm -rf /tmp/x", "description": "Dangerous",
+        "run_id": "run-empty-ingress", "approval_id": "", "id": "",
+    })
+    assert normalized["approval_id"]
+    assert normalized["_gateway_raw_approval_id_present"] is False
     STREAM_PARTIAL_TEXT[stream_id] = ""
     STREAM_REASONING_TEXT[stream_id] = ""
 
@@ -472,22 +478,10 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
             return _JsonResponse()
         return _SseResponse()
 
-    def fake_mapped_approval(payload):
-        assert payload["approval_id"] == ""
-        assert payload["id"] == ""
-        return {
-            "command": "rm -rf /tmp/x",
-            "description": "Dangerous",
-            "run_id": "run-empty-ingress",
-            "approval_id": "gwrun:normalized-fallback",
-            "_gateway_raw_approval_id_present": False,
-        }
-
     handler = MagicMock()
     handler.wfile = io.BytesIO()
     try:
         with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-             patch("api.gateway_chat._gateway_runs_approval_event", side_effect=fake_mapped_approval), \
              patch("api.config.gateway_supports_approval_identity_v1", return_value=True):
             _run_gateway_runs_api_streaming(
                 session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
@@ -496,11 +490,12 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
                 cancel_event=threading.Event(),
             )
             mirror = approvals.gateway_pending_mirror(sid, run_id="run-empty-ingress")
+            browser_id = mirror["approval_id"]
             with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=stream_id)), \
                  patch("api.config.gateway_supports_approval_identity_v1", return_value=True), \
                  patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
                 routes._handle_approval_respond(handler, {
-                    "session_id": sid, "choice": "once", "approval_id": "gwrun:normalized-fallback",
+                    "session_id": sid, "choice": "once", "approval_id": browser_id,
                 })
                 respond.assert_called_once_with("run-empty-ingress", "", "once")
     finally:
@@ -509,9 +504,11 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
         _STREAM_RUN_IDS.pop(stream_id, None)
 
     assert events[0][0] == "approval"
-    assert events[0][1]["approval_id"] == "gwrun:normalized-fallback"
+    assert events[0][1]["approval_id"]
+    assert events[0][1]["_gateway_raw_approval_id_present"] is False
     assert events[0][1]["_gateway_agent_identity_v1"] is False
-    assert mirror["approval_id"] == "gwrun:normalized-fallback"
+    assert mirror["approval_id"] == events[0][1]["approval_id"]
+    assert mirror["_gateway_raw_approval_id_present"] is False
     assert mirror["_gateway_agent_identity_v1"] is False
     approvals._pending.pop(sid, None)
     approvals._gateway_queues.pop(sid, None)

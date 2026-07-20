@@ -66,7 +66,8 @@ vm.runInContext(
   sandbox,
   {{filename:'assistant_turn_anchors.js'}}
 );
-sandbox._redactToolTargetLabel = value => String(value);
+sandbox._redactToolTargetLabel = value => String(value)
+  .replace(/([A-Za-z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD)[A-Za-z0-9_]*\\s*=\\s*)(?:"[^"]*"|'[^']*'|\\S+)/gi, '$1[redacted]');
 
 for(const name of [
   '_clipCliToolSnippet',
@@ -77,12 +78,16 @@ for(const name of [
   '_firstOwnedValue',
   '_cliPatchSnippetFromArgs',
   '_cliToolCardSnippet',
+  '_cliToolCardHasDiffSnippet',
+  '_anchorSceneToolCallFromRow',
   '_toolArgsSnapshot',
   '_assistantReasoningPayloadText',
   '_idLinkedHistoricalMessageText',
   '_idLinkedHistoricalMessageRef',
   '_idLinkedHistoricalToolArguments',
   '_idLinkedHistoricalToolResultRaw',
+  '_idLinkedHistoricalRedactSnippet',
+  '_idLinkedHistoricalHasVisibleSidecar',
   '_idLinkedHistoricalTurnScene',
   '_hydrateIdLinkedHistoricalToolScenes',
 ]){{
@@ -112,7 +117,12 @@ const second = {str(repeat).lower()}
 const owners = messages
   .map((message, index) => message && message._anchor_activity_scene ? {{index, scene:message._anchor_activity_scene}} : null)
   .filter(Boolean);
-console.log(JSON.stringify({{first, second, unchanged:afterFirst===JSON.stringify(messages), owners}}));
+sandbox.owners = owners;
+const toolCards = vm.runInContext(
+  "owners.map(owner => owner.scene.activity_rows.map(row => _anchorSceneToolCallFromRow(row, {{settled:true}})))",
+  sandbox
+);
+console.log(JSON.stringify({{first, second, unchanged:afterFirst===JSON.stringify(messages), owners, toolCards}}));
 """
     result = subprocess.run(
         [NODE, "-e", script],
@@ -299,6 +309,118 @@ def test_ambiguous_or_richer_historical_tool_shapes_keep_legacy_ownership(messag
 
     assert data["first"] == 0
     assert data["owners"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for Anchor hydration tests")
+@pytest.mark.parametrize("content", [
+    {"stdout": "...", "env": "API_KEY=result-secret-123"},
+    [{"stdout": "ok"}],
+    None,
+])
+def test_non_string_historical_tool_results_keep_legacy_ownership(content):
+    messages = _linked_turn()
+    messages[2]["content"] = content
+
+    data = _run_hydration(messages)
+
+    assert data["first"] == 0
+    assert data["owners"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for Anchor hydration tests")
+def test_string_historical_tool_result_is_redacted_before_anchor_scene():
+    messages = _linked_turn()
+    messages[2]["content"] = '{"output":"API_KEY=result-secret-123"}'
+
+    data = _run_hydration(messages)
+
+    assert data["first"] == 1
+    row = data["owners"][0]["scene"]["activity_rows"][0]
+    assert "result-secret-123" not in json.dumps(row)
+    assert "API_KEY=[redacted]" in row["tool"]["snippet"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for Anchor hydration tests")
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [
+            {"role": "user", "content": "Run it"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "system", "content": "visible system status"},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "Done"},
+        ],
+        [
+            {"role": "user", "content": "Run it"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "developer", "content": "visible developer note"},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "Done"},
+        ],
+        [
+            {"role": "user", "content": "Run it"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "function", "name": "legacy_func", "content": "legacy function output"},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "Done"},
+        ],
+        [
+            {"role": "user", "content": "Run it"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "Done"},
+        ],
+        [
+            {"role": "user", "content": "Run it"},
+            {
+                "role": "assistant",
+                "content": None,
+                "attachments": [{"name": "evidence.txt"}],
+                "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "Done"},
+        ],
+        [
+            {"role": "user", "content": "Run it"},
+            {
+                "role": "assistant",
+                "content": None,
+                "_statusCard": {"title": "Visible status"},
+                "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "Done"},
+        ],
+        [
+            {"role": "user", "content": "Run it"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": ""}}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "Done"},
+        ],
+    ],
+)
+def test_non_whitelisted_intermediate_records_keep_legacy_ownership(messages):
+    data = _run_hydration(messages)
+
+    assert data["first"] == 0
+    assert data["owners"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for Anchor hydration tests")
+def test_diff_historical_tool_result_preserves_diff_card_projection():
+    messages = _linked_turn()
+    messages[2]["content"] = "diff --git a/demo.txt b/demo.txt\n@@\n-old\n+new\n"
+
+    data = _run_hydration(messages)
+
+    assert data["first"] == 1
+    row = data["owners"][0]["scene"]["activity_rows"][0]
+    assert row["payload"]["is_diff"] is True
+    assert row["tool"]["is_diff"] is True
+    assert data["toolCards"][0][0]["is_diff"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for Anchor hydration tests")

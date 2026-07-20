@@ -12309,6 +12309,7 @@ function _anchorSceneToolCallFromRow(row, opts){
     )||'',
     done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
     is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
+    is_diff:!!(tool.is_diff||payload.is_diff||payload.isDiff),
     duration:tool.duration||payload.duration||payload.duration_seconds,
     started_at:firstValidTimestampSeconds(tool.started_at, payload.started_at, rowTs),
     created_at:firstValidTimestampSeconds(tool.created_at, payload.created_at, rowTs),
@@ -14735,7 +14736,7 @@ function _idLinkedHistoricalToolArguments(toolCall){
   const fn=toolCall.function;
   if(!fn||typeof fn!=='object'||Array.isArray(fn)) return null;
   const raw=fn.arguments;
-  if(raw===undefined||raw===null||raw==='') return {};
+  if(raw===undefined||raw===null||raw==='') return null;
   if(raw&&typeof raw==='object'&&!Array.isArray(raw)) return raw;
   if(typeof raw!=='string') return null;
   try{
@@ -14747,12 +14748,33 @@ function _idLinkedHistoricalToolArguments(toolCall){
 }
 
 function _idLinkedHistoricalToolResultRaw(message){
-  if(!message||typeof message!=='object') return '';
+  if(!message||typeof message!=='object') return null;
   const content=message.content;
-  if(typeof content==='string') return content;
-  if(content===undefined||content===null) return '';
-  try{return JSON.stringify(content);}
-  catch(e){return String(content||'');}
+  return typeof content==='string'?content:null;
+}
+
+function _idLinkedHistoricalRedactSnippet(value){
+  let text=String(value||'');
+  if(!text) return '';
+  if(typeof _redactToolTargetLabel==='function'){
+    try{text=_redactToolTargetLabel(text);}
+    catch(e){}
+  }
+  return text;
+}
+
+function _idLinkedHistoricalHasVisibleSidecar(message){
+  if(!message||typeof message!=='object') return false;
+  const visibleKeys=['attachments','_attachments','_statusCard','status_card','statusCard','card','cards','artifact','artifacts','files','images','media'];
+  for(const key of visibleKeys){
+    if(!Object.prototype.hasOwnProperty.call(message,key)) continue;
+    const value=message[key];
+    if(value===undefined||value===null||value===false) continue;
+    if(Array.isArray(value)&&value.length===0) continue;
+    if(typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===0) continue;
+    return true;
+  }
+  return false;
 }
 
 // Claim legacy settled ownership only when the transcript itself proves a
@@ -14775,18 +14797,25 @@ function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
   for(let rawIdx=start;rawIdx<end;rawIdx++){
     const message=list[rawIdx];
     if(!message||typeof message!=='object') continue;
+    const role=message.role;
+    if(role==='user'&&rawIdx===start) continue;
     if(message._anchor_activity_scene) return null;
-    if(message.role==='assistant'){
+    if(role==='assistant'){
       assistantIndexes.push(rawIdx);
       const visibleText=_idLinkedHistoricalMessageText(message);
       const reasoningText=_assistantReasoningPayloadText(message);
       if(visibleText) visibleAssistantIndexes.push(rawIdx);
       if(reasoningText) return null;
+      if(_idLinkedHistoricalHasVisibleSidecar(message)) return null;
       if(Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length) return null;
       if(Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use')) return null;
       const toolCalls=Array.isArray(message.tool_calls)?message.tool_calls:[];
       if(toolCalls.length&&visibleText) return null;
-      if(!toolCalls.length) continue;
+      if(!toolCalls.length){
+        if(visibleText) continue;
+        return null;
+      }
+      if(message.content!==undefined&&message.content!==null&&message.content!=='') return null;
       const messageRef=_idLinkedHistoricalMessageRef(message,rawIdx);
       if(!declarationRefs.includes(messageRef)) declarationRefs.push(messageRef);
       for(const toolCall of toolCalls){
@@ -14800,7 +14829,7 @@ function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
       }
       continue;
     }
-    if(message.role!=='tool') continue;
+    if(role!=='tool') return null;
     const callId=String(message.tool_call_id||'').trim();
     if(!callId||!declarationIds.has(callId)) return null;
     const matches=resultsById.get(callId)||[];
@@ -14827,8 +14856,12 @@ function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
     const declaration=declarations[index];
     const resultEntry=resultsById.get(declaration.callId)[0];
     const args=_toolArgsSnapshot(declaration.args);
-    const resultSnippet=_cliToolResultSnippet(_idLinkedHistoricalToolResultRaw(resultEntry.message));
+    const resultRaw=_idLinkedHistoricalToolResultRaw(resultEntry.message);
+    if(resultRaw===null) return null;
+    const resultSnippet=_idLinkedHistoricalRedactSnippet(_cliToolResultSnippet(resultRaw));
     const patchSnippet=_cliPatchSnippetFromArgs(declaration.name,args);
+    const isDiff=_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet);
+    const snippet=_idLinkedHistoricalRedactSnippet(_cliToolCardSnippet(resultSnippet,patchSnippet));
     const status=String(resultEntry.message.status||'').trim().toLowerCase();
     const isError=resultEntry.message.is_error===true||status==='error'||status==='failed'||status==='failure';
     activityEvents.push({
@@ -14842,9 +14875,10 @@ function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
         name:declaration.name,
         args,
         command:String(args.command||args.cmd||''),
-        snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+        snippet,
         done:true,
         is_error:isError,
+        is_diff:isDiff,
         assistant_msg_idx:declaration.rawIdx,
       },
     });

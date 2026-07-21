@@ -41,6 +41,20 @@ MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 
 
+def _function_source(source: str, name: str) -> str:
+    start = source.find(f"function {name}(")
+    assert start != -1, f"{name} not found"
+    open_brace = source.find("{", start)
+    depth = 0
+    for index in range(open_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"{name} is not balanced")
+
 
 def test_single_line_growth_does_not_write_height_in_node_fixture():
     node = shutil.which("node")
@@ -63,16 +77,88 @@ def test_single_line_growth_does_not_write_height_in_node_fixture():
         };
         const messages = { scrollTop: 0 };
         const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
-        function updateSendBtn() { throw new Error('one-line append must not refresh again from autoResize'); }
+        let sendUpdates = 0;
+        function updateSendBtn() { sendUpdates += 1; }
         function _repinMessagesAfterComposerResize() { throw new Error('one-line append must not repin transcript'); }
         %(autoresize)s
         autoResize();
-        console.log(JSON.stringify({ writes, lastLength: _composerLastResizeValueLength }));
+        console.log(JSON.stringify({ writes, lastLength: _composerLastResizeValueLength, sendUpdates }));
         """
     ) % {"autoresize": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout) == {"writes": 0, "lastLength": 1}
+    assert json.loads(proc.stdout) == {"writes": 0, "lastLength": 1, "sendUpdates": 1}
+
+
+def test_programmatic_one_line_fill_refreshes_primary_button_without_height_writes():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    auto_resize = _autoresize_body()
+    composer_has_content = _function_source(UI_JS, "_composerHasContent")
+    primary_action = _function_source(UI_JS, "getComposerPrimaryAction")
+    button_icon = _function_source(UI_JS, "_setComposerPrimaryButtonIcon")
+    update_send = _function_source(UI_JS, "updateSendBtn")
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValueLength = 0;
+        let heightWrites = 0;
+        const classes = new Set();
+        const btn = {
+          dataset: {}, style: {}, disabled: true, title: 'Type a message to send', innerHTML: '',
+          classList: {
+            toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
+            contains(name) { return classes.has(name); },
+            add(name) { classes.add(name); },
+            remove(name) { classes.delete(name); },
+          },
+          setAttribute(name, value) { this[name] = value; },
+        };
+        const msg = {
+          value: 'prefilled', disabled: false, offsetHeight: 44, scrollHeight: 44,
+          style: { set height(_value) { heightWrites += 1; }, get height() { return '44px'; } },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : id === 'btnSend' ? btn : null;
+        const S = { busy: false, pendingFiles: [] };
+        const window = { _hasPendingSelections() { return false; } };
+        function t(_key) { return _key; }
+        function requestAnimationFrame(callback) { callback(); return 1; }
+        function _applyBusyComposerPlaceholder() {}
+        function _repinMessagesAfterComposerResize() { throw new Error('one-line programmatic fill must not repin transcript'); }
+        %(composer_has_content)s
+        %(primary_action)s
+        %(button_icon)s
+        %(update_send)s
+        %(auto_resize)s
+        // This models URL prefill and other programmatic fills: no DOM input event
+        // is dispatched before autoResize() runs.
+        autoResize();
+        console.log(JSON.stringify({
+          heightWrites,
+          disabled: btn.disabled,
+          action: btn.dataset.action,
+          title: btn.title,
+          ariaLabel: btn['aria-label'],
+        }));
+        """
+    ) % {
+        "composer_has_content": composer_has_content,
+        "primary_action": primary_action,
+        "button_icon": button_icon,
+        "update_send": update_send,
+        "auto_resize": auto_resize,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "heightWrites": 0,
+        "disabled": False,
+        "action": "send",
+        "title": "Send message",
+        "ariaLabel": "Send message",
+    }
 
 
 def test_single_line_delete_still_runs_the_height_round_trip_in_node_fixture():

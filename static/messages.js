@@ -6748,6 +6748,7 @@ function autoResize(){
   // assistive technology while deletes and genuine multi-line growth still resize.
   if(_isGrowing&&_fitsCurrentHeight){
     _composerLastResizeValueLength=_nextValueLength;
+    updateSendBtn();
     return;
   }
   const _prevComposerH=el.offsetHeight;

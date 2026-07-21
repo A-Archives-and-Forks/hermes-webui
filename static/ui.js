@@ -11761,14 +11761,40 @@ function _applyTransparentRowFading(turn){
     row.setAttribute('data-transparent-fade',String(step));
   }
 }
+// Resolve the assistant message that carries a transparent turn's settled
+// metadata (duration / used model / TTFT / usage). A tool-using turn renders
+// multiple assistant segments — earlier activity segment(s) then the final
+// answer — and the metadata is stamped only on the LAST assistant message
+// (see api/streaming.py finalization). `turn.querySelector('.assistant-segment')`
+// returns the FIRST segment, which has no metadata, so the footer (model chip
+// included) would render empty exactly on tool turns (#6068 gate round 2).
+// Scan segments last→first for the final metadata-bearing assistant message,
+// falling back to the last assistant segment when none carries metadata yet.
+function _transparentTurnMetaMessage(turn){
+  if(!turn)return null;
+  const segs=turn.querySelectorAll('.assistant-segment[data-msg-idx]');
+  let fallback=null;
+  for(let si=segs.length-1;si>=0;si--){
+    const mi=segs[si].getAttribute('data-msg-idx');
+    if(mi==null)continue;
+    const candidate=S.messages[Number(mi)];
+    if(!candidate||candidate.role!=='assistant')continue;
+    if(!fallback)fallback=candidate;
+    if(candidate._turnDuration!=null||candidate._usedModel||candidate._firstTokenMs!=null||candidate._turnUsage)return candidate;
+  }
+  return fallback;
+}
 // ── Transparent turn footer (elapsed · tokens · TTFT · status) ───────────
 // Mirrors the live run-status line for settled turns in transparent
 // mode. Shows duration, first-token time, token usage, and final status.
 // Only rendered for turns that have transparent event rows.
-function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText){
+function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle){
   const parts=[];
   if(durationText) parts.push(`<span class="lf-time">${esc(durationText)}</span>`);
-  if(modelText) parts.push(`<span class="lf-model">${esc(modelText)}</span>`);
+  if(modelText){
+    const titleAttr=(modelTitle&&modelTitle!==modelText)?` title="${esc(modelTitle)}"`:'';
+    parts.push(`<span class="lf-model"${titleAttr}>${esc(modelText)}</span>`);
+  }
   if(ttftText) parts.push(`<span class="lf-ttft" title="${esc(t('first_token_time')||'Time to first token')}">TTFT ${esc(ttftText)}</span>`);
   if(tokensText) parts.push(`<span class="lf-tokens">${esc(tokensText)}</span>`);
   if(statusText) parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
@@ -11788,10 +11814,11 @@ function _renderTransparentTurnFooter(turn, opts){
   }
   const durationText=opts&&opts.durationText||'';
   const modelText=opts&&opts.modelText||'';
+  const modelTitle=opts&&opts.modelTitle||'';
   const ttftText=opts&&opts.ttftText||'';
   const tokensText=opts&&opts.tokensText||'';
   const statusText=opts&&opts.statusText||(t('done')||'Done');
-  const html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText);
+  const html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle);
   let footer=turn.querySelector('.transparent-turn-footer');
   if(!html){
     if(footer) footer.remove();
@@ -16652,6 +16679,9 @@ function renderMessages(options){
         const usedModel=document.createElement('span');
         usedModel.className='msg-used-model-inline';
         usedModel.textContent=usedModelText;
+        // Preserve the full (uncompacted) model id on hover where available.
+        const usedModelFull=String(msg._usedModel||'').trim();
+        if(usedModelFull&&usedModelFull!==usedModelText) usedModel.title=usedModelFull;
         fragments.push(usedModel);
       }
       if(window._showTokenUsage&&hasTurnUsage){
@@ -16701,29 +16731,31 @@ function renderMessages(options){
       }
       _applyTransparentRowFading(turn);
       if(hasTransparentRows){
-        // Find the corresponding message to read duration/usage.
-        const seg=turn.querySelector('.assistant-segment');
+        // Read turn metadata from the final metadata-bearing assistant segment,
+        // not querySelector's first match — a tool turn's activity segment
+        // precedes the answer, and the metadata lives on the last message
+        // (#6068 gate round 2: multi-segment turns lost the model label).
+        const msg=_transparentTurnMetaMessage(turn);
         let durationText='';
         let modelText='';
+        let modelTitle='';
         let ttftText='';
         let tokensText='';
-        if(seg){
-          const mi=seg.getAttribute('data-msg-idx');
-          if(mi!=null){
-            const msg=S.messages[Number(mi)]||{};
-            if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
-            modelText=_usedModelTurnChipLabel(msg);
-            if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
-            if(msg._turnUsage){
-              const inTok=msg._turnUsage.input_tokens||0;
-              const outTok=msg._turnUsage.output_tokens||0;
-              tokensText=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-            }
+        if(msg){
+          if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
+          modelText=_usedModelTurnChipLabel(msg);
+          if(modelText) modelTitle=String(msg._usedModel||'').trim();
+          if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
+          if(msg._turnUsage){
+            const inTok=msg._turnUsage.input_tokens||0;
+            const outTok=msg._turnUsage.output_tokens||0;
+            tokensText=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
           }
         }
         _renderTransparentTurnFooter(turn,{
           durationText,
           modelText,
+          modelTitle,
           ttftText,
           tokensText,
           statusText: t('done')||'Done',

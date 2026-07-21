@@ -81,6 +81,63 @@ console.log(JSON.stringify(cases));
     return json.loads(_run_node(source))
 
 
+def _eval_transparent_multi_segment_footer_cases() -> dict:
+    """Drive the transparent footer for a realistic multi-segment tool turn.
+
+    Turn shape: user -> assistant tool/activity segment (no metadata) -> tool
+    result -> final assistant carrying _usedModel/_turnDuration. The footer must
+    resolve metadata from the FINAL segment (not querySelector's first match) so
+    the model label renders exactly once as .lf-model. Regression for the #6068
+    round-2 gate where multi-segment turns dropped the label entirely.
+    """
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {ui_js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function getModelLabel(modelId) {{ return String(modelId || 'Unknown'); }}
+function esc(s) {{ return String(s == null ? '' : s); }}
+function t() {{ return ''; }}
+// Multi-segment tool turn: idx 1 is the activity segment (no metadata),
+// idx 2 is the final answer that carries the stamped turn metadata.
+const S = {{ messages: [
+  {{ role: 'user', content: 'hi' }},
+  {{ role: 'assistant', content: '', _toolCalls: [{{}}] }},
+  {{ role: 'assistant', content: 'answer', _usedModel: 'anthropic/claude-sonnet-4.5', _turnDuration: 1.2 }},
+] }};
+function FakeSeg(idx) {{ return {{ getAttribute(name) {{ return name === 'data-msg-idx' ? String(idx) : null; }} }}; }}
+const turn = {{ querySelectorAll(sel) {{ return [FakeSeg(1), FakeSeg(2)]; }} }};
+eval(extractFunc('_compactComposerModelChipLabel'));
+eval(extractFunc('_usedModelTurnChipLabel'));
+eval(extractFunc('_transparentTurnMetaMessage'));
+eval(extractFunc('_transparentTurnFooterHtml'));
+const picked = _transparentTurnMetaMessage(turn);
+const modelText = _usedModelTurnChipLabel(picked || {{}});
+const modelTitle = picked ? String(picked._usedModel || '') : '';
+const html = _transparentTurnFooterHtml('1.2s', modelText, '', '', 'Done', modelTitle);
+const lfModelCount = (html.match(/lf-model/g) || []).length;
+console.log(JSON.stringify({{
+  pickedUsedModel: picked ? picked._usedModel : null,
+  pickedContent: picked ? picked.content : null,
+  modelText,
+  lfModelCount,
+  hasTitle: html.indexOf('title="anthropic/claude-sonnet-4.5"') >= 0,
+}}));
+"""
+    return json.loads(_run_node(source))
+
+
 def test_streaming_stamps_used_model_on_assistant_message_and_usage_payload():
     assert "_dm['_usedModel'] = _used_model" in STREAMING_PY
     # The served model must be read from the agent AFTER the run — the agent
@@ -150,7 +207,32 @@ def test_settled_footer_orders_model_chip_after_duration():
 
 
 def test_transparent_turn_footer_includes_model_between_duration_and_ttft():
-    assert "function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText)" in UI_JS
+    assert "function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle)" in UI_JS
     assert 'class="lf-model"' in UI_JS
     assert "modelText=_usedModelTurnChipLabel(msg)" in UI_JS
     assert ".transparent-turn-footer .lf-model" in STYLE_CSS
+
+
+def test_transparent_footer_reads_metadata_from_final_segment_not_first():
+    # The transparent footer must resolve turn metadata via the dedicated
+    # last→first segment scan, never querySelector's first-match, which would
+    # read the activity segment and drop the model label on tool turns.
+    assert "const msg=_transparentTurnMetaMessage(turn);" in UI_JS
+    assert "function _transparentTurnMetaMessage(turn)" in UI_JS
+    # The generic footer yields the model chip to the transparent footer.
+    assert "_transparentFooterOwnsModel" in UI_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_transparent_multi_segment_tool_turn_renders_exactly_one_model_label():
+    """#6068 gate round 2: multi-segment tool turns must show the model once."""
+    cases = _eval_transparent_multi_segment_footer_cases()
+    # Metadata resolved from the FINAL assistant segment, not the first.
+    assert cases["pickedUsedModel"] == "anthropic/claude-sonnet-4.5"
+    assert cases["pickedContent"] == "answer"
+    assert cases["modelText"]  # non-empty label
+    # Exactly one .lf-model in the transparent footer (the generic chip is
+    # suppressed by _transparentFooterOwnsModel), so no duplicate and no loss.
+    assert cases["lfModelCount"] == 1
+    # Non-blocking UX: full model id preserved in a hover title.
+    assert cases["hasTitle"]

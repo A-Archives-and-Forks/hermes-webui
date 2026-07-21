@@ -21244,13 +21244,27 @@ def _start_chat_stream_for_session(
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if backend_is_gateway:
+        from api.gateway_chat import _mark_gateway_run_starting
+        _mark_gateway_run_starting(stream_id)
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
         kwargs=worker_kwargs,
         daemon=True,
     )
-    thr.start()
+    try:
+        thr.start()
+    except Exception:
+        if backend_is_gateway:
+            try:
+                from api.gateway_chat import _finish_gateway_run_starting
+                _finish_gateway_run_starting(stream_id)
+                from api.gateway_chat import _clear_gateway_run_starting
+                _clear_gateway_run_starting(stream_id)
+            except Exception:
+                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        raise
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,

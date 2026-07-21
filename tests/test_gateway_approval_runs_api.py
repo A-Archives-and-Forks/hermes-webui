@@ -12,6 +12,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _reset_gateway_run_start_state(stream_id: str) -> None:
+    from api import gateway_chat
+
+    gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+    lifecycle = getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", None)
+    if isinstance(lifecycle, dict):
+        lifecycle.pop(stream_id, None)
+
+
 # ---------------------------------------------------------------------------
 # 1. Capability detection
 # ---------------------------------------------------------------------------
@@ -1467,7 +1476,11 @@ def test_runs_api_does_not_own_pre_stream_stop_after_publication():
 
 
 def test_runs_api_marks_run_pending_before_request_preparation():
-    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming, gateway_run_id_pending
+    from api.gateway_chat import (
+        _mark_gateway_run_starting,
+        _run_gateway_runs_api_streaming,
+        gateway_run_id_pending,
+    )
 
     stream_id = "sid-run-starting-prep"
     cancel_event = threading.Event()
@@ -1512,6 +1525,7 @@ def test_runs_api_marks_run_pending_before_request_preparation():
         raise AssertionError(f"unexpected urlopen: {req.full_url}")
 
     try:
+        _mark_gateway_run_starting(stream_id)
         with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
              patch("api.streaming._strip_oob_blocks", side_effect=fake_strip):
             final_text, usage = _run_gateway_runs_api_streaming(
@@ -1535,12 +1549,17 @@ def test_runs_api_marks_run_pending_before_request_preparation():
         assert observed["pending_during_post"] is True
         assert gateway_run_id_pending(stream_id) is False
     finally:
-        _STREAM_RUN_IDS.pop(stream_id, None)
+        _reset_gateway_run_start_state(stream_id)
 
 
 def test_gateway_worker_marks_run_pending_before_runs_api_prelude():
     from api import gateway_chat
-    from api.gateway_chat import STREAMS, _run_gateway_chat_streaming, gateway_run_id_pending
+    from api.gateway_chat import (
+        STREAMS,
+        _mark_gateway_run_starting,
+        _run_gateway_chat_streaming,
+        gateway_run_id_pending,
+    )
 
     stream_id = "sid-worker-run-starting"
     observed = {"pending_during_support_check": False, "pending_during_runs_call": False}
@@ -1567,32 +1586,388 @@ def test_gateway_worker_marks_run_pending_before_runs_api_prelude():
             publish_run_id(stream_id, "run-worker-cleanup")
         return None, {}
 
-    with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
-         patch("api.gateway_chat.get_session", return_value=session), \
-         patch("api.config.get_config", return_value={}), \
-         patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
-         patch("api.gateway_chat._gateway_api_key", return_value=""), \
-         patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=True), \
-         patch("api.gateway_chat.gateway_supports_approval", side_effect=fake_supports), \
-         patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value=None), \
-         patch("api.gateway_chat._run_gateway_runs_api_streaming", side_effect=fake_runs), \
-         patch("api.streaming._load_webui_prefill_context", return_value={}), \
-         patch("api.streaming._prefill_messages_with_webui_context", return_value=[]), \
-         patch("api.streaming._normalize_prefill_messages_before_user_turn", side_effect=lambda messages: messages), \
-         patch("api.streaming._public_prefill_context_status", return_value={}), \
-         patch("api.streaming._webui_ephemeral_system_prompt", return_value="sys"):
-        _run_gateway_chat_streaming(
-            session_id="sess-worker-run-starting",
+    try:
+        _mark_gateway_run_starting(stream_id)
+        with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
+             patch("api.gateway_chat.get_session", return_value=session), \
+             patch("api.config.get_config", return_value={}), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""), \
+             patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=True), \
+             patch("api.gateway_chat.gateway_supports_approval", side_effect=fake_supports), \
+             patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value=None), \
+             patch("api.gateway_chat._run_gateway_runs_api_streaming", side_effect=fake_runs), \
+             patch("api.streaming._load_webui_prefill_context", return_value={}), \
+             patch("api.streaming._prefill_messages_with_webui_context", return_value=[]), \
+             patch("api.streaming._normalize_prefill_messages_before_user_turn", side_effect=lambda messages: messages), \
+             patch("api.streaming._public_prefill_context_status", return_value={}), \
+             patch("api.streaming._webui_ephemeral_system_prompt", return_value="sys"):
+            _run_gateway_chat_streaming(
+                session_id="sess-worker-run-starting",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+    finally:
+        _reset_gateway_run_start_state(stream_id)
+
+    assert observed["pending_during_support_check"] is True
+    assert observed["pending_during_runs_call"] is True
+    assert gateway_run_id_pending(stream_id) is False
+    assert stream_id not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
+
+
+def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeypatch):
+    from api import gateway_chat, routes
+
+    recorded = {}
+    session = SimpleNamespace(
+        session_id="sess-route-start-pending",
+        active_stream_id=None,
+        pending_started_at=None,
+        title="title",
+        profile=None,
+        process_wakeup_pause={},
+    )
+
+    class _NoopLock:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            return False
+
+    class _FakeThread:
+        def __init__(self, *, target=None, args=None, kwargs=None, daemon=None):
+            self._target = target
+            self._args = args or ()
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            stream_id = recorded["stream_id"]
+            assert gateway_chat.gateway_run_id_pending(stream_id) is True
+            gateway_chat._finish_gateway_run_starting(stream_id, result="fallback")
+            gateway_chat._clear_gateway_run_starting(stream_id)
+
+    def fake_prepare(session_obj, *, stream_id, **_kwargs):
+        recorded["stream_id"] = stream_id
+        session_obj.active_stream_id = stream_id
+        session_obj.pending_started_at = 123.0
+
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda *_args, **_kwargs: _NoopLock())
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: SimpleNamespace())
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_FakeThread))
+
+    with patch("api.turn_journal.append_turn_journal_event", return_value={}):
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg="hi",
+            attachments=[],
+            workspace="/tmp",
+            model="test-model",
+            external_runtime_owned=True,
+        )
+
+    assert response["stream_id"] == recorded["stream_id"]
+    assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
+
+
+def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monkeypatch):
+    from api import gateway_chat, routes
+
+    recorded = {}
+    session = SimpleNamespace(
+        session_id="sess-route-start-fail",
+        active_stream_id=None,
+        pending_started_at=None,
+        title="title",
+        profile=None,
+        process_wakeup_pause={},
+    )
+
+    class _NoopLock:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            return False
+
+    class _BoomThread:
+        def __init__(self, *, target=None, args=None, kwargs=None, daemon=None):
+            self._target = target
+            self._args = args or ()
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            stream_id = recorded["stream_id"]
+            assert gateway_chat.gateway_run_id_pending(stream_id) is True
+            raise RuntimeError("thread start failed")
+
+    def fake_prepare(session_obj, *, stream_id, **_kwargs):
+        recorded["stream_id"] = stream_id
+        session_obj.active_stream_id = stream_id
+        session_obj.pending_started_at = 123.0
+
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda *_args, **_kwargs: _NoopLock())
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: SimpleNamespace())
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_BoomThread))
+
+    with patch("api.turn_journal.append_turn_journal_event", return_value={}):
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            routes._start_chat_stream_for_session(
+                session,
+                msg="hi",
+                attachments=[],
+                workspace="/tmp",
+                model="test-model",
+                external_runtime_owned=True,
+            )
+
+    assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
+    assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
+
+
+@pytest.mark.parametrize(
+    ("stop_result", "expected_status", "expected_payload", "expect_cancel"),
+    [
+        (
+            False,
+            502,
+            {"ok": False, "cancelled": False, "stream_id": "stream-cancel-worker-pending", "error": "Gateway stop failed"},
+            False,
+        ),
+        (
+            True,
+            200,
+            {"ok": True, "cancelled": True, "stream_id": "stream-cancel-worker-pending"},
+            True,
+        ),
+    ],
+)
+def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
+    monkeypatch,
+    stop_result,
+    expected_status,
+    expected_payload,
+    expect_cancel,
+):
+    import time
+    import urllib.parse
+
+    from api import gateway_chat, routes
+    import api.route_approvals as approvals
+    from api.config import ACTIVE_RUNS, STREAMS, register_stream_owner, stream_owner_session_id, unregister_stream_owner
+
+    sid = "sess-cancel-worker-pending"
+    stream_id = "stream-cancel-worker-pending"
+    support_gate = threading.Event()
+    release_support = threading.Event()
+    release_worker = threading.Event()
+    captured = {}
+    called = {"cancel": False, "stop": None}
+    publish_run_id = gateway_chat._publish_gateway_run_id
+    mark_starting = gateway_chat._mark_gateway_run_starting
+
+    STREAMS[stream_id] = SimpleNamespace(put_nowait=lambda *_args, **_kwargs: None)
+    register_stream_owner(stream_id, sid)
+    approvals._pending.pop(sid, None)
+    approvals.submit_gateway_pending_mirror(sid, {"run_id": "run-stop/1", "command": "first"})
+    session = SimpleNamespace(
+        profile=None,
+        workspace="/tmp",
+        context_messages=[],
+        messages=[],
+        active_stream_id=stream_id,
+        pending_user_source="webui",
+        process_wakeup_pause={},
+        pending_started_at=time.time(),
+        save=lambda: None,
+        title="title",
+    )
+
+    def fake_supports(_base_url, _api_key):
+        support_gate.set()
+        assert gateway_chat.gateway_run_id_pending(stream_id) is True
+        release_support.wait(timeout=5)
+        return True
+
+    def fake_runs(*_args, **_kwargs):
+        publish_run_id(stream_id, "run-stop/1")
+        release_worker.wait(timeout=5)
+        return None, {}
+
+    def fake_j(handler, data, status=200, extra_headers=None):
+        captured["payload"] = data
+        captured["status"] = status
+        return data
+
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: called.__setitem__("cancel", True) or True)
+    monkeypatch.setattr("api.gateway_chat.stop_gateway_run", lambda run_id: called.__setitem__("stop", run_id) or stop_result)
+    monkeypatch.setattr(routes, "j", fake_j)
+    parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
+    request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed), daemon=True)
+    worker_thread = threading.Thread(
+        target=gateway_chat._run_gateway_chat_streaming,
+        kwargs={
+            "session_id": sid,
+            "msg_text": "hi",
+            "model": "test-model",
+            "workspace": "/tmp",
+            "stream_id": stream_id,
+        },
+        daemon=True,
+    )
+
+    try:
+        mark_starting(stream_id)
+        with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
+             patch("api.gateway_chat.get_session", return_value=session), \
+             patch("api.config.get_config", return_value={}), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""), \
+             patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=True), \
+             patch("api.gateway_chat.gateway_supports_approval", side_effect=fake_supports), \
+             patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value=None), \
+             patch("api.gateway_chat._run_gateway_runs_api_streaming", side_effect=fake_runs), \
+             patch("api.streaming._load_webui_prefill_context", return_value={}), \
+             patch("api.streaming._prefill_messages_with_webui_context", return_value=[]), \
+             patch("api.streaming._normalize_prefill_messages_before_user_turn", side_effect=lambda messages: messages), \
+             patch("api.streaming._public_prefill_context_status", return_value={}), \
+             patch("api.streaming._webui_ephemeral_system_prompt", return_value="sys"):
+            worker_thread.start()
+            assert support_gate.wait(timeout=5)
+            request_thread.start()
+            time.sleep(0.05)
+            assert request_thread.is_alive()
+            assert called["cancel"] is False
+            assert called["stop"] is None
+            release_support.set()
+            request_thread.join(timeout=5)
+            assert not request_thread.is_alive()
+            assert captured["status"] == expected_status
+            assert captured["payload"] == expected_payload
+            assert called["stop"] == "run-stop/1"
+            assert called["cancel"] is expect_cancel
+            if stop_result:
+                assert approvals.gateway_pending_mirror(sid, run_id="run-stop/1") is None
+            else:
+                assert stream_id in STREAMS
+                assert stream_owner_session_id(stream_id) == sid
+                assert session.active_stream_id == stream_id
+                assert stream_id in ACTIVE_RUNS
+                assert approvals.gateway_pending_mirror(sid, run_id="run-stop/1") is not None
+    finally:
+        release_support.set()
+        release_worker.set()
+        request_thread.join(timeout=5)
+        worker_thread.join(timeout=5)
+        approvals._pending.pop(sid, None)
+        STREAMS.pop(stream_id, None)
+        ACTIVE_RUNS.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        _reset_gateway_run_start_state(stream_id)
+
+
+def test_gateway_failed_start_result_survives_waiter_until_consumed():
+    import time
+
+    from api import gateway_chat
+
+    stream_id = "stream-start-failed-race"
+    wait_for_gateway_run_id = gateway_chat.wait_for_gateway_run_id
+    mark_starting = gateway_chat._mark_gateway_run_starting
+    finish_starting = gateway_chat._finish_gateway_run_starting
+    clear_starting = gateway_chat._clear_gateway_run_starting
+    lifecycle = gateway_chat._STREAM_RUN_LIFECYCLE
+    observed = {}
+
+    def waiter():
+        observed["result"] = wait_for_gateway_run_id(stream_id, 1.0)
+
+    try:
+        mark_starting(stream_id)
+        waiter_thread = threading.Thread(target=waiter, daemon=True)
+        waiter_thread.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if int((lifecycle.get(stream_id) or {}).get("waiters") or 0) == 1:
+                break
+            time.sleep(0.01)
+        assert int((lifecycle.get(stream_id) or {}).get("waiters") or 0) == 1
+        finish_starting(stream_id)
+        clear_starting(stream_id)
+        waiter_thread.join(timeout=5)
+        assert not waiter_thread.is_alive()
+        assert observed["result"] == (True, None)
+        assert stream_id not in lifecycle
+        assert wait_for_gateway_run_id(stream_id, 0.0) == (False, None)
+    finally:
+        _reset_gateway_run_start_state(stream_id)
+
+
+def test_gateway_ready_run_state_retires_after_owner_and_waiter_finish():
+    from api import gateway_chat
+
+    stream_id = "stream-start-ready-race"
+    mark_starting = gateway_chat._mark_gateway_run_starting
+    publish_run_id = gateway_chat._publish_gateway_run_id
+    clear_starting = gateway_chat._clear_gateway_run_starting
+    retire_starting = gateway_chat._retire_gateway_run_starting_if_done
+    lifecycle = gateway_chat._STREAM_RUN_LIFECYCLE
+    run_ids = gateway_chat._STREAM_RUN_IDS
+
+    try:
+        mark_starting(stream_id)
+        publish_run_id(stream_id, "run-ready/1")
+        lifecycle[stream_id]["waiters"] = 1
+        clear_starting(stream_id)
+        assert lifecycle[stream_id]["phase"] == "ready"
+        assert lifecycle[stream_id]["owner_done"] is True
+        assert run_ids[stream_id] == "run-ready/1"
+        lifecycle[stream_id]["waiters"] = 0
+        assert retire_starting(stream_id) is True
+        assert stream_id not in lifecycle
+        assert stream_id not in run_ids
+    finally:
+        _reset_gateway_run_start_state(stream_id)
+
+
+def test_gateway_missing_stream_releases_pending_start_state_for_local_cancel():
+    from api import gateway_chat
+
+    stream_id = "stream-start-missing-queue"
+    mark_starting = gateway_chat._mark_gateway_run_starting
+    wait_for_gateway_run_id = gateway_chat.wait_for_gateway_run_id
+    lifecycle = gateway_chat._STREAM_RUN_LIFECYCLE
+
+    try:
+        mark_starting(stream_id)
+        gateway_chat._run_gateway_chat_streaming(
+            session_id="sess-missing-queue",
             msg_text="hi",
             model="test-model",
             workspace="/tmp",
             stream_id=stream_id,
         )
-
-    assert observed["pending_during_support_check"] is True
-    assert observed["pending_during_runs_call"] is True
-    assert gateway_run_id_pending(stream_id) is False
-    assert getattr(gateway_chat, "_STREAM_RUN_START_RESULTS", {}).get(stream_id) is None
+        assert wait_for_gateway_run_id(stream_id, 0.0) == (False, None)
+        assert stream_id not in lifecycle
+    finally:
+        _reset_gateway_run_start_state(stream_id)
 
 
 def test_local_stop_rejects_redirected_success():
@@ -1794,7 +2169,7 @@ def test_chat_cancel_times_out_while_gateway_run_id_is_pending(monkeypatch):
     stream_id = "stream-cancel-pending-run-id"
     captured = {}
     called = {"cancel": False, "stop": False}
-    mark_starting = getattr(gateway_chat, "_mark_gateway_run_starting", None)
+    mark_starting = gateway_chat._mark_gateway_run_starting
 
     monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
     monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: called.__setitem__("cancel", True) or True)
@@ -1809,10 +2184,7 @@ def test_chat_cancel_times_out_while_gateway_run_id_is_pending(monkeypatch):
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     try:
-        if mark_starting:
-            mark_starting(stream_id)
-        else:
-            gateway_chat._STREAM_RUN_STARTING.add(stream_id)
+        mark_starting(stream_id)
         routes.handle_get(object(), parsed)
         assert captured["status"] == 502
         assert captured["payload"] == {
@@ -1824,72 +2196,7 @@ def test_chat_cancel_times_out_while_gateway_run_id_is_pending(monkeypatch):
         assert called["cancel"] is False
         assert called["stop"] is False
     finally:
-        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
-        gateway_chat._STREAM_RUN_STARTING.discard(stream_id)
-        getattr(gateway_chat, "_STREAM_RUN_START_RESULTS", {}).pop(stream_id, None)
-
-
-def test_chat_cancel_waits_for_exact_run_id_before_failed_stop(monkeypatch):
-    import time
-    import urllib.parse
-
-    from api import routes
-    from api import gateway_chat
-
-    stream_id = "stream-cancel-pending-wait"
-    captured = {}
-    called = {"cancel": False, "stop": False}
-    mark_starting = getattr(gateway_chat, "_mark_gateway_run_starting", None)
-    publish_run_id = getattr(gateway_chat, "_publish_gateway_run_id", None)
-
-    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
-    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: called.__setitem__("cancel", True) or True)
-    monkeypatch.setattr("api.gateway_chat.stop_gateway_run", lambda run_id: called.__setitem__("stop", run_id) or False)
-
-    def fake_j(handler, data, status=200, extra_headers=None):
-        captured["payload"] = data
-        captured["status"] = status
-        return data
-
-    monkeypatch.setattr(routes, "j", fake_j)
-    parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
-    request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed))
-    try:
-        if mark_starting:
-            mark_starting(stream_id)
-        else:
-            gateway_chat._STREAM_RUN_STARTING.add(stream_id)
-        request_thread.start()
-        time.sleep(0.05)
-        assert request_thread.is_alive()
-        assert called["cancel"] is False
-        if publish_run_id:
-            publish_run_id(stream_id, "run-stop/1")
-        else:
-            gateway_chat._STREAM_RUN_IDS[stream_id] = "run-stop/1"
-            gateway_chat._STREAM_RUN_STARTING.discard(stream_id)
-        request_thread.join(timeout=5)
-        assert not request_thread.is_alive()
-        assert captured["status"] == 502
-        assert captured["payload"] == {
-            "ok": False,
-            "cancelled": False,
-            "stream_id": stream_id,
-            "error": "Gateway stop failed",
-        }
-        assert called["stop"] == "run-stop/1"
-        assert called["cancel"] is False
-    finally:
-        if request_thread.is_alive():
-            if publish_run_id:
-                publish_run_id(stream_id, "run-stop/1")
-            else:
-                gateway_chat._STREAM_RUN_IDS[stream_id] = "run-stop/1"
-                gateway_chat._STREAM_RUN_STARTING.discard(stream_id)
-            request_thread.join(timeout=5)
-        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
-        gateway_chat._STREAM_RUN_STARTING.discard(stream_id)
-        getattr(gateway_chat, "_STREAM_RUN_START_RESULTS", {}).pop(stream_id, None)
+        _reset_gateway_run_start_state(stream_id)
 
 
 def test_chat_cancel_uses_local_cancel_after_gateway_runs_api_falls_back(monkeypatch):
@@ -1902,8 +2209,8 @@ def test_chat_cancel_uses_local_cancel_after_gateway_runs_api_falls_back(monkeyp
     stream_id = "stream-cancel-runs-fallback"
     captured = {}
     called = {"cancel": False, "stop": False}
-    mark_starting = getattr(gateway_chat, "_mark_gateway_run_starting", None)
-    finish_starting = getattr(gateway_chat, "_finish_gateway_run_starting", None)
+    mark_starting = gateway_chat._mark_gateway_run_starting
+    finish_starting = gateway_chat._finish_gateway_run_starting
 
     monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
     monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: called.__setitem__("cancel", True) or True)
@@ -1918,17 +2225,11 @@ def test_chat_cancel_uses_local_cancel_after_gateway_runs_api_falls_back(monkeyp
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed))
     try:
-        if mark_starting:
-            mark_starting(stream_id)
-        else:
-            gateway_chat._STREAM_RUN_STARTING.add(stream_id)
+        mark_starting(stream_id)
         request_thread.start()
         time.sleep(0.05)
         assert request_thread.is_alive()
-        if finish_starting:
-            finish_starting(stream_id, result="fallback")
-        else:
-            gateway_chat._STREAM_RUN_STARTING.discard(stream_id)
+        finish_starting(stream_id, result="fallback")
         request_thread.join(timeout=5)
         assert not request_thread.is_alive()
         assert captured["status"] == 200
@@ -1941,14 +2242,59 @@ def test_chat_cancel_uses_local_cancel_after_gateway_runs_api_falls_back(monkeyp
         assert called["stop"] is False
     finally:
         if request_thread.is_alive():
-            if finish_starting:
-                finish_starting(stream_id, result="fallback")
-            else:
-                gateway_chat._STREAM_RUN_STARTING.discard(stream_id)
+            finish_starting(stream_id, result="fallback")
             request_thread.join(timeout=5)
-        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
-        gateway_chat._STREAM_RUN_STARTING.discard(stream_id)
-        getattr(gateway_chat, "_STREAM_RUN_START_RESULTS", {}).pop(stream_id, None)
+        _reset_gateway_run_start_state(stream_id)
+
+
+def test_chat_cancel_ignores_legacy_run_id_after_gateway_runs_api_falls_back(monkeypatch):
+    import time
+    import urllib.parse
+
+    from api import routes
+    from api import gateway_chat
+
+    stream_id = "stream-cancel-runs-fallback-legacy-run-id"
+    captured = {}
+    called = {"cancel": False, "stop": False}
+    mark_starting = gateway_chat._mark_gateway_run_starting
+    finish_starting = gateway_chat._finish_gateway_run_starting
+    run_ids = gateway_chat._STREAM_RUN_IDS
+
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: called.__setitem__("cancel", True) or True)
+    monkeypatch.setattr("api.gateway_chat.stop_gateway_run", lambda _run_id: called.__setitem__("stop", True))
+
+    def fake_j(handler, data, status=200, extra_headers=None):
+        captured["payload"] = data
+        captured["status"] = status
+        return data
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
+    request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed))
+    try:
+        mark_starting(stream_id)
+        request_thread.start()
+        time.sleep(0.05)
+        assert request_thread.is_alive()
+        finish_starting(stream_id, result="fallback")
+        run_ids[stream_id] = "legacy-run/1"
+        request_thread.join(timeout=5)
+        assert not request_thread.is_alive()
+        assert captured["status"] == 200
+        assert captured["payload"] == {
+            "ok": True,
+            "cancelled": True,
+            "stream_id": stream_id,
+        }
+        assert called["cancel"] is True
+        assert called["stop"] is False
+    finally:
+        if request_thread.is_alive():
+            finish_starting(stream_id, result="fallback")
+            request_thread.join(timeout=5)
+        _reset_gateway_run_start_state(stream_id)
 
 
 def test_stale_gateway_card_does_not_relay_live_run():

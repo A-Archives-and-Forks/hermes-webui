@@ -40,65 +40,110 @@ logger = logging.getLogger(__name__)
 
 # Maps stream_id -> gateway run_id for approval response relay.
 _STREAM_RUN_IDS: dict[str, str] = {}
-_STREAM_RUN_STARTING: set[str] = set()
-_STREAM_RUN_START_RESULTS: dict[str, str] = {}
+_STREAM_RUN_LIFECYCLE: dict[str, dict[str, Any]] = {}
 _STREAM_RUN_STARTING_CONDITION = threading.Condition()
 GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
 
 
 def _mark_gateway_run_starting(stream_id: str) -> None:
     with _STREAM_RUN_STARTING_CONDITION:
-        _STREAM_RUN_STARTING.add(stream_id)
-        _STREAM_RUN_START_RESULTS.pop(stream_id, None)
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _STREAM_RUN_LIFECYCLE[stream_id] = {
+            "phase": "pending",
+            "run_id": "",
+            "waiters": 0,
+            "owner_done": False,
+        }
 
 
 def _publish_gateway_run_id(stream_id: str, run_id: str) -> None:
     with _STREAM_RUN_STARTING_CONDITION:
         _STREAM_RUN_IDS[stream_id] = run_id
-        _STREAM_RUN_STARTING.discard(stream_id)
-        _STREAM_RUN_START_RESULTS.pop(stream_id, None)
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id) or {}
+        _STREAM_RUN_LIFECYCLE[stream_id] = {
+            "phase": "ready",
+            "run_id": run_id,
+            "waiters": int(state.get("waiters") or 0),
+            "owner_done": bool(state.get("owner_done")),
+        }
         _STREAM_RUN_STARTING_CONDITION.notify_all()
 
 
 def _finish_gateway_run_starting(stream_id: str, *, result: str = "failed") -> None:
     with _STREAM_RUN_STARTING_CONDITION:
-        _STREAM_RUN_STARTING.discard(stream_id)
-        _STREAM_RUN_START_RESULTS[stream_id] = result
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id) or {}
+        if str(state.get("phase") or "").strip().lower() == "ready":
+            return
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _STREAM_RUN_LIFECYCLE[stream_id] = {
+            "phase": "fallback" if result == "fallback" else "failed",
+            "run_id": "",
+            "waiters": int(state.get("waiters") or 0),
+            "owner_done": bool(state.get("owner_done")),
+        }
         _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def _retire_gateway_run_starting_if_done(stream_id: str) -> bool:
+    state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+    if not state:
+        return False
+    if int(state.get("waiters") or 0) > 0:
+        return False
+    if not bool(state.get("owner_done")):
+        return False
+    _STREAM_RUN_LIFECYCLE.pop(stream_id, None)
+    _STREAM_RUN_IDS.pop(stream_id, None)
+    return True
 
 
 def _clear_gateway_run_starting(stream_id: str) -> None:
     with _STREAM_RUN_STARTING_CONDITION:
-        _STREAM_RUN_STARTING.discard(stream_id)
-        _STREAM_RUN_START_RESULTS.pop(stream_id, None)
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+        if state:
+            state["owner_done"] = True
+        _retire_gateway_run_starting_if_done(stream_id)
         _STREAM_RUN_STARTING_CONDITION.notify_all()
 
 
 def gateway_run_id_pending(stream_id: str) -> bool:
     with _STREAM_RUN_STARTING_CONDITION:
-        return stream_id in _STREAM_RUN_STARTING
+        return str((_STREAM_RUN_LIFECYCLE.get(stream_id) or {}).get("phase") or "").strip().lower() == "pending"
 
 
 def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str | None]:
+    deadline = time.monotonic() + max(0.0, float(timeout))
     with _STREAM_RUN_STARTING_CONDITION:
-        run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
-        if run_id:
-            return True, run_id
-        if stream_id not in _STREAM_RUN_STARTING:
-            result = str(_STREAM_RUN_START_RESULTS.get(stream_id) or "").strip()
-            return bool(result) and result != "fallback", None
-        _STREAM_RUN_STARTING_CONDITION.wait_for(
-            lambda: stream_id not in _STREAM_RUN_STARTING
-            or bool(str(_STREAM_RUN_IDS.get(stream_id) or "").strip()),
-            timeout=max(0.0, float(timeout)),
-        )
-        run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
-        if run_id:
-            return True, run_id
-        if stream_id in _STREAM_RUN_STARTING:
-            return True, None
-        result = str(_STREAM_RUN_START_RESULTS.get(stream_id) or "").strip()
-        return bool(result) and result != "fallback", None
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+        if state:
+            state["waiters"] = int(state.get("waiters") or 0) + 1
+        try:
+            while True:
+                state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+                phase = str((state or {}).get("phase") or "").strip().lower()
+                if phase == "fallback":
+                    return False, None
+                if phase == "failed":
+                    return True, None
+                run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+                if phase == "ready":
+                    stored_run_id = str((state or {}).get("run_id") or "").strip()
+                    return True, run_id or stored_run_id or None
+                if run_id:
+                    return True, run_id
+                if not state:
+                    return False, None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return True, None
+                _STREAM_RUN_STARTING_CONDITION.wait(timeout=remaining)
+        finally:
+            state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+            if state:
+                waiters = max(0, int(state.get("waiters") or 0) - 1)
+                state["waiters"] = waiters
+                if _retire_gateway_run_starting_if_done(stream_id):
+                    _STREAM_RUN_STARTING_CONDITION.notify_all()
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
@@ -431,7 +476,6 @@ def _run_gateway_runs_api_streaming(
     attachments=None, cfg=None, session=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
-    _mark_gateway_run_starting(stream_id)
     try:
         url_runs = f"{base_url.rstrip('/')}/v1/runs"
         headers = {
@@ -771,6 +815,8 @@ def _run_gateway_chat_streaming(
     """
     q = STREAMS.get(stream_id)
     if q is None:
+        _finish_gateway_run_starting(stream_id, result="fallback")
+        _clear_gateway_run_starting(stream_id)
         # Cancelled before the worker started; release the owner entry the route
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
@@ -798,7 +844,7 @@ def _run_gateway_chat_streaming(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
-    runs_api_pending_marked = False
+    runs_api_pending_marked = True
 
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
@@ -852,9 +898,6 @@ def _run_gateway_chat_streaming(
         except Exception:
             _gw_overrides = {}
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
-        if _runs_api_enabled:
-            _mark_gateway_run_starting(stream_id)
-            runs_api_pending_marked = True
         _use_runs_api = _runs_api_enabled and gateway_supports_approval(base_url, api_key)
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
@@ -1318,7 +1361,6 @@ def _run_gateway_chat_streaming(
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
-        _STREAM_RUN_IDS.pop(stream_id, None)
         if runs_api_pending_marked and gateway_run_id_pending(stream_id):
             _finish_gateway_run_starting(stream_id)
         _clear_gateway_run_starting(stream_id)

@@ -10500,7 +10500,11 @@ def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int | None = None) -
         if _is_cli_session_for_settings(session):
             cli_seen += 1
             if cli_seen > cli_cap:
-                continue
+                project_id = str(session.get("project_id") or "").strip()
+                if not project_id:
+                    continue
+                session = dict(session)
+                session["default_hidden"] = True
         kept.append(session)
     return kept
 

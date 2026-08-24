@@ -1,3 +1,8 @@
+const _BACKEND_EXECUTED_AGENT_COMMANDS = ['reload-mcp','reload-skills','codex-runtime','credits'];
+const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
+  'reload-mcp','reload-skills','codex-runtime','credits',
+  'moa','sessions','resume','pet'
+]);
 // ── Slash commands ──────────────────────────────────────────────────────────
 // Built-in commands intercepted before send(). Each command runs locally
 // (no round-trip to the agent) and shows feedback via toast or local message.
@@ -199,14 +204,6 @@ function executeCommand(text){
 // subset of the dispatched list (fail-closed), never a superset.
 // Plugin-category commands are always dispatchable via the plugin exec
 // transport. #6951.
-const _WEBUI_DISPATCHABLE_AGENT_COMMANDS=new Set([
-  // Backend-executed via /api/commands/exec (see _ALLOWED_AGENT_COMMANDS in api/commands.py).
-  'reload-mcp','reload-skills','codex-runtime','credits',
-  // Native WebUI behaviors handled inside send() without an agent round-trip.
-  'moa','sessions','resume',
-  // Desktop Companion extension command handled by handlePetSlashCommand().
-  'pet',
-]);
 
 function _isWebuiDispatchableAgentCommand(cmd){
   const name=String(cmd&&cmd.name||'').trim().toLowerCase();

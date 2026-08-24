@@ -1,3 +1,14 @@
+const _BACKEND_EXECUTED_AGENT_COMMANDS = ['reload-mcp','reload-skills','codex-runtime','credits'];
+const _AGENT_COMMAND_ALIASES = {
+  'reload_mcp': 'reload-mcp',
+  'reload_skills': 'reload-skills',
+  'codex_runtime': 'codex-runtime',
+  'credits': 'credits'
+};
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
+  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload_mcp','reload_skills','codex_runtime','credits'
+]);
 function _markSessionViewed(sid, messageCount) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -1184,7 +1195,6 @@ const _sessionTitleProvisionalBySid = new Map();
 // their canonical command is registered on the backend (for example
 // /reload-mcp). Keep this intentionally narrow and include underscore variants
 // observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime', 'credits']);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;

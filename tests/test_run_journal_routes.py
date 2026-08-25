@@ -761,6 +761,42 @@ def test_replay_run_journal_honors_after_seq_cursor(monkeypatch):
     assert "event: done\n" in body
 
 
+def test_replay_run_journal_skips_metering_rows(monkeypatch):
+    import api.routes as routes
+
+    handler = SimpleNamespace(wfile=io.BytesIO())
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: {
+            "events": [
+                {"event": "token", "payload": {"text": "hello"}, "event_id": f"{run_id}:1"},
+                {"event": "metering", "payload": {"tps": 47.3}, "event_id": f"{run_id}:2"},
+                {"event": "done", "payload": {"session": {}}, "event_id": f"{run_id}:3"},
+            ]
+        },
+    )
+
+    assert routes._replay_run_journal(handler, "run_1", 0) is True
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: run_1:1\n" in body
+    assert "event: token\n" in body
+    assert "id: run_1:3\n" in body
+    assert "event: done\n" in body
+    # The metering row is filtered from the replay burst.
+    assert "event: metering\n" not in body
+    assert "id: run_1:2\n" not in body
+
+
 def test_active_stream_replay_keeps_items_for_new_run_with_same_seq_range(monkeypatch):
     import api.routes as routes
 

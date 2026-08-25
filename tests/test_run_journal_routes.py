@@ -797,6 +797,61 @@ def test_replay_run_journal_skips_metering_rows(monkeypatch):
     assert "id: run_1:2\n" not in body
 
 
+def test_live_unjournaled_metering_does_not_inherit_latest_event_id(monkeypatch):
+    import api.routes as routes
+
+    class FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            self.q.put_nowait(("metering", {"tps": 47.3}, None))
+            self.q.put_nowait(("token", {"text": "visible"}, "run_1:1"))
+            self.q.put_nowait(("stream_end", {}, "run_1:2"))
+            self.unsubscribed = False
+
+        def subscribe_with_snapshot(self):
+            return self.q, {"last_event_id": "run_1:1", "offline_buffered_events": 3}
+
+        def unsubscribe(self, q):
+            self.unsubscribed = q is self.q
+
+    class Handler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.headers = {}
+
+        def send_response(self, _code):
+            pass
+
+        def send_header(self, _name, _value):
+            pass
+
+        def end_headers(self):
+            pass
+
+    handler = Handler()
+    stream = FakeStream()
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": False,
+        },
+    )
+    monkeypatch.setattr(routes, "read_run_events", lambda *_args, **_kwargs: {"events": []})
+    monkeypatch.setitem(routes.STREAM_LAST_EVENT_ID, "run_1", "run_1:1")
+    monkeypatch.setitem(routes.STREAMS, "run_1", stream)
+
+    routes._handle_sse_stream(handler, urlparse("/api/chat/stream?stream_id=run_1"))
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    frames = [frame for frame in body.split("\n\n") if frame.strip()]
+    assert frames[0] == "event: metering\ndata: {\"tps\": 47.3}"
+    assert "id: run_1:1\nevent: token\ndata: {\"text\": \"visible\"}" in frames
+    assert stream.unsubscribed is True
+
+
 def test_active_stream_replay_keeps_items_for_new_run_with_same_seq_range(monkeypatch):
     import api.routes as routes
 

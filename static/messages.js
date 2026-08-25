@@ -1,4 +1,3 @@
-const _BACKEND_EXECUTED_AGENT_COMMANDS = ['reload-mcp','reload-skills','codex-runtime','credits'];
 const _AGENT_COMMAND_ALIASES = {
   'reload_mcp': 'reload-mcp',
   'reload_skills': 'reload-skills',

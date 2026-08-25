@@ -798,6 +798,93 @@ def test_autocomplete_allowlist_is_exact_parity_with_dispatchers():
     assert "_agentCmd.category==='Plugin'" in MESSAGES_JS
 
 
+def _run_shared_classic_realm_js() -> dict:
+    """Evaluate commands.js then messages.js in ONE vm realm -- exactly how
+    static/index.html loads them (consecutive non-module `defer` classic
+    scripts share a single global lexical realm). A duplicate top-level
+    `const` across the two files throws during the second script's
+    declaration instantiation and aborts it before any statement runs, so the
+    second script's dispatch consts would never bind. Browser-only globals
+    referenced at load time are stubbed; runtime (call-time) references are
+    out of scope for this guard.
+    """
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const ctx = vm.createContext({{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          document: {{ addEventListener(){{}}, getElementById(){{ return null; }}, hidden: false }},
+          window: {{ addEventListener(){{}}, speechSynthesis: {{ speaking: false, paused: false }} }},
+          location: {{ href: 'http://localhost/', protocol: 'http:', host: 'localhost' }},
+          navigator: {{ userAgent: 'test' }},
+          setTimeout: () => 0, clearTimeout: () => 0,
+          setInterval: () => 0, clearInterval: () => 0,
+          requestAnimationFrame: () => 0, cancelAnimationFrame: () => 0,
+          fetch: async () => ({{}}),
+          EventSource: function(){{}},
+          MutationObserver: function(){{ this.observe=()=>{{}}; }},
+          Blob: function(){{}}, FileReader: function(){{ this.readAsText=()=>{{}}; }},
+          URL: function(){{ this.href=''; }}, FormData: function(){{}},
+          WebSocket: function(){{}},
+          crypto: {{ getRandomValues: (arr) => arr }},
+          CustomEvent: function(){{}}
+        }});
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        let secondError = null;
+        try {{
+          vm.runInContext({json.dumps(MESSAGES_JS)}, ctx);
+        }} catch (e) {{
+          secondError = String(e && e.message || e);
+        }}
+        const bound = vm.runInContext(`({{
+          runOnWebui: typeof _AGENT_COMMANDS_RUN_ON_WEBUI,
+          dispatchable: typeof _WEBUI_DISPATCHABLE_AGENT_COMMANDS,
+          backendConst: typeof _BACKEND_EXECUTED_AGENT_COMMANDS
+        }})`, ctx);
+        process.stdout.write(JSON.stringify({{ secondError, ...bound }}));
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def test_commands_and_messages_evaluate_in_one_shared_classic_script_realm():
+    """#6962 (re-gate): commands.js and messages.js must coexist as classic
+    scripts in the same global realm (static/index.html loads them back to
+    back). A duplicate top-level `const _BACKEND_EXECUTED_AGENT_COMMANDS`
+    across both files previously threw
+    `SyntaxError: Identifier ... has already been declared` on messages.js,
+    aborting its evaluation entirely. Both files must evaluate cleanly in one
+    realm, the dispatch consts of BOTH files must be bound, and the removed
+    duplicate authority mirror must not exist in the shared namespace."""
+    out = _run_shared_classic_realm_js()
+    assert out["secondError"] is None, (
+        f"messages.js failed to evaluate after commands.js in the shared realm: "
+        f"{out['secondError']}"
+    )
+    assert out["runOnWebui"] == "object", (
+        "messages.js dispatch const _AGENT_COMMANDS_RUN_ON_WEBUI not bound in "
+        "the shared realm -- declaration instantiation was aborted"
+    )
+    assert out["dispatchable"] == "object", (
+        "commands.js dispatch const _WEBUI_DISPATCHABLE_AGENT_COMMANDS not "
+        "bound in the shared realm"
+    )
+    assert out["backendConst"] == "undefined", (
+        "duplicate/unused _BACKEND_EXECUTED_AGENT_COMMANDS mirror must not be "
+        "declared in the shared realm (declared once -> it would collide; "
+        "declared in one file -> it is dead authority drift)"
+    )
+
+
 def test_busy_path_intercepts_stop_before_mode_routing():
     """#6951: while busy, /stop must cancel the active run immediately instead
     of being steered/queued as the literal text '/stop'."""

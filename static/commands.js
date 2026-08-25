@@ -1,4 +1,3 @@
-const _BACKEND_EXECUTED_AGENT_COMMANDS = ['reload-mcp','reload-skills','codex-runtime','credits'];
 const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
   'reload-mcp','reload-skills','codex-runtime','credits',
   'moa','sessions','resume','pet'

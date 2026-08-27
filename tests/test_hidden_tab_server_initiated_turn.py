@@ -198,10 +198,14 @@ NODE = shutil.which("node")
 
 @pytest.mark.skipif(NODE is None, reason="node not available")
 def test_hidden_poll_stops_only_for_owned_missing_sessions():
-    """404/410 stop a stale poll; transient failures and current owners survive."""
+    """Terminal responses stop only their owner and cannot reopen on visibility."""
     start = MESSAGES_JS.index("function _startHiddenActiveStreamPoll(sid)")
-    end = MESSAGES_JS.index("function _chatStreamActiveForSession(sid)", start)
-    functions = MESSAGES_JS[start:end]
+    poll_end = MESSAGES_JS.index("function _chatStreamActiveForSession(sid)", start)
+    stream_end = MESSAGES_JS.index("function stopSessionStream()", poll_end)
+    functions = {
+        "poll": MESSAGES_JS[start:poll_end],
+        "session": MESSAGES_JS[poll_end:stream_end],
+    }
 
     driver = textwrap.dedent(
         r"""
@@ -211,21 +215,53 @@ def test_hidden_poll_stops_only_for_owned_missing_sessions():
         let _sessionStreamHiddenPollFalseStreamId = null;
         let _sessionStreamHiddenPollFalseCount = 0;
         let _sessionStreamHiddenSid = null;
+        let _sessionStreamSessionId = null;
+        let _sessionEventSource = null;
+        let _sessionStreamReconnectTimer = null;
         const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 20;
-        const document = {hidden: true};
-        const S = {activeStreamId: null};
+        let visibilityChange = null;
+        const document = {
+          hidden: true,
+          addEventListener: (type, listener) => {
+            if (type === 'visibilitychange') visibilityChange = listener;
+          },
+        };
+        const S = {
+          activeStreamId: null,
+          messages: [],
+          session: {session_id: 'session-a', message_count: 0},
+        };
         const _apiUrl = value => value;
         const _attachServerInitiatedStream = () => true;
         let intervalFn = null;
         let intervalSeq = 0;
         let fetchCalls = 0;
+        let eventSourceCalls = 0;
+
+        class EventSource {
+          constructor() {
+            eventSourceCalls += 1;
+            this.readyState = 1;
+          }
+          addEventListener() {}
+          close() { this.readyState = 2; }
+        }
 
         globalThis.setInterval = fn => {
           intervalFn = fn;
           return ++intervalSeq;
         };
         globalThis.clearInterval = () => { intervalFn = null; };
-        eval(functions);
+        eval(functions.poll);
+
+        function stopSessionStream() {
+          if (_sessionEventSource) _sessionEventSource.close();
+          _sessionEventSource = null;
+          _sessionStreamSessionId = null;
+          _stopHiddenActiveStreamPoll();
+        }
+
+        eval(functions.session);
 
         const flush = () => new Promise(resolve => setImmediate(resolve));
         const response = status => ({
@@ -240,10 +276,14 @@ def test_hidden_poll_stops_only_for_owned_missing_sessions():
         }
 
         function reset() {
-          _stopHiddenActiveStreamPoll();
+          stopSessionStream();
           _sessionStreamHiddenSid = null;
+          document.hidden = true;
+          document._hermesSessionStreamVisibilityHook = false;
+          visibilityChange = null;
           intervalFn = null;
           fetchCalls = 0;
+          eventSourceCalls = 0;
         }
 
         async function runStatus(status, reject = false) {
@@ -292,6 +332,26 @@ def test_hidden_poll_stops_only_for_owned_missing_sessions():
           };
         }
 
+        async function runVisibilityRecovery(status) {
+          reset();
+          globalThis.fetch = () => {
+            fetchCalls += 1;
+            return Promise.resolve(response(status));
+          };
+          startSessionStream('session-a');
+          await settle();
+          if (!visibilityChange) throw new Error('visibilitychange listener was not installed');
+          document.hidden = false;
+          visibilityChange();
+          await settle();
+          return {
+            eventSourceCalls,
+            running: intervalFn !== null,
+            pollSid: _sessionStreamHiddenPollSid,
+            hiddenSid: _sessionStreamHiddenSid,
+          };
+        }
+
         (async () => {
           const result = {
             missing404: await runStatus(404),
@@ -300,6 +360,8 @@ def test_hidden_poll_stops_only_for_owned_missing_sessions():
             offline: await runStatus(0, true),
             idle200: await runStatus(200),
             stale404: await runStaleResponse(),
+            visible404: await runVisibilityRecovery(404),
+            visible410: await runVisibilityRecovery(410),
           };
           process.stdout.write(JSON.stringify(result));
         })().catch(error => {
@@ -317,6 +379,14 @@ def test_hidden_poll_stops_only_for_owned_missing_sessions():
     )
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
+
+    for key in ("visible404", "visible410"):
+        assert result[key] == {
+            "eventSourceCalls": 0,
+            "running": False,
+            "pollSid": None,
+            "hiddenSid": None,
+        }
 
     for key in ("missing404", "missing410"):
         assert result[key] == {

@@ -6,9 +6,11 @@ following the LAST ``:``, so a tag/variant suffix like ``:free``/``:31b``/
 ``:397b`` inside the model's own name became the whole label
 (``@custom:omni:kg/stepfun/step-3.7-flash:free`` rendered as ``free``).
 
-The fix peels only the leading provider segment (``@custom:<slug>:`` — the
-``<slug>`` is itself optional in the plain custom lane, and may be an endpoint
-authority ``host:port``), leaving the full configured model id as the label.
+The fix makes the catalog the authority — a catalogued routing id renders its
+exact `m.label` (the backend knows the real provider/model split). The string
+peel is only a legacy fallback for ids the catalog has never seen, where a
+provider slug (a config key or host:port authority) is distinguished from a
+plain-lane model by its lack of a `/`.
 
 Runs the live getModelLabel() via Node so drift between the test and the real
 code is caught immediately.
@@ -36,7 +38,9 @@ if (start < 0) throw new Error('getModelLabel not found');
 const after = ui.indexOf('\nfunction _gatewayProviderName(', start);
 if (after < 0) throw new Error('getModelLabel end boundary not found');
 const fnSrc = ui.slice(start, after);
-const _dynamicModelLabels = {};
+// Optional pre-hydrated catalog: {routingId: label}. Absent -> empty, which
+// exercises the string-only legacy fallback.
+const _dynamicModelLabels = process.argv[3] ? JSON.parse(process.argv[3]) : {};
 function _fmtOllamaLabel(s){ return s; }
 // getModelLabel() calls the dotted Bedrock/Vertex prefix normalizer, which lives
 // just above it with two Sets it closes over. Pull all three in, or the eval'd
@@ -52,9 +56,12 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
-def _labels(model_ids):
+def _labels(model_ids, catalog=None):
+    argv = [NODE, "-e", _DRIVER, str(UI_JS_PATH), json.dumps(model_ids)]
+    if catalog is not None:
+        argv.append(json.dumps(catalog))
     proc = subprocess.run(
-        [NODE, "-e", _DRIVER, str(UI_JS_PATH), json.dumps(model_ids)],
+        argv,
         capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, f"node driver failed: {proc.stderr}"
@@ -100,3 +107,48 @@ def test_custom_model_label_plain_lane_and_host_port_slugs():
     assert out["@custom:10.8.71.41:8080:Qwen3-235B"] == "Qwen3-235B"
     assert out["@custom:localhost:11434:llama3"] == "llama3"
     assert out["@custom:omni:11434:Qwen3"] == "11434:Qwen3"
+
+
+def test_plain_custom_lane_colon_bearing_model_slash_segment():
+    """#7240: a plain-lane ``@custom:<model-with-colon>`` whose first segment
+    is slash-bearing (`ollamacloud/qwen3.5:397b`) is the model itself — a
+    provider slug never contains a `/`, so it must not be peeled as one."""
+    out = _labels([
+        "@custom:ollamacloud/qwen3.5:397b",
+        "@custom:ollamacloud/gemma4:31b",
+        "@custom:some-vendor/step-3.7-flash:free",
+    ])
+    assert out["@custom:ollamacloud/qwen3.5:397b"] == "ollamacloud/qwen3.5:397b"
+    assert out["@custom:ollamacloud/gemma4:31b"] == "ollamacloud/gemma4:31b"
+    assert out["@custom:some-vendor/step-3.7-flash:free"] == "some-vendor/step-3.7-flash:free"
+
+
+def test_catalog_label_wins_over_legacy_peel():
+    """Post-hydration: the catalog ships the exact backend label per routing
+    id, so a catalogued id renders verbatim even where the string peel alone
+    would be ambiguous or lossy."""
+    catalog = {
+        # Plain lane, colon-bearing model: the backend knows this is ONE model.
+        "@custom:ollamacloud/qwen3.5:397b": "ollamacloud/qwen3.5:397b",
+        # Named lane, same native model: distinct routing id, distinct entry.
+        "@custom:omni:ollamacloud/qwen3.5:397b": "ollamacloud/qwen3.5:397b",
+        # A custom display label is preserved exactly.
+        "@custom:ai_gateway:Qwen3.6-35B-A3B": "My Qwen Gateway",
+    }
+    out = _labels(list(catalog), catalog=catalog)
+    assert out["@custom:ollamacloud/qwen3.5:397b"] == "ollamacloud/qwen3.5:397b"
+    assert out["@custom:omni:ollamacloud/qwen3.5:397b"] == "ollamacloud/qwen3.5:397b"
+    assert out["@custom:ai_gateway:Qwen3.6-35B-A3B"] == "My Qwen Gateway"
+
+
+def test_collision_labels_stay_distinct_by_full_routing_id():
+    """Two providers exposing the same native model stay distinguishable: the
+    catalog keys labels by the FULL routing id, never by the bare model."""
+    catalog = {
+        "@custom:omni:ollamacloud/qwen3.5:397b": "ollamacloud/qwen3.5:397b (omni)",
+        "@custom:ai_gateway:ollamacloud/qwen3.5:397b": "ollamacloud/qwen3.5:397b (gateway)",
+    }
+    out = _labels(list(catalog), catalog=catalog)
+    assert out["@custom:omni:ollamacloud/qwen3.5:397b"] == "ollamacloud/qwen3.5:397b (omni)"
+    assert out["@custom:ai_gateway:ollamacloud/qwen3.5:397b"] == "ollamacloud/qwen3.5:397b (gateway)"
+    assert out["@custom:omni:ollamacloud/qwen3.5:397b"] != out["@custom:ai_gateway:ollamacloud/qwen3.5:397b"]

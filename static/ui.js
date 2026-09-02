@@ -7386,15 +7386,35 @@ function _stripDottedModelPrefix(bare){
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   const rawId=String(modelId||'');
-  // Preserve custom gateway model IDs exactly as configured.
+  // Preserve custom gateway model IDs exactly as configured. A custom id is
+  // `@custom:<model>` in the plain custom lane or `@custom:<slug>:<model>` for
+  // a named custom provider; the provider slug may itself be an endpoint
+  // authority (e.g. `custom:10.8.71.41:8080`). The model portion may contain
+  // colons (tag/variant suffixes like `:free`, `:31b`, `:397b`) and vendor
+  // slashes, so only the leading provider segment is peeled (#7240).
   // Examples:
-  //   @custom:ai_gateway:Qwen3.6-35B-A3B -> Qwen3.6-35B-A3B
-  //   @custom:qwen397b-64k               -> qwen397b-64k
+  //   @custom:ai_gateway:Qwen3.6-35B-A3B            -> Qwen3.6-35B-A3B
+  //   @custom:omni:kg/stepfun/step-3.7-flash:free    -> kg/stepfun/step-3.7-flash:free
+  //   @custom:qwen397b-64k                           -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
     const rest=rawId.slice('@custom:'.length);
-    if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
-    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
-    return rest||rawId;
+    const sep=rest.indexOf(':');
+    if(sep<0) return rest||rawId;
+    let model=rest.slice(sep+1);
+    // Endpoint-style slug (`custom:10.8.71.41:8080:model`): the `:port` belongs
+    // to the provider segment, mirroring the host:port slug check in
+    // api/config.py, so it is consumed before the model label starts.
+    const portMatch=/^(\d{1,5}):/.exec(model);
+    if(portMatch){
+      const port=Number(portMatch[1]);
+      if(port>=1&&port<=65535){
+        const host=rest.slice(0,sep).toLowerCase();
+        if(host==='localhost'||host.includes('.')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
+          model=model.slice(portMatch[0].length);
+        }
+      }
+    }
+    return model||rawId;
   }
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];

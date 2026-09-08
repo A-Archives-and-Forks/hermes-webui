@@ -19367,38 +19367,65 @@ function autoResizeTextarea(ta) {
   ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
 }
 
+// #2184 follow-up: submitEdit is re-entrant and destructive, and nothing stopped
+// a second invocation. Its only guard was S.busy, which send() does not set until
+// the LAST line — after two multi-second awaits (_ensureAllMessagesLoaded on a long
+// session, then the truncate round-trip). On a laggy instance that leaves a 10s+
+// window in which every further click on "Send edit" starts another full truncate.
+// Observed in the wild: seven concurrent POST /api/session/truncate, 5.2-8.5s each,
+// from one user clicking repeatedly because the UI had not yet acknowledged the first.
+//
+// That is not merely wasteful, it is a data-loss hazard. `absoluteKeepCount` is
+// deliberately captured BEFORE the awaits (see test_submit_edit_captures_absolute_
+// before_await): at click time `_oldestIdx` is the loaded window's offset and
+// `msgIdx` is window-relative, so their sum is the true absolute index. But the
+// first call's _ensureAllMessagesLoaded() sets `_oldestIdx = 0`, so a SECOND call
+// entering afterwards computes `0 + msgIdx` from a still-window-relative msgIdx —
+// a far smaller keep_count. Truncating a 2000-message session to that would delete
+// most of its history.
+//
+// Guard re-entry at the function itself rather than at the click handler: the edit
+// can also be submitted with Enter (the keydown handler clicks the button), and a
+// future caller would silently reopen the hole. Cleared in a finally so an early
+// return or a throw cannot wedge editing off for the rest of the page's life.
+let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
-  if(!S.session || S.busy) return;
-  const initialSid = S.session.session_id;
-  const absoluteKeepCount = _oldestIdx + msgIdx;
-  // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
-  // initialSid — a non-default session model (vs profile default), which is
-  // inference-free and survives the failed send's marker consumption. See
-  // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
-  const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  if(typeof _ensureAllMessagesLoaded==='function'){
-    await _ensureAllMessagesLoaded();
-  }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!S.session || S.busy || _submitEditInFlight) return;
+  _submitEditInFlight = true;
   try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    // #5924 SILENT-race guard: a session switch during the truncate await must not
-    // let this recovery apply session A's intent (truncate/re-arm/send) to the
-    // newly-visible session.
+    const initialSid = S.session.session_id;
+    const absoluteKeepCount = _oldestIdx + msgIdx;
+    // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
+    // initialSid — a non-default session model (vs profile default), which is
+    // inference-free and survives the failed send's marker consumption. See
+    // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
+    const _recoveryPick=_deliberateSessionModelPick(initialSid);
+    if(typeof _ensureAllMessagesLoaded==='function'){
+      await _ensureAllMessagesLoaded();
+    }
     if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = newText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // Re-arm the single-shot explicit-pick marker from the captured non-default
-    // pick — only if still safe at fire time (session unchanged, current model
-    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-    _reArmRecoveryPick(initialSid, _recoveryPick);
-    await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+    try {
+      await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+        session_id: initialSid,
+        keep_count: absoluteKeepCount
+      })});
+      // #5924 SILENT-race guard: a session switch during the truncate await must not
+      // let this recovery apply session A's intent (truncate/re-arm/send) to the
+      // newly-visible session.
+      if(!S.session || S.session.session_id !== initialSid) return;
+      S.messages = S.messages.slice(0, absoluteKeepCount);
+      renderMessages();
+      $('msg').value = newText;
+      // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
+      // Re-arm the single-shot explicit-pick marker from the captured non-default
+      // pick — only if still safe at fire time (session unchanged, current model
+      // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
+      _reArmRecoveryPick(initialSid, _recoveryPick);
+      await send();
+    } catch(e) { setStatus(t('edit_failed') + e.message); }
+  } finally {
+    _submitEditInFlight = false;
+  }
 }
 
 async function regenerateResponse(btn) {

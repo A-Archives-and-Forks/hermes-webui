@@ -434,6 +434,27 @@ class TestMixedNestedLists:
         assert '<ol><li value="1">[x] shipped</li>' in out, out
         assert '<li value="2">[ ] pending</li>' in out, out
 
+    def test_deeply_nested_list_does_not_overflow_the_stack(self, driver_path):
+        """The single-pass tree serializer must not recurse per nesting level.
+
+        The first serializer for the #6700 tree was mutually recursive
+        (renderList -> renderItem -> renderList ...), so a pathologically
+        deep list threw ``RangeError: Maximum call stack size exceeded`` at
+        ~2,000 nested items. renderMd() runs after the transcript container
+        is cleared and the throw is uncaught, so one hostile/degenerate
+        message blanked the whole session. The emit step is iterative, so a
+        deep chain must render balanced HTML without throwing.
+        """
+        depth = 2000
+        src = "".join(" " * (2 * k) + "- item %d\n" % k for k in range(depth))
+        out = _render(driver_path, src)
+        assert out.count("<ul>") == depth, out[-400:]
+        assert out.count("</ul>") == depth, out[-400:]
+        assert out.count("<li>") == depth, out[-400:]
+        assert out.count("</li>") == depth, out[-400:]
+        # First and last items survive at the extremes of the chain.
+        assert "item 0" in out and "item %d" % (depth - 1) in out, out[-400:]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Block-level constructs INSIDE blockquotes — the six bugs documented in

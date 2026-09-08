@@ -7847,17 +7847,42 @@ function renderMd(raw){
         itemStack[itemStack.length-1].content.push(line.replace(/^ {2,}/,'').trim());
       }
     }
-    const renderList=ln=>'<'+(ln.ordered?'ol':'ul')+'>'+ln.items.map(renderItem).join('')+'</'+(ln.ordered?'ol':'ul')+'>';
-    const renderItem=it=>{
-      const text=it.content.join('\n').trim();
-      let inner;
-      if(!it.ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
-      else if(!it.ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
-      else inner=inlineMd(text);
-      const valueAttr=it.value!==null?` value="${it.value}"`:'';
-      return `<li${valueAttr}>${inner}${it.sublists.map(renderList).join('')}</li>`;
-    };
-    return root.items.map(renderList).join('');
+    // Iterative depth-first emit (#6700 re-gate). The recursive
+    // renderList/renderItem pair recursed once per nesting level, so a
+    // pathologically deep list (an agent dumping deeply nested structured
+    // data) threw RangeError at ~2,000 levels; renderMd() runs after the
+    // transcript container is cleared, so the uncaught throw blanked the
+    // whole session. Emit order is identical — list open, items, nested
+    // sublists, item close, list close — but sublists are pushed onto an
+    // explicit work stack instead of the call stack.
+    const html=[];
+    const work=[];                                  // {open:list} | {item} | {close:list} | {closeItem:true}
+    for(let i=root.items.length-1;i>=0;i--) work.push({open:root.items[i]});
+    while(work.length){
+      const f=work.pop();
+      if(f.item){
+        const it=f.item;
+        const text=it.content.join('\n').trim();
+        let inner;
+        if(!it.ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+        else if(!it.ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+        else inner=inlineMd(text);
+        const valueAttr=it.value!==null?` value="${it.value}"`:'';
+        html.push(`<li${valueAttr}>`,inner);
+        work.push({closeItem:true});                // </li> after any nested sublists
+        for(let i=it.sublists.length-1;i>=0;i--) work.push({open:it.sublists[i]});
+      } else if(f.closeItem){
+        html.push('</li>');
+      } else if(f.open){
+        const ln=f.open;
+        html.push('<',ln.ordered?'ol':'ul','>');
+        work.push({close:ln});                      // </ul>/</ol> after all items
+        for(let i=ln.items.length-1;i>=0;i--) work.push({item:ln.items[i]});
+      } else {
+        html.push('</',f.close.ordered?'ol':'ul','>');
+      }
+    }
+    return html.join('');
   }
   function _renderLists(src){
     // Single pass over source lines: collect a contiguous list region (any

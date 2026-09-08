@@ -278,6 +278,16 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function jsArg(s){
+  // Encode a value for safe interpolation inside an inline on* handler's JS
+  // string literal. JSON.stringify quotes/escapes for the JS context; esc()
+  // then makes the result safe inside the HTML attribute. Without this, a
+  // value containing a quote breaks out of the handler (esc() alone is
+  // HTML-escaping, which the browser decodes BEFORE executing the inline
+  // handler). Promoted to a shared helper from the kanban dependency fix
+  // (#3797). Use as onclick="fn(${jsArg(v)})" — no manual quotes.
+  return esc(JSON.stringify(String(s == null ? '' : s)));
+}
 function _matchBacktickFenceLine(line){
   const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
   if(!m) return null;

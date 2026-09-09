@@ -1269,9 +1269,12 @@ def read_body(handler) -> dict:
         raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
     raw = handler.rfile.read(length) if length else b'{}'
     try:
-        return _json.loads(raw)
+        parsed = _json.loads(raw)
     except Exception:
-        return {}
+        raise ValueError('Invalid JSON body') from None
+    if not isinstance(parsed, dict):
+        raise ValueError('JSON body must be an object')
+    return parsed
 
 
 # ── Profile cookie helpers (issue #798) ─────────────────────────────────────

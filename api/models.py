@@ -1191,6 +1191,25 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+_SIDEBAR_HEAVY_METADATA_FIELDS = (
+    'compression_anchor_summary',
+    'compression_anchor_details',
+    'context_engine_state',
+    'compression_recovery',
+    'gateway_routing_history',
+    'composer_draft',
+    'process_wakeup_pause',
+    'share_token',
+)
+
+
+def _strip_sidebar_heavy_metadata(row: dict) -> dict:
+    """Remove detail-only values after sidebar reconciliation is complete."""
+    for key in _SIDEBAR_HEAVY_METADATA_FIELDS:
+        row.pop(key, None)
+    return row
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1815,13 +1834,7 @@ class Session:
             ) if include_runtime else False,
         }
         if sidebar_metadata_only:
-            for key in (
-                'compression_anchor_summary', 'compression_anchor_details',
-                'context_engine_state', 'compression_recovery',
-                'gateway_routing_history', 'composer_draft',
-                'process_wakeup_pause', 'share_token',
-            ):
-                compact.pop(key, None)
+            _strip_sidebar_heavy_metadata(compact)
         return compact
 
 
@@ -6450,6 +6463,9 @@ def all_sessions(
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
+            if sidebar_metadata_only:
+                for s in result:
+                    _strip_sidebar_heavy_metadata(s)
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
@@ -6507,6 +6523,9 @@ def all_sessions(
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
+    if sidebar_metadata_only:
+        for s in result:
+            _strip_sidebar_heavy_metadata(s)
     return result
 
 

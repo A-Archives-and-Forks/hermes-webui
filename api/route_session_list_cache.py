@@ -1,5 +1,6 @@
 """Session-list cache helpers extracted from api.routes."""
 
+import copy
 import os
 import re
 import threading
@@ -43,29 +44,86 @@ _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION: dict[str, int] = {}
 
 
+_SIDEBAR_SESSION_RESPONSE_FIELDS = {
+    "session_id",
+    "title",
+    "display_title",
+    "_state_db_title",
+    "workspace",
+    "model",
+    "model_provider",
+    "message_count",
+    "user_message_count",
+    "created_at",
+    "updated_at",
+    "last_message_at",
+    "pinned",
+    "archived",
+    "project_id",
+    "profile",
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cache_hit_percent",
+    "personality",
+    "context_length",
+    "config_context_length",
+    "window_usage_percent",
+    "source_tag",
+    "raw_source",
+    "session_source",
+    "source_label",
+    "is_cli_session",
+    "is_messaging_session",
+    "is_streaming",
+    "cron_running",
+    "active_stream_id",
+    "has_pending_user_message",
+    "pending_started_at",
+    "default_hidden",
+    "worktree_path",
+    "worktree_branch",
+    "parent_session_id",
+    "parent_title",
+    "parent_source",
+    "relationship_type",
+    "pre_compression_snapshot",
+    "_lineage_root_id",
+    "_lineage_tip_id",
+    "_compression_segment_count",
+    "_lineage_collapsed_count",
+    "_parent_lineage_root_id",
+    "_parent_lineage_tip_id",
+    "_cross_surface_child_session",
+    "match_type",
+    "match_preview",
+    # Preserved so the sidebar can suppress rename / action-menu / swipe on
+    # read-only sessions and render the detailed gateway model label. Only the
+    # latest bounded routing object is included; routing history stays excluded.
+    "read_only",
+    "is_read_only",
+    "gateway_routing",
+}
+
+
 def _session_list_cache_sidebar_fields() -> set[str]:
     """Return the canonical bounded field set used by the list response."""
-    try:
-        import api.routes as _routes
+    return _SIDEBAR_SESSION_RESPONSE_FIELDS
 
-        fields = getattr(_routes, "_SIDEBAR_SESSION_RESPONSE_FIELDS", None)
-        if isinstance(fields, set):
-            return fields
-    except Exception:
-        pass
-    # The fallback is intentionally small and contains no transcript-bearing
-    # fields. Normal runtime calls resolve the canonical set above after
-    # api.routes has finished importing.
+
+def _session_list_cache_copy_value(value):
+    """Copy only mutable values after the transcript-bearing projection."""
+    if isinstance(value, (dict, list, set)):
+        return copy.deepcopy(value)
+    return value
+
+
+def _session_list_cache_copy_row(row: dict) -> dict:
     return {
-        "session_id", "title", "workspace", "model", "model_provider",
-        "message_count", "user_message_count", "created_at", "updated_at",
-        "last_message_at", "pinned", "archived", "project_id", "profile",
-        "source_tag", "session_source", "is_streaming", "active_stream_id",
-        "has_pending_user_message", "pending_started_at", "default_hidden",
-        "worktree_path", "worktree_branch", "parent_session_id",
-        "parent_title", "parent_source", "relationship_type",
-        "pre_compression_snapshot", "read_only", "is_read_only",
-        "gateway_routing",
+        key: _session_list_cache_copy_value(value)
+        for key, value in row.items()
     }
 
 
@@ -86,34 +144,40 @@ def _session_list_cache_bounded_payload(payload: dict) -> dict:
                 projected.append({})
                 continue
             item = {key: row[key] for key in fields if key in row}
-            if isinstance(item.get("gateway_routing"), dict):
-                item["gateway_routing"] = dict(item["gateway_routing"])
-            projected.append(item)
+            projected.append(_session_list_cache_copy_row(item))
         return projected
 
     bounded = {
-        key: value
+        key: _session_list_cache_copy_value(value)
         for key, value in payload.items()
         if key not in {"sessions", "sidebar_reference_sessions"}
     }
-    bounded["sessions"] = project_rows(payload.get("sessions"))
-    bounded["sidebar_reference_sessions"] = project_rows(
-        payload.get("sidebar_reference_sessions")
-    )
+    if "sessions" in payload:
+        bounded["sessions"] = project_rows(payload.get("sessions"))
+    if "sidebar_reference_sessions" in payload:
+        bounded["sidebar_reference_sessions"] = project_rows(
+            payload.get("sidebar_reference_sessions")
+        )
     return bounded
 
 
 def _session_list_cache_copy_payload(payload: dict) -> dict:
     """Copy only the already-bounded cache shape for request-local mutation."""
-    copied = dict(payload)
-    copied["sessions"] = [dict(row) for row in payload.get("sessions", [])]
-    copied["sidebar_reference_sessions"] = [
-        dict(row) for row in payload.get("sidebar_reference_sessions", [])
-    ]
-    for rows in (copied["sessions"], copied["sidebar_reference_sessions"]):
-        for row in rows:
-            if isinstance(row.get("gateway_routing"), dict):
-                row["gateway_routing"] = dict(row["gateway_routing"])
+    copied = {
+        key: _session_list_cache_copy_value(value)
+        for key, value in payload.items()
+        if key not in {"sessions", "sidebar_reference_sessions"}
+    }
+    if "sessions" in payload:
+        copied["sessions"] = [
+            _session_list_cache_copy_row(row)
+            for row in payload.get("sessions", [])
+        ]
+    if "sidebar_reference_sessions" in payload:
+        copied["sidebar_reference_sessions"] = [
+            _session_list_cache_copy_row(row)
+            for row in payload.get("sidebar_reference_sessions", [])
+        ]
     return copied
 
 
@@ -351,16 +415,32 @@ def _session_list_cache_stale_reason(key: tuple) -> str | None:
         return None
 
 
-def _session_list_cache_set(key: tuple, payload: dict) -> None:
+def _session_list_cache_set(
+    key: tuple,
+    payload: dict,
+    *,
+    expected_invalidation_stamp: tuple[int, int] | None = None,
+) -> bool:
     if not isinstance(payload, dict):
-        return
+        return False
     stamp = _session_list_cache_resolved_source_stamp(key)
     bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
+        # Projection intentionally happens outside the lock so large source rows
+        # cannot block cache hits. Re-check the caller's pre-build generation
+        # atomically before insertion, otherwise a rename/archive/delete clear
+        # that lands during projection can be undone by this stale write.
+        if (
+            expected_invalidation_stamp is not None
+            and _session_list_cache_invalidation_stamp(key)
+            != expected_invalidation_stamp
+        ):
+            return False
         _SESSIONS_CACHE[key] = (time.monotonic(), stamp, bounded)
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
             _SESSIONS_CACHE.popitem(last=False)
+    return True
 
 
 def _session_list_cache_clear(profile: str | None = None) -> None:

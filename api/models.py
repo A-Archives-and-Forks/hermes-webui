@@ -1721,7 +1721,12 @@ class Session:
                     n += 1
         return n
 
-    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+    def compact(
+        self,
+        include_runtime=False,
+        active_stream_ids=None,
+        sidebar_metadata_only=False,
+    ) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
         message_count = (
@@ -1734,7 +1739,7 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
-        return {
+        compact = {
             'session_id': self.session_id,
             'title': self.title,
             'workspace': self.workspace,
@@ -1809,6 +1814,15 @@ class Session:
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
         }
+        if sidebar_metadata_only:
+            for key in (
+                'compression_anchor_summary', 'compression_anchor_details',
+                'context_engine_state', 'compression_recovery',
+                'gateway_routing_history', 'composer_draft',
+                'process_wakeup_pause', 'share_token',
+            ):
+                compact.pop(key, None)
+        return compact
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({
@@ -6278,7 +6292,12 @@ def _diag_stage(diag, name: str) -> None:
             pass
 
 
-def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
+def all_sessions(
+    diag=None,
+    *,
+    include_lineage_metadata: bool = True,
+    sidebar_metadata_only: bool = False,
+):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
@@ -6318,7 +6337,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     _diag_stage(diag, "all_sessions.backfill_load")
                     full = Session.load(s.get('session_id'))
                     if full:
-                        index[i] = full.compact()
+                        index[i] = full.compact(sidebar_metadata_only=sidebar_metadata_only)
                         backfilled.append(full)
             if backfilled:
                 try:
@@ -6340,6 +6359,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     index_map[s.session_id] = s.compact(
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
+                        sidebar_metadata_only=sidebar_metadata_only,
                     )
             missing_persisted_ids = []
             if persisted_ids is not None:
@@ -6372,6 +6392,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     index_map[sidecar.session_id] = sidecar.compact(
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
+                        sidebar_metadata_only=sidebar_metadata_only,
                     )
                     recovered_sidecars.append(sidecar)
                 if recovered_sidecars:
@@ -6459,7 +6480,11 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
     # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).
-    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
+    result = [s.compact(
+        include_runtime=True,
+        active_stream_ids=active_stream_ids,
+        sidebar_metadata_only=sidebar_metadata_only,
+    ) for s in out if not (
         s.title == 'Untitled'
         and len(s.messages) == 0
         and not s.active_stream_id

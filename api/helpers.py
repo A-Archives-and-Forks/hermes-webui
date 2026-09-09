@@ -1268,6 +1268,11 @@ def read_body(handler) -> dict:
             pass
         raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
     raw = handler.rfile.read(length) if length else b'{}'
+    # A body-optional endpoint (e.g. DELETE /api/mcp/servers/{name}) may send a
+    # whitespace-only body; treat it like an empty body ({}) rather than a 400,
+    # matching the pre-#7336 lenient behavior for that shape (see gate finding).
+    if not raw.strip():
+        return {}
     try:
         parsed = _json.loads(raw)
     except Exception:

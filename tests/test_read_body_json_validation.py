@@ -42,6 +42,15 @@ def test_read_body_empty_body_defaults_to_empty_dict():
     assert read_body(handler) == {}
 
 
+@pytest.mark.parametrize("raw", [b" ", b"\n", b" \n\t ", b"\r\n"])
+def test_read_body_whitespace_only_body_defaults_to_empty_dict(raw):
+    """A body-optional endpoint (e.g. DELETE /api/mcp/servers/{name}) may send a
+    whitespace-only body; it must be treated like an empty body ({}), not a 400."""
+    from api.helpers import read_body
+
+    assert read_body(_handler(raw)) == {}
+
+
 @pytest.mark.parametrize("raw", [b"{bad json"])
 def test_read_body_raises_on_malformed_json(raw):
     from api.helpers import read_body

@@ -1,7 +1,6 @@
 """Session-list cache helpers extracted from api.routes."""
 
 import os
-import copy
 import re
 import threading
 import time
@@ -42,6 +41,80 @@ _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION: dict[str, int] = {}
+
+
+def _session_list_cache_sidebar_fields() -> set[str]:
+    """Return the canonical bounded field set used by the list response."""
+    try:
+        import api.routes as _routes
+
+        fields = getattr(_routes, "_SIDEBAR_SESSION_RESPONSE_FIELDS", None)
+        if isinstance(fields, set):
+            return fields
+    except Exception:
+        pass
+    # The fallback is intentionally small and contains no transcript-bearing
+    # fields. Normal runtime calls resolve the canonical set above after
+    # api.routes has finished importing.
+    return {
+        "session_id", "title", "workspace", "model", "model_provider",
+        "message_count", "user_message_count", "created_at", "updated_at",
+        "last_message_at", "pinned", "archived", "project_id", "profile",
+        "source_tag", "session_source", "is_streaming", "active_stream_id",
+        "has_pending_user_message", "pending_started_at", "default_hidden",
+        "worktree_path", "worktree_branch", "parent_session_id",
+        "parent_title", "parent_source", "relationship_type",
+        "pre_compression_snapshot", "read_only", "is_read_only",
+        "gateway_routing",
+    }
+
+
+def _session_list_cache_bounded_payload(payload: dict) -> dict:
+    """Project a builder payload to data the sidebar can actually consume.
+
+    Builders operate on full session snapshots because they also perform
+    reconciliation and lineage decisions. The cache must not retain those
+    snapshots: a single long transcript can otherwise make every cache set/get
+    allocate hundreds of megabytes via deepcopy().
+    """
+    fields = _session_list_cache_sidebar_fields()
+
+    def project_rows(rows):
+        projected = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                projected.append({})
+                continue
+            item = {key: row[key] for key in fields if key in row}
+            if isinstance(item.get("gateway_routing"), dict):
+                item["gateway_routing"] = dict(item["gateway_routing"])
+            projected.append(item)
+        return projected
+
+    bounded = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"sessions", "sidebar_reference_sessions"}
+    }
+    bounded["sessions"] = project_rows(payload.get("sessions"))
+    bounded["sidebar_reference_sessions"] = project_rows(
+        payload.get("sidebar_reference_sessions")
+    )
+    return bounded
+
+
+def _session_list_cache_copy_payload(payload: dict) -> dict:
+    """Copy only the already-bounded cache shape for request-local mutation."""
+    copied = dict(payload)
+    copied["sessions"] = [dict(row) for row in payload.get("sessions", [])]
+    copied["sidebar_reference_sessions"] = [
+        dict(row) for row in payload.get("sidebar_reference_sessions", [])
+    ]
+    for rows in (copied["sessions"], copied["sidebar_reference_sessions"]):
+        for row in rows:
+            if isinstance(row.get("gateway_routing"), dict):
+                row["gateway_routing"] = dict(row["gateway_routing"])
+    return copied
 
 
 def get_session_list_cache_snapshot() -> dict[str, object]:
@@ -240,7 +313,7 @@ def _session_list_cache_get(
         if stamp != current_stamp:
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
-                return copy.deepcopy(payload), False
+                return _session_list_cache_copy_payload(payload), False
             _SESSIONS_CACHE.pop(key, None)
             return None, False
         # #4808: widen the freshness window while a turn is streaming so the fixed
@@ -251,10 +324,10 @@ def _session_list_cache_get(
         fresh = (now - ts) < ttl
         if fresh:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), True
+            return _session_list_cache_copy_payload(payload), True
         if allow_stale:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), False
+            return _session_list_cache_copy_payload(payload), False
         _SESSIONS_CACHE.pop(key, None)
         return None, False
 
@@ -282,8 +355,9 @@ def _session_list_cache_set(key: tuple, payload: dict) -> None:
     if not isinstance(payload, dict):
         return
     stamp = _session_list_cache_resolved_source_stamp(key)
+    bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
-        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
+        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, bounded)
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
             _SESSIONS_CACHE.popitem(last=False)

@@ -8599,14 +8599,19 @@ def _attempt_credential_self_heal(
 def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     """Return the cache-signature component for runtime credentials.
 
-    Credential-pool providers can legitimately hand WebUI a different runtime
-    token on each request (round-robin pools, OAuth refresh, auth self-heal).
-    The AIAgent object is also where cross-turn memory-provider state lives, so
-    using the volatile token itself in the cache signature silently defeats the
-    per-session agent cache and drops warmed Hindsight prefetch results.
+    Credential-pool providers and callable key_cmd sources can legitimately
+    hand WebUI a different runtime token on each request (round-robin pools,
+    OAuth refresh, auth self-heal). The AIAgent object is also where cross-turn
+    memory-provider state lives, so using a volatile token in the cache
+    signature silently defeats the per-session agent cache and drops warmed
+    Hindsight prefetch results.
     """
     if credential_pool is not None:
         return 'credential-pool'
+    if not isinstance(resolved_api_key, str) and callable(resolved_api_key):
+        # key_cmd credentials are resolved by the client at request time; do
+        # not mint or stringify a potentially secret token for cache identity.
+        return 'dynamic-credential'
     import hashlib as _hashlib
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
 

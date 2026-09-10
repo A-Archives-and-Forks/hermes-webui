@@ -1891,6 +1891,44 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
     return None
 
 
+def _active_turn_boundary(result_messages, previous_context, identity, msg_text):
+    """Index in ``result_messages`` where the current turn starts (0 = all current).
+
+    Proof: active-turn token/index authority, else the last prompt-matching user
+    row AT OR AFTER a content-matching previous-context prefix; else 0 (fail closed).
+    """
+    result_messages = list(result_messages or [])
+    if not result_messages:
+        return 0
+    checkpoint_idx = _find_active_turn_checkpoint_index(
+        result_messages, previous_context, identity, msg_text,
+    )
+    if checkpoint_idx is not None:
+        return checkpoint_idx
+    # A content-only prefix is NOT ownership proof: _message_identity ignores
+    # ids/timestamps, so a compacted current-only result can echo old context.
+    previous_context = list(previous_context or [])
+    candidate_start = 0
+    if (
+        previous_context
+        and len(result_messages) > len(previous_context)
+        and _messages_have_prefix(result_messages, previous_context)
+    ):
+        candidate_start = len(previous_context)
+    expected_text = identity.get('text') if isinstance(identity, dict) else None
+    expected = _normalize_user_text(expected_text if expected_text is not None else msg_text)
+    if expected:
+        for idx in range(len(result_messages) - 1, candidate_start - 1, -1):
+            message = result_messages[idx]
+            if (
+                isinstance(message, dict)
+                and message.get('role') == 'user'
+                and _normalize_user_text(_message_text(message.get('content'))) == expected
+            ):
+                return idx
+    return 0
+
+
 def _materialize_active_turn_user(identity, msg_text, source):
     checkpoint = identity.get('checkpoint') if isinstance(identity, dict) else None
     message = (
@@ -2010,8 +2048,9 @@ def _prepare_marker_clean_writeback(
     previous_context_messages,
     result_messages,
     active_turn_identity=None,
+    msg_text=None,
 ):
-    """Return marker-cleaned rows, next context rows, and nudge provenance."""
+    """Return marker-cleaned rows, next context rows, nudge provenance, boundary."""
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
@@ -2024,14 +2063,23 @@ def _prepare_marker_clean_writeback(
             cleaned,
             list(previous_context_messages or []),
             provenance,
+            0,
         )
     if cleaned:
+        # The boundary is resolved BEFORE any restoration and reused by every
+        # restore below, so the contract is decided once per settle.
+        boundary = _active_turn_boundary(
+            cleaned, previous_context_messages, active_turn_identity, msg_text,
+        )
         return (
             cleaned,
-            _restore_reasoning_metadata(previous_context_messages, cleaned),
+            _restore_reasoning_metadata_before_boundary(
+                previous_context_messages, cleaned, boundary,
+            ),
             provenance,
+            boundary,
         )
-    return [], list(previous_context_messages or []), provenance
+    return [], list(previous_context_messages or []), provenance, 0
 
 
 def _annotate_media_snapshots_for_settled_messages(messages) -> None:
@@ -2065,10 +2113,12 @@ def _settle_result_messages(
         result_messages,
         next_context_messages,
         verification_nudge_provenance,
+        current_turn_boundary,
     ) = _prepare_marker_clean_writeback(
         previous_context_messages,
         result_messages,
         active_turn_identity,
+        msg_text,
     )
     if result_messages:
         _assign_stable_message_ids(
@@ -2109,7 +2159,9 @@ def _settle_result_messages(
     session.messages = _merge_display_messages_after_agent_result(
         previous_display_for_writeback,
         previous_context_messages,
-        _restore_display_reasoning_metadata(previous_messages, result_messages),
+        _restore_display_reasoning_metadata(
+            previous_messages, result_messages, current_turn_boundary=current_turn_boundary,
+        ),
         msg_text,
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
@@ -5854,17 +5906,31 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
         for m in arr or []:
             if isinstance(m, dict):
                 mid = m.get('id')
-                # bool is an int subclass; exclude it so a stray True/False id
-                # can never seed the counter.
-                if isinstance(mid, int) and not isinstance(mid, bool) and mid > seed:
+                if _is_stable_message_id(mid) and mid > seed:
                     seed = mid
     stamped = 0
     for m in result_messages:
-        if isinstance(m, dict) and m.get('id') is None:
+        # Invalid ids (True, 1.0, "3", 0, -1) are re-minted, never kept: they
+        # compare equal to minted integers and would forge successor identity.
+        if isinstance(m, dict) and not _is_stable_message_id(m.get('id')):
             seed += 1
             m['id'] = seed
             stamped += 1
     return stamped
+
+
+def _is_stable_message_id(value) -> bool:
+    """Stable-id contract: a positive ``int`` only (no bool/float/str/0/<0)."""
+    return type(value) is int and value > 0
+
+
+def _stable_id_counts(messages) -> dict:
+    """Count how many rows carry each valid stable id (1 == sole owner)."""
+    counts: dict = {}
+    for m in messages:
+        if isinstance(m, dict) and _is_stable_message_id(m.get('id')):
+            counts[m['id']] = counts.get(m['id'], 0) + 1
+    return counts
 
 
 _POST_COMPRESSION_TOOL_RESULT_TOTAL_TOKENS = 4096
@@ -6057,6 +6123,13 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     `timestamp` can be re-stamped with the current time on every new assistant
     response, making prior messages appear to "move" in time.
     """
+    return _restore_reasoning_metadata_before_boundary(previous_messages, updated_messages)
+
+
+def _restore_reasoning_metadata_before_boundary(
+    previous_messages, updated_messages, current_turn_boundary=None,
+):
+    """Boundary-aware core: rows at/after ``current_turn_boundary`` get nothing historical."""
     if not previous_messages or not updated_messages:
         return updated_messages
     updated_messages = list(updated_messages)
@@ -6077,7 +6150,9 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         return projected
 
     safe_pos = 0
-    while safe_pos < len(prev_safe):
+    # Rows at/after the active-turn boundary belong to the current turn: never
+    # carry historical ids/metadata onto them (same-content successor forgery).
+    while safe_pos < len(prev_safe) and (current_turn_boundary is None or safe_pos < current_turn_boundary):
         prev_idx, _ = prev_safe[safe_pos]
         prev_msg = previous_messages[prev_idx]
         cur_msg = updated_messages[safe_pos] if safe_pos < len(updated_messages) else None
@@ -6109,23 +6184,59 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     return updated_messages
 
 
-def _restore_display_reasoning_metadata(previous_messages, updated_messages):
+def _restore_display_reasoning_metadata(previous_messages, updated_messages, *, current_turn_boundary=None):
     """Restore display-only thinking rows for visible transcript persistence."""
-    updated_messages = _restore_reasoning_metadata(previous_messages, updated_messages)
+    updated_messages = _restore_reasoning_metadata_before_boundary(
+        previous_messages, updated_messages, current_turn_boundary,
+    )
     if not previous_messages or not updated_messages:
         return updated_messages
     prev_safe = _api_safe_message_positions(previous_messages)
     safe_indices = {idx for idx, _ in prev_safe}
+    # Stable-id ownership (#context-message-stable-id) must be one-to-one:
+    # an id reused by another API-safe row in either projection proves nothing.
+    prev_ids = _stable_id_counts(previous_messages[idx] for idx in safe_indices)
+    updated_ids = _stable_id_counts(
+        updated_messages[idx] for idx, _ in _api_safe_message_positions(updated_messages)
+    )
     inserted_reasoning_only = 0
     for prev_idx, prev_msg in enumerate(previous_messages):
         if _is_empty_partial_activity_message(prev_msg):
             continue
         if prev_idx in safe_indices or not _is_reasoning_only_assistant_message(prev_msg):
             continue
-        safe_pos = sum(1 for idx, _ in prev_safe if idx < prev_idx) + inserted_reasoning_only
+        anchor_pos = sum(1 for idx, _ in prev_safe if idx < prev_idx)
+        # A historical reasoning-only row never restores into the current-turn slice.
+        if current_turn_boundary is not None and anchor_pos >= current_turn_boundary:
+            continue
+        safe_pos = anchor_pos + inserted_reasoning_only
         existing = updated_messages[safe_pos] if safe_pos < len(updated_messages) else None
         if isinstance(existing, dict) and _is_reasoning_only_assistant_message(existing):
             continue
+        # Restore only in front of the row's own API-safe successor. A compacted
+        # result has no aligned slot; inserting past its end would append the
+        # historical row after the new reply and re-add it every turn.
+        if anchor_pos >= len(prev_safe) or not isinstance(existing, dict):
+            continue
+        successor = previous_messages[prev_safe[anchor_pos][0]]
+        # Stable ids (#context-message-stable-id) win over content identity:
+        # repeated prompts ("continue") make a distinct current row look like
+        # the historical successor and misplace every anchor before it.
+        successor_id = successor.get('id')
+        existing_id = existing.get('id')
+        if 'id' in successor or 'id' in existing:
+            if not (
+                _is_stable_message_id(successor_id)
+                and _is_stable_message_id(existing_id)
+                and successor_id == existing_id
+                and prev_ids.get(successor_id) == 1
+                and updated_ids.get(successor_id) == 1
+            ):
+                continue
+        else:
+            anchor_key = _message_identity(successor)
+            if anchor_key is None or anchor_key != _message_identity(existing):
+                continue
         updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))
         inserted_reasoning_only += 1
     return updated_messages

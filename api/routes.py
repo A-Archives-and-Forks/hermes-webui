@@ -24472,11 +24472,13 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
+                _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
-                _restore_reasoning_metadata,
+                _restore_reasoning_metadata_before_boundary,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
@@ -24534,9 +24536,20 @@ def _handle_chat_sync(handler, body):
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
-        _next_context_messages = _restore_reasoning_metadata(
+        # Active-turn boundary is fixed BEFORE any restoration (same as streaming),
+        # using whatever exact turn authority the result/Agent pair exported.
+        _active_turn_identity = _resolve_active_turn_authority(
+            {"token": None, "text": msg, "current_turn_user_idx": None, "turn_id": ""},
+            result=result,
+            agent=agent,
+        )
+        _turn_boundary = _active_turn_boundary(
+            _result_messages, _previous_context_messages, _active_turn_identity, msg,
+        )
+        _next_context_messages = _restore_reasoning_metadata_before_boundary(
             _previous_context_messages,
             _result_messages,
+            _turn_boundary,
         )
         # Mint ids on the shared result rows BEFORE dedupe deep-copies any
         # stale-user boundary row, so both arrays share the id (#5564).
@@ -24552,7 +24565,9 @@ def _handle_chat_sync(handler, body):
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
-            _restore_display_reasoning_metadata(_previous_messages, _result_messages),
+            _restore_display_reasoning_metadata(
+                _previous_messages, _result_messages, current_turn_boundary=_turn_boundary,
+            ),
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
         )

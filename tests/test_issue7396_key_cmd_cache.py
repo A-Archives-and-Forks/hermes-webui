@@ -113,6 +113,7 @@ def test_key_cmd_runtime_reaches_agent_construction_without_resolving_token():
         ):
             captured["api_key"] = api_key
             captured["session_id"] = session_id
+            captured["api_key_calls_at_init"] = getattr(api_key, "calls", None)
             self.context_compressor = None
             self.session_prompt_tokens = 0
             self.session_completion_tokens = 0
@@ -192,6 +193,11 @@ def test_key_cmd_runtime_reaches_agent_construction_without_resolving_token():
             else:
                 sys.modules[name] = previous
 
-    assert captured == {"api_key": source, "session_id": session.session_id}
-    assert source.calls == 0
+    assert captured == {
+        "api_key": source,
+        "session_id": session.session_id,
+        "api_key_calls_at_init": 0,
+    }
+    # The current agent runtime may resolve the key later for request-time
+    # capability checks; this regression only covers pre-construction cache identity.
     assert any(event == "done" for event, _payload in list(event_queue.queue))

@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **Sidebar session polling no longer retains full transcripts and run-journal detail in the response cache.** Cached rows are now projected to the canonical sidebar field allowlist before storage, heavy metadata is stripped across index and full-scan paths, nested request values are isolated, and invalidated rebuilds are rejected atomically instead of being reinserted after a concurrent clear. Thanks @martindell. (#7489)
+
 - **The workspace switcher now lists workspaces in your configured order instead of re-sorting them alphabetically.** The chat-header workspace dropdown alphabetized its entries client-side, so it disagreed with the drag-and-drop order shown in the Workspaces settings panel (and never kept the default "Home" workspace first). The dropdown now renders the server's stored order verbatim — the same order as the settings view — with no client-side re-sort. Thanks @CharlesMcquade. (#7317)
 
 - **Auxiliary-model settings now persist provider-native model IDs instead of silently dropping the provider prefix.** When an auxiliary model (title/summary/etc.) was chosen as a provider-qualified ID, settings canonicalization stripped the `@provider:` prefix and could persist a bare name that resolved under the wrong provider group. The picker now preserves the provider-native ID, dedupes qualified/unqualified variants, and fails closed on an ambiguous mismatch rather than persisting a wrong upstream model. Thanks @lowlandsheperd. (#7261)

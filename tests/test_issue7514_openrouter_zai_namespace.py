@@ -71,7 +71,7 @@ def test_openrouter_projection_is_namespace_only():
     openrouter = _models("openrouter")
 
     assert len(openrouter) == len(fallback)
-    for source, projected in zip(fallback, openrouter):
+    for source, projected in zip(fallback, openrouter, strict=True):
         assert projected["label"] == source["label"]
         assert projected["id"] == _expected_openrouter_id(source["id"])
 

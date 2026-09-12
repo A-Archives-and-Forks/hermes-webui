@@ -714,16 +714,11 @@ def main() -> None:
             daemon=True,
         ).start()
 
-    try:
-        signal.signal(signal.SIGTERM, _request_shutdown)
-    except (ValueError, OSError):
-        # Not on the main thread (e.g. embedded/test harness); skip handler.
-        logger.debug("Could not install SIGTERM handler", exc_info=True)
-
-    try:
-        signal.signal(signal.SIGINT, _request_shutdown)
-    except (ValueError, OSError):
-        logger.debug("Could not install SIGINT handler", exc_info=True)
+    for _sig in (signal.SIGTERM, signal.SIGINT):  # SIGINT: Ctrl-C / ctl.sh daemons (#7078)
+        try:
+            signal.signal(_sig, _request_shutdown)
+        except (ValueError, OSError):
+            logger.debug("Could not install %s handler", _sig, exc_info=True)
 
     try:
         httpd.serve_forever()

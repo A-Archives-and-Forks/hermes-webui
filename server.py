@@ -714,11 +714,11 @@ def main() -> None:
             daemon=True,
         ).start()
 
-    for _sig in (signal.SIGTERM, signal.SIGINT):  # SIGINT: Ctrl-C / ctl.sh daemons (#7078)
-        try:
-            signal.signal(_sig, _request_shutdown)
-        except (ValueError, OSError):
-            logger.debug("Could not install %s handler", _sig, exc_info=True)
+    try:
+        signal.signal(signal.SIGTERM, _request_shutdown)
+        signal.signal(signal.SIGINT, _request_shutdown)  # Ctrl-C / ctl.sh daemons (#7078)
+    except (ValueError, OSError):
+        logger.debug("Could not install shutdown signal handlers", exc_info=True)
 
     try:
         httpd.serve_forever()

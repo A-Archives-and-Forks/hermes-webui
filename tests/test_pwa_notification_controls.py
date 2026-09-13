@@ -407,17 +407,27 @@ def test_displaced_pending_prompt_key_is_retired_on_replacement():
     keyfn = _extract_fn(MESSAGES_JS, "_promptNotifyKey")
     retire = _extract_fn(MESSAGES_JS, "_retirePromptNotifyKey")
     active = _extract_fn(MESSAGES_JS, "_promptActiveSessionId")
+    approval_generation = _extract_fn(MESSAGES_JS, "_approvalPromptGeneration")
+    bump_approval_generation = _extract_fn(MESSAGES_JS, "_bumpApprovalPromptGeneration")
+    clarify_generation = _extract_fn(MESSAGES_JS, "_clarifyPromptGeneration")
+    bump_clarify_generation = _extract_fn(MESSAGES_JS, "_bumpClarifyPromptGeneration")
     script = f"""
 const _promptNotifySeen = new Map();
 const S = {{ session: {{ session_id: "sid-1" }} }};
 {keyfn}
 {retire}
 {active}
+{approval_generation}
+{bump_approval_generation}
+{clarify_generation}
+{bump_clarify_generation}
 {remember_ap}
 {remember_cl}
 {clear_ap}
 const _approvalPendingBySession = new Map();
 const _clarifyPendingBySession = new Map();
+const _approvalPromptGenerationBySession = new Map();
+const _clarifyPromptGenerationBySession = new Map();
 // Displaced approval owner: id-1, then a NEW different approval for sid-1.
 _rememberApprovalPending({{ approval_id: "id-1", description: "first" }}, 1);
 const key1 = _promptNotifyKey("approval", "sid-1", {{ approval_id: "id-1" }});

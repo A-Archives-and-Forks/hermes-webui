@@ -7414,6 +7414,7 @@ function hideApprovalCard(force=false) {
 let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
+const _approvalPromptGenerationBySession = new Map();
 let _approvalResponding = null;
 let _approvalClearedOwner = null;
 let _approvalDisplayedOwner = null;
@@ -7473,6 +7474,14 @@ function activeSessionHasPendingPromptAttention() {
   ));
 }
 
+function _approvalPromptGeneration(sid) {
+  return Number(_approvalPromptGenerationBySession.get(sid) || 0);
+}
+
+function _bumpApprovalPromptGeneration(sid) {
+  if (sid) _approvalPromptGenerationBySession.set(sid, _approvalPromptGeneration(sid) + 1);
+}
+
 function _rememberApprovalPending(pending, pendingCount) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
@@ -7486,6 +7495,9 @@ function _rememberApprovalPending(pending, pendingCount) {
   if (prev && prev.pending
       && _promptNotifyKey("approval", sid, prev.pending) !== _promptNotifyKey("approval", sid, pending)) {
     _retirePromptNotifyKey("approval", sid, prev.pending);
+    _bumpApprovalPromptGeneration(sid);
+  } else if (!prev) {
+    _bumpApprovalPromptGeneration(sid);
   }
   const nextPending = {...pending, _session_id: sid};
   _approvalPendingBySession.set(sid, {pending: nextPending, pendingCount: pendingCount || 1});
@@ -7496,6 +7508,7 @@ function _clearApprovalPendingForSession(sid) {
   if (sid) {
     const entry = _approvalPendingBySession.get(sid);
     _approvalPendingBySession.delete(sid);
+    if (entry) _bumpApprovalPromptGeneration(sid);
     if (entry && entry.pending) _retirePromptNotifyKey('approval', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
@@ -7639,9 +7652,9 @@ function showApprovalForSession(sid, pending, pendingCount) {
 
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   if(typeof _notifyPromptCard==='function') _notifyPromptCard('approval', sid, pending);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
-  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   _approvalClearedOwner = null;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
@@ -7701,8 +7714,10 @@ function showApprovalCard(pending, pendingCount) {
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
   if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  // Dismissal is local UI state, not authoritative prompt completion. Keep
+  // the pending owner and its notification-dedupe key until the server reports
+  // resolution or a terminal/cancel lifecycle clears it.
   hideApprovalCard(true);
-  if (sid) _clearApprovalPendingForSession(sid);
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -7894,7 +7909,9 @@ function _startApprovalFallbackPoll(sid) {
     if (_approvalFallbackPollInFlight) return;
     _approvalFallbackPollInFlight = true;
     try {
+      const generation = _approvalPromptGeneration(sid);
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
+      if (_approvalPollingSessionMissingOrMismatched(sid) || _approvalPromptGeneration(sid) !== generation) return;
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
         const _resolvedEntry = _approvalPendingBySession.get(sid);
@@ -8449,10 +8466,19 @@ let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
 let _clarifyPendingBySession = new Map();
+const _clarifyPromptGenerationBySession = new Map();
 const CLARIFY_MIN_VISIBLE_MS = 30000;
 
 function _clarifyPromptBelongsToActiveSession(sid) {
   return !!(sid && _promptActiveSessionId() === sid);
+}
+
+function _clarifyPromptGeneration(sid) {
+  return Number(_clarifyPromptGenerationBySession.get(sid) || 0);
+}
+
+function _bumpClarifyPromptGeneration(sid) {
+  if (sid) _clarifyPromptGenerationBySession.set(sid, _clarifyPromptGeneration(sid) + 1);
 }
 
 function _rememberClarifyPending(pending) {
@@ -8466,6 +8492,9 @@ function _rememberClarifyPending(pending) {
   if (prev && prev.pending
       && _promptNotifyKey("clarify", sid, prev.pending) !== _promptNotifyKey("clarify", sid, pending)) {
     _retirePromptNotifyKey("clarify", sid, prev.pending);
+    _bumpClarifyPromptGeneration(sid);
+  } else if (!prev) {
+    _bumpClarifyPromptGeneration(sid);
   }
   const nextPending = {...pending, _session_id: sid};
   _clarifyPendingBySession.set(sid, {pending: nextPending});
@@ -8476,9 +8505,15 @@ function _clearClarifyPendingForSession(sid) {
   if (sid) {
     const entry = _clarifyPendingBySession.get(sid);
     _clarifyPendingBySession.delete(sid);
+    if (entry) _bumpClarifyPromptGeneration(sid);
     if (entry && entry.pending) _retirePromptNotifyKey('clarify', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
+}
+
+function _clearPendingPromptsForSession(sid) {
+  _clearApprovalPendingForSession(sid);
+  _clearClarifyPendingForSession(sid);
 }
 
 function _hideClarifyCardIfOwner(sid, force=false, reason="dismissed") {
@@ -9015,7 +9050,9 @@ function _startClarifyFallbackPoll(sid) {
     if (_clarifyFallbackPollInFlight) return;
     _clarifyFallbackPollInFlight = true;
     try {
+      const generation = _clarifyPromptGeneration(sid);
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
+      if (!S.session || S.session.session_id !== sid || _clarifyPromptGeneration(sid) !== generation) return;
       if (data.pending) { showClarifyForSession(sid, data.pending); }
       else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
     } catch(e) {
@@ -9257,7 +9294,11 @@ const _promptNotifySeen = new Map();
 // notifications are disabled, so enabling mid-prompt re-notifies that owner.
 function _promptNotifyKey(kind, sid, pending){
   const p = pending || {};
-  const id = p.approval_id || p.clarify_id || '';
+  // Older clarify producers can omit clarify_id. Their stable prompt payload is
+  // still a usable lifecycle identity and is retired with the pending entry.
+  const id = p.approval_id || p.clarify_id || (kind === 'clarify'
+    ? JSON.stringify([p.question || p.description || '', p.choices_offered || p.choices || [], p.requested_at || ''])
+    : '');
   const runId = String(p.run_id || '').trim();
   const mirrorToken = String(p._gateway_mirror_token || '').trim();
   return JSON.stringify([kind, String(sid || ''), String(id),
@@ -9266,13 +9307,13 @@ function _promptNotifyKey(kind, sid, pending){
 }
 function _retirePromptNotifyKey(kind, sid, pending){
   if (!pending) return;
-  const id = pending.approval_id || pending.clarify_id || '';
-  if (!id) return;
-  _promptNotifySeen.delete(_promptNotifyKey(kind, sid, pending));
+  const key = _promptNotifyKey(kind, sid, pending);
+  if (!key) return;
+  _promptNotifySeen.delete(key);
 }
 function _notifyPromptCard(kind, sid, pending){
   const p = pending || {};
-  const id = p.approval_id || p.clarify_id || '';
+  const id = p.approval_id || p.clarify_id || (kind === 'clarify' ? p.question || p.description || '' : '');
   if (!id) return;
   const key = _promptNotifyKey(kind, sid, p);
   if (_promptNotifySeen.has(key)) return;

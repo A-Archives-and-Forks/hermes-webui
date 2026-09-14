@@ -413,6 +413,7 @@ def test_displaced_pending_prompt_key_is_retired_on_replacement():
     bump_clarify_generation = _extract_fn(MESSAGES_JS, "_bumpClarifyPromptGeneration")
     script = f"""
 const _promptNotifySeen = new Map();
+const _isApprovalDismissed = () => false;
 const S = {{ session: {{ session_id: "sid-1" }} }};
 {keyfn}
 {retire}

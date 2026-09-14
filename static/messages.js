@@ -7486,6 +7486,10 @@ function _rememberApprovalPending(pending, pendingCount) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
   if (!sid) return null;
+  if (pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) {
+    _clearApprovalPendingForSession(sid);
+    return sid;
+  }
   const prev = _approvalPendingBySession.get(sid);
   // A replacement pending entry DISPLACES the previous prompt for this
   // session: retire the displaced prompt notification-dedupe key so the same
@@ -7714,9 +7718,9 @@ function showApprovalCard(pending, pendingCount) {
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
   if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
-  // Dismissal is local UI state, not authoritative prompt completion. Keep
-  // the pending owner and its notification-dedupe key until the server reports
-  // resolution or a terminal/cancel lifecycle clears it.
+  // Dismissal clears local attention while the server remains authoritative.
+  // A later poll of the same dismissed approval stays suppressed below.
+  _clearApprovalPendingForSession(sid);
   hideApprovalCard(true);
 }
 

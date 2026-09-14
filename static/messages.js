@@ -7421,13 +7421,12 @@ let _approvalDisplayedOwner = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
-// Dismissed approvals are namespaced by session so that two sessions carrying
-// the SAME approval_id (e.g. a gateway/run source that reuses externally
-// supplied IDs across sessions) can't have a dismissal in one session hide the
-// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
+// Dismissal uses the same injective full-owner tuple as notifications.
+// Legacy session/ID-only tombstones cannot safely identify a gateway run.
 function _approvalDismissKey(sid, approvalId) {
   if (!approvalId) return '';
-  return String(sid || '') + '\u0000' + String(approvalId);
+  const pending = typeof approvalId === 'object' ? approvalId : {approval_id: approvalId};
+  return _promptNotifyKey('approval', sid, pending);
 }
 
 function _getDismissedApprovals() {
@@ -7469,7 +7468,8 @@ function _approvalPromptBelongsToActiveSession(sid) {
 function activeSessionHasPendingPromptAttention() {
   const sid = _promptActiveSessionId();
   return !!(sid && (
-    _approvalPendingBySession.has(sid) ||
+    (_approvalPendingBySession.has(sid) &&
+      !_isApprovalDismissed(sid, _approvalPendingBySession.get(sid).pending)) ||
     _clarifyPendingBySession.has(sid)
   ));
 }
@@ -7486,10 +7486,6 @@ function _rememberApprovalPending(pending, pendingCount) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
   if (!sid) return null;
-  if (pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) {
-    _clearApprovalPendingForSession(sid);
-    return sid;
-  }
   const prev = _approvalPendingBySession.get(sid);
   // A replacement pending entry DISPLACES the previous prompt for this
   // session: retire the displaced prompt notification-dedupe key so the same
@@ -7499,6 +7495,7 @@ function _rememberApprovalPending(pending, pendingCount) {
   if (prev && prev.pending
       && _promptNotifyKey("approval", sid, prev.pending) !== _promptNotifyKey("approval", sid, pending)) {
     _retirePromptNotifyKey("approval", sid, prev.pending);
+    _unmarkApprovalDismissed(sid, prev.pending);
     _bumpApprovalPromptGeneration(sid);
   } else if (!prev) {
     _bumpApprovalPromptGeneration(sid);
@@ -7512,7 +7509,8 @@ function _clearApprovalPendingForSession(sid) {
   if (sid) {
     const entry = _approvalPendingBySession.get(sid);
     _approvalPendingBySession.delete(sid);
-    if (entry) _bumpApprovalPromptGeneration(sid);
+    _bumpApprovalPromptGeneration(sid);
+    if (entry && entry.pending) _unmarkApprovalDismissed(sid, entry.pending);
     if (entry && entry.pending) _retirePromptNotifyKey('approval', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
@@ -7656,7 +7654,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
-  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending)) return;
   if(typeof _notifyPromptCard==='function') _notifyPromptCard('approval', sid, pending);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
   _approvalClearedOwner = null;
@@ -7717,10 +7715,11 @@ function showApprovalCard(pending, pendingCount) {
 
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
-  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
-  // Dismissal clears local attention while the server remains authoritative.
-  // A later poll of the same dismissed approval stays suppressed below.
-  _clearApprovalPendingForSession(sid);
+  const entry = _approvalPendingBySession.get(sid);
+  if (entry && entry.pending) _markApprovalDismissed(sid, entry.pending);
+  // Keep the unresolved owner for authoritative resolution/replacement.
+  // Local dismissal hides attention, not the server-owned prompt.
+  if (typeof syncTopbar === 'function') syncTopbar();
   hideApprovalCard(true);
 }
 
@@ -8509,7 +8508,7 @@ function _clearClarifyPendingForSession(sid) {
   if (sid) {
     const entry = _clarifyPendingBySession.get(sid);
     _clarifyPendingBySession.delete(sid);
-    if (entry) _bumpClarifyPromptGeneration(sid);
+    _bumpClarifyPromptGeneration(sid);
     if (entry && entry.pending) _retirePromptNotifyKey('clarify', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
@@ -9332,16 +9331,23 @@ function _notifyPromptCard(kind, sid, pending){
   if (typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid)) return;
   if (typeof sendBrowserNotification !== 'function') return;
   if (typeof window !== 'undefined' && !window._notificationsEnabled) return;
-  _promptNotifySeen.set(key, Date.now());
+  const attempt = {};
+  _promptNotifySeen.set(key, attempt);
   // forceHidden: this caller already made the visibility decision (the
   // actively-viewed gate above). sendBrowserNotification's own live gate
   // ("notify only when document.hidden") would otherwise veto the
   // unfocused-but-visible case, which this feature explicitly notifies for.
-  if (kind === 'clarify') {
-    sendBrowserNotification('Clarification needed', p.question || p.description || 'Tool clarification needed', { sid, forceHidden: true });
-  } else {
-    sendBrowserNotification('Approval required', p.description || p.command || 'Tool approval needed', { sid, forceHidden: true });
-  }
+  const rollback = () => {
+    if (_promptNotifySeen.get(key) === attempt) _promptNotifySeen.delete(key);
+  };
+  try {
+    const delivery = kind === 'clarify'
+      ? sendBrowserNotification('Clarification needed', p.question || p.description || 'Tool clarification needed', { sid, forceHidden: true })
+      : sendBrowserNotification('Approval required', p.description || p.command || 'Tool approval needed', { sid, forceHidden: true });
+    Promise.resolve(delivery).then(accepted => {
+      if (accepted !== true) rollback();
+    }, rollback);
+  } catch (_) { rollback(); }
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
@@ -9355,14 +9361,24 @@ function sendBrowserNotification(title,body,options={}){
   if(!force&&!window._notificationsEnabled) return;
   if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
   if(!('Notification' in window)) return;
-  if(Notification.permission==='granted'){
-    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
-  }else if(Notification.permission==='denied'){
+  const deliver = async () => {
+    try {
+      await _showPwaNotification(title,body,options);
+      return true;
+    } catch (_) {
+      try {
+        new Notification(title||assistantDisplayName(),_notificationOptions(body,options));
+        return true;
+      } catch (_err) { return false; }
+    }
+  };
+  if(Notification.permission==='granted') return deliver();
+  if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
-  }else{
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
+    return false;
   }
+  return requestNotificationPermission().then(p => p==='granted' ? deliver() : false).catch(() => false);
 }
 
 // ── /btw ephemeral stream ────────────────────────────────────────────────────

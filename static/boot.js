@@ -93,6 +93,8 @@ async function cancelSessionStream(session){
     else setStatus('');
   }
   if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
+  if(typeof stopApprovalPollingForSession==='function') stopApprovalPollingForSession(sid);
+  if(typeof stopClarifyPollingForSession==='function') stopClarifyPollingForSession(sid);
   if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
     stopApprovalPolling();
     hideApprovalCard(true);

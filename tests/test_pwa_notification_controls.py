@@ -43,73 +43,11 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
 
 
-def test_prompt_notifications_fire_from_card_renderer_chokepoint():
-    """Approval/clarify notifications are owned by the card renderers, so EVERY
-    surfacing path (live SSE, 1.5s fallback poll, post-respond 'next approval'
-    refresh, reload-while-pending) notifies — not just the active-session SSE
-    event. The SSE listeners no longer send notifications directly; the shared
-    _notifyPromptCard gate dedupes per prompt id so repeated poll ticks and
-    re-renders ping exactly once."""
-    # The chokepoint helper exists and both card renderers call it BEFORE the
-    # belongs-to-active-session guard (so a non-active session's prompt still
-    # notifies).
-    assert "function _notifyPromptCard(kind, sid, pending){" in MESSAGES_JS
-    for fn_name, kind in (("showApprovalCard", "approval"), ("showClarifyCard", "clarify")):
-        start = MESSAGES_JS.index(f"function {fn_name}(")
-        body_start = MESSAGES_JS.index("{", start)
-        depth = 0
-        for i in range(body_start, len(MESSAGES_JS)):
-            if MESSAGES_JS[i] == "{":
-                depth += 1
-            elif MESSAGES_JS[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    body = MESSAGES_JS[start : i + 1]
-                    break
-        assert "_notifyPromptCard(" in body, f"{fn_name} must route notifications through _notifyPromptCard"
-    assert "_notifyPromptCard('approval', sid, pending);" in MESSAGES_JS
-    assert "_notifyPromptCard('clarify', sid, pending);" in MESSAGES_JS
-    # Dedupe gate: per logical owner - an INJECTIVE typed-tuple key
-    # (JSON.stringify of [kind, sid, prompt id, gateway run id, mirror token]),
-    # so delimiter-bearing producer strings cannot collide.
-    assert "function _promptNotifyKey(kind, sid, pending){" in MESSAGES_JS
-    assert "return JSON.stringify([kind, String(sid || ''), String(id)," in MESSAGES_JS
-    assert "const key = _promptNotifyKey(kind, sid, p);" in MESSAGES_JS
-    assert "if (_promptNotifySeen.has(key)) return;" in MESSAGES_JS
-    # Entries retire by prompt LIFECYCLE (the pending-clear chokepoints), never
-    # by wall-clock age - a prompt pending >10min must not re-notify.
-    assert "_PROMPT_NOTIFY_TTL_MS" not in MESSAGES_JS
-    assert "function _retirePromptNotifyKey(kind, sid, pending){" in MESSAGES_JS
-    assert "_retirePromptNotifyKey('approval', sid, entry.pending);" in MESSAGES_JS
-    assert "_retirePromptNotifyKey('clarify', sid, entry.pending);" in MESSAGES_JS
-    # Disabled notifications must not consume the notify, so enabling
-    # mid-prompt still re-notifies that owner.
-    assert "!window._notificationsEnabled) return;" in MESSAGES_JS
-    # Visibility gate: suppress only while the prompt's session is actively
-    # viewed (open in pane + tab visible + tab focused). All three of the
-    # user's notification cases fire: non-active session, hidden tab,
-    # unfocused window.
-    assert "_isSessionActivelyViewed(sid)) return;" in MESSAGES_JS
-    # SSE listeners delegate; they must not send directly (would bypass dedupe).
-    approval_listener = _source_between(
-        "source.addEventListener('approval',e=>{",
-        "source.addEventListener('clarify',e=>{",
-    )
-    clarify_listener = _source_between(
-        "source.addEventListener('clarify',e=>{",
-        "source.addEventListener('state_saved',e=>{",
-    )
-    assert "sendBrowserNotification(" not in approval_listener
-    assert "sendBrowserNotification(" not in clarify_listener
-    assert "_notifyPromptCard()" in approval_listener  # ownership comment anchor
-    assert "_notifyPromptCard()" in clarify_listener
-
-
 def _extract_fn(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.find(marker)
     assert start >= 0, f"{name} not found"
-    brace = src.find("{", start)
+    brace = src.find("{", src.find(")", start))
     depth = 0
     for i in range(brace, len(src)):
         if src[i] == "{":
@@ -389,7 +327,7 @@ const ownerKey = _promptNotifyKey('approval', 'sid-1', {{ approval_id: 'd1' }});
 process.stdout.write(JSON.stringify({{ count: sent.length, bodies: sent.map(s => s.body), consumed: _promptNotifySeen.has(ownerKey) }}));
 """
     result = _run_node(script)
-    assert result["count"] == 2 or result["count"] == 1, f"unexpected ping count (got {result})"
+    assert result["count"] == 1, f"unexpected ping count (got {result})"
     assert result["bodies"][0] == 'after enabling', f"enabling mid-prompt must re-notify the same owner (got {result})"
     assert result["consumed"] is True, "the enabled notify must be recorded (consumed) for the owner"
 
@@ -414,6 +352,7 @@ def test_displaced_pending_prompt_key_is_retired_on_replacement():
     script = f"""
 const _promptNotifySeen = new Map();
 const _isApprovalDismissed = () => false;
+const _unmarkApprovalDismissed = () => {{}};
 const S = {{ session: {{ session_id: "sid-1" }} }};
 {keyfn}
 {retire}

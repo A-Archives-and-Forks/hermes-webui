@@ -432,6 +432,50 @@ console.log(JSON.stringify({
     )
 
 
+def test_later_clear_wins_after_same_millisecond_re_mark():
+    """A clear must advance from the marker's logical order, not reuse the wall
+    clock tick and lose to the marker's synthetic ``clearedAt + 1`` timestamp."""
+    out = _run_node(_script("""
+listed('Y');
+const A = makeClient();
+_now = 1000;
+A.clearUnread('Y');
+A.markUnread('Y', 3);
+const marked = A.hasUnread('Y');
+// The user visits again before the millisecond clock advances.
+A.clearUnread('Y');
+console.log(JSON.stringify({
+  marked,
+  final: A.hasUnread('Y'),
+  disk: readDisk(SESSION_COMPLETION_UNREAD_KEY),
+}));
+"""))
+    assert out["marked"] is True, "precondition: the same-ms re-mark must be visible"
+    assert out["final"] is False
+    assert out["disk"] == {}, "the later clear must remove the same-ms marker from disk"
+
+
+def test_same_millisecond_clear_beats_marker_prepared_before_it():
+    """A marker whose intent was prepared before a concurrent clear must lose,
+    even when both operations observe the same wall-clock millisecond."""
+    out = _run_node(_script("""
+listed('Y');
+const A = makeClient();
+const B = makeClient();
+A.hasUnread('Y');
+B.hasUnread('Y');
+_now = 1000;
+_onRead = () => { A.clearUnread('Y'); };
+B.markUnread('Y', 3);
+console.log(JSON.stringify({
+  marker: readDisk(SESSION_COMPLETION_UNREAD_KEY).Y || null,
+  visible: B.hasUnread('Y'),
+}));
+"""))
+    assert out["marker"] is None
+    assert out["visible"] is False
+
+
 def test_repair_removes_a_marker_that_lost_to_a_clear():
     """A stale client's write can land after the clear. The repair must drop the
     losing marker from the store, or the dot returns on every client."""

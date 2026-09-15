@@ -21,6 +21,8 @@ _HELPER_NAMES = (
     "_sessionListLoaded",
     "_mergeSessionViewedCounts",
     "_markerLosesToUnreadClear",
+    "_sessionCompletionUnreadOrder",
+    "_nextSessionCompletionUnreadOrder",
     "_sessionCompletionUnreadClearedKey",
     "_parseSessionCompletionUnreadClearedKey",
     "_readSessionCompletionUnreadCleared",

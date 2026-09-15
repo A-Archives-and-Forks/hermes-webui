@@ -113,6 +113,8 @@ _HELPER_FNS = [
     "_sessionListLoaded",
     "_mergeSessionViewedCounts",
     "_markerLosesToUnreadClear",
+    "_sessionCompletionUnreadOrder",
+    "_nextSessionCompletionUnreadOrder",
     "_sessionCompletionUnreadClearedKey",
     "_parseSessionCompletionUnreadClearedKey",
     "_readSessionCompletionUnreadCleared",
@@ -424,7 +426,11 @@ console.log(JSON.stringify({
   bView: B.hasUnread('Y'),
 }));
 """))
-    assert out["marker"] == {"message_count": 9, "completed_at": 3000}, (
+    assert out["marker"] == {
+        "message_count": 9,
+        "completed_at": 3000,
+        "unread_order": 3001,
+    }, (
         "a completion that postdates the clear must be kept"
     )
     assert out["aView"] is True and out["bView"] is True, (
@@ -531,7 +537,7 @@ A.clearUnread('X');
 const tombs = readAllClears(A);
 console.log(JSON.stringify({ tombs }));
 """))
-    assert out["tombs"] == {"X": 2000, "Y": 2000}, (
+    assert out["tombs"] == {"X": 2001, "Y": 2001}, (
         "concurrent clears for different sessions must retain both tombstones"
     )
 
@@ -592,7 +598,7 @@ const marker = readDisk(SESSION_COMPLETION_UNREAD_KEY).Y || null;
 const tombstone = readAllClears(A).Y || null;
 console.log(JSON.stringify({ marker, tombstone }));
 """))
-    assert out["tombstone"] == 2000, (
+    assert out["tombstone"] == 2001, (
         "a clear must persist its ordering fact even when the marker write is delayed"
     )
     assert out["marker"] is None, "the completion that predates the visit must remain cleared"
@@ -613,7 +619,7 @@ A.markUnread('Y', 1);
 A.clearUnread('Y');
 console.log(JSON.stringify({ tombs: readAllClears(A) }));
 """))
-    assert out["tombs"] == {"GONE": 1000, "Y": 2000}, (
+    assert out["tombs"] == {"GONE": 1002, "Y": 2002}, (
         "the versioned tombstone may be pruned, while its legacy compatibility "
         "fact remains available to already-open clients"
     )
@@ -641,12 +647,12 @@ console.log(JSON.stringify({
   young: young,
 }));
 """))
-    assert out["keptYoung"] == {"Y": 1000, "Z": out["young"]}, (
+    assert out["keptYoung"] == {"Y": 1002, "Z": out["young"] + 2}, (
         "a tombstone younger than the cap must survive a newer clear"
     )
     assert out["afterAge"] == {
-        "Y": out["young"] + 8 * 24 * 60 * 60 * 1000,
-        "Z": out["young"],
+        "Y": out["young"] + 8 * 24 * 60 * 60 * 1000 + 2,
+        "Z": out["young"] + 2,
     }, (
         "the old versioned record is dropped, while the rollout compatibility "
         "map remains available to older clients"

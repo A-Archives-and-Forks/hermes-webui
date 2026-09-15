@@ -611,7 +611,11 @@ function _getSessionCompletionUnread() {
 function _markerLosesToUnreadClear(marker, clearedAt) {
   const cleared = Number(clearedAt) || 0;
   if (!cleared) return false;
-  return (Number(marker && marker.completed_at) || 0) <= cleared;
+  return _sessionCompletionUnreadOrder(marker) <= cleared;
+}
+
+function _sessionCompletionUnreadOrder(marker) {
+  return Number(marker && (marker.unread_order || marker.completed_at)) || 0;
 }
 
 function _sessionCompletionUnreadClearedKey(sid, clearedAt = null) {
@@ -635,10 +639,17 @@ function _parseSessionCompletionUnreadClearedKey(key) {
 // clear writes a new key rather than replacing an older operation, so readers
 // can fold the maximum timestamp without a cross-context compare-and-set.
 function _readSessionCompletionUnreadCleared() {
+  // Snapshot keys before values. A clear that starts after this operation began
+  // is deliberately excluded, so a marker prepared first gets the same logical
+  // order and loses the clear-wins tie. A marker started after a completed clear
+  // observes that clear and advances beyond it.
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {}
   const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
   try {
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
+    for (const key of keys) {
       const parsed = _parseSessionCompletionUnreadClearedKey(key);
       if (!parsed) continue;
       const value = Math.max(parsed.version, Number(localStorage.getItem(key)) || 0);
@@ -648,6 +659,18 @@ function _readSessionCompletionUnreadCleared() {
     // A storage implementation that cannot enumerate still retains legacy data.
   }
   return cleared;
+}
+
+function _nextSessionCompletionUnreadOrder(sid, cleared = null) {
+  const clears = cleared || _readSessionCompletionUnreadCleared();
+  const cached = _getSessionCompletionUnread()[sid];
+  const stored = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY)[sid];
+  return Math.max(
+    Date.now(),
+    Number(clears[sid]) || 0,
+    _sessionCompletionUnreadOrder(cached),
+    _sessionCompletionUnreadOrder(stored)
+  ) + 1;
 }
 
 // Merge the persisted marker map with our cache under the tombstones. Markers
@@ -703,15 +726,12 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  // If a clear and a genuine later completion share one millisecond, preserve
-  // event order rather than letting the clear's <= comparison erase the later
-  // marker.
-  const intendedAt = Date.now();
-  const clearedAt = Number(_readSessionCompletionUnreadCleared()[sid]) || 0;
-  const completedAt = clearedAt && clearedAt <= intendedAt
-    ? Math.max(intendedAt, clearedAt + 1)
-    : intendedAt;
-  const entry = {message_count: count, completed_at: completedAt};
+  const clearsAtIntent = _readSessionCompletionUnreadCleared();
+  const entry = {
+    message_count: count,
+    completed_at: Date.now(),
+    unread_order: _nextSessionCompletionUnreadOrder(sid, clearsAtIntent),
+  };
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
@@ -811,10 +831,11 @@ function _clearSessionCompletionUnread(sid, recordIfMissing = true) {
       _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY), sid);
     if (!stored && !recordIfMissing) return;
   }
+  const order = _nextSessionCompletionUnreadOrder(sid);
   delete unread[sid];
   // Write the ordering fact before the marker map. This is required even when
   // the marker has been prepared by another client but has not reached storage.
-  _writeSessionCompletionUnreadCleared(sid, Date.now());
+  _writeSessionCompletionUnreadCleared(sid, order);
   _saveSessionCompletionUnread();
 }
 
@@ -944,7 +965,9 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
   // Each cleared marker needs its durable ordering fact, or the merge in
   // _saveSessionCompletionUnread() (and a stale client's later save) would
   // restore it from the store.
-  _writeSessionCompletionUnreadCleared(clearedSids, Date.now());
+  for (const sid of clearedSids) {
+    _writeSessionCompletionUnreadCleared(sid, _nextSessionCompletionUnreadOrder(sid));
+  }
   _saveSessionCompletionUnread();
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;

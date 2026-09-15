@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-08-22
+- **Updated:** 2026-09-15
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -75,6 +75,7 @@ and 5; it does not mark every run-state boundary implemented.
 | Compression summary / handoff | Gives the agent recovery context after automatic compression | Must remain agent-facing recovery material unless explicitly rendered as history | Pollute the active turn or become implicit current user intent |
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
+| Client-side unread stores (`localStorage`) | Backs the sidebar unread dot for every client on the origin | Converges across clients by merge and tombstone ordering; not atomic | Let one client's stale cache lower a count or resurrect a cleared marker |
 
 ## Core Invariants
 
@@ -153,6 +154,48 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+## Client-side unread persistence (sidebar layer)
+
+The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.
+Both live in `localStorage` under the origin, so every WebUI client on the same
+origin/profile (a PWA window and a browser tab, for example) shares them while each
+client also caches them in module state. They are projections of the sidebar layer
+above; the rules below describe what stays coherent when more than one client
+writes.
+
+| Store | Key | Semantics |
+|---|---|---|
+| Viewed counts | `hermes-session-viewed-counts` | `sid -> N`, meaning "seen at least up to N messages" |
+| Completion markers | `hermes-session-completion-unread` | `sid -> {message_count, completed_at, ...}` behind the visible dot |
+
+- **Viewed counts merge by maximum.** The fact is monotonic per session and
+  additive across clients, so a save reads the store, merges its cache in with a
+  max, and writes only when the store does not already hold the merged result. A
+  count held only in a client's cache is written back only for a session the
+  sidebar list still shows, so a session deleted in another client is not
+  resurrected.
+- **Completion markers are ordered by tombstones.** Markers are add/remove and
+  cannot be max-ordered, so each clear records `sid -> clearedAt` in
+  `hermes-session-completion-unread-cleared`, and a marker that does not postdate
+  its clear loses; a genuine later completion still wins. The tombstone map is
+  bounded by session existence and a 7-day retention cap, and is never part of the
+  marker map consumers read.
+- **Cross-client repair, not cache invalidation.** The `storage` listener routes a
+  changed unread key back through that same merge instead of only dropping the
+  local cache. A client that still holds an acknowledgement re-asserts it after the
+  other client's write, the loser sees a value it cannot beat and stops, and repair
+  converges instead of ping-ponging storage events.
+- **The contract is convergence, not atomicity.** Each save is a read-modify-write
+  across separate `localStorage` operations with no lock between them, so two
+  clients writing inside the same window can still lose one update; repair
+  re-asserts held acknowledgements on the next storage event. The case repair
+  cannot fix is two concurrent *clears*: the later whole-map write can discard the
+  other client's tombstone, after which a later marker save can re-add the stale
+  marker and the cleared dot returns. A hard cross-tab guarantee needs either a
+  lock around those writes (Web Locks, with a documented fallback for contexts
+  without it) or per-session versioned records. This contract deliberately claims
+  only the convergence described here.
+
 ## Review Checklist
 
 Use this checklist for PRs that touch run state, streaming, replay, compression,
@@ -175,6 +218,10 @@ context reconstruction, or session metadata:
 - If it introduces or changes a reclamation window, what proves an in-flight
   cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
+- Does this change write one of the client-side unread stores
+  (`hermes-session-viewed-counts`, `hermes-session-completion-unread`,
+  `hermes-session-completion-unread-cleared`), and does it keep the merge and
+  tombstone rules in the client-side unread persistence section?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

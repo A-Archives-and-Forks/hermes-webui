@@ -478,7 +478,27 @@ function _knownSessionProfileCount(profile) {
 
 function _saveSessionViewedCounts() {
   try {
-    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(_getSessionViewedCounts()));
+    // Merge against the persisted map instead of blindly overwriting it. Another
+    // WebUI client on the same origin/profile may have written newer counts since
+    // this client's cache was last loaded; serialising only our (possibly stale)
+    // in-memory copy would drop those entries and could roll a session's viewed
+    // count backwards, resurrecting a cleared unread dot. Max-merging keeps the
+    // map monotonic and additive across clients.
+    const cache = _getSessionViewedCounts();
+    let merged = {};
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) merged = parsed;
+    } catch (_){
+      merged = {};
+    }
+    for (const sid of Object.keys(cache)) {
+      const prev = Number(merged[sid]) || 0;
+      const next = Number(cache[sid]) || 0;
+      merged[sid] = Math.max(prev, next);
+    }
+    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(merged));
+    _sessionViewedCounts = merged;
   } catch (_){
     // Ignore localStorage write failures.
   }
@@ -488,7 +508,10 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  counts[sid] = next;
+  // A viewed count records "seen at least up to N messages" — keep it monotonic.
+  // A transient lower count (e.g. a list snapshot mid-compaction) must not
+  // resurrect a cleared unread dot before the save below.
+  counts[sid] = Math.max(Number(counts[sid]) || 0, next);
   _saveSessionViewedCounts();
   // If the viewed count is now current, any prior completion-unread marker is
   // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
@@ -689,6 +712,20 @@ function _clearSessionViewedCount(sid) {
   const counts = _getSessionViewedCounts();
   if (!Object.prototype.hasOwnProperty.call(counts, sid)) return;
   delete counts[sid];
+  // A removal must actually leave disk, unlike the additive max-merge used on
+  // the set path (which never deletes). Delete just this key from the persisted
+  // map so entries a concurrent client added are preserved.
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      delete parsed[sid];
+      localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(parsed));
+      _sessionViewedCounts = parsed;
+      return;
+    }
+  } catch (_){
+    // Fall through to the cache-only write on read/parse failure.
+  }
   _saveSessionViewedCounts();
 }
 
@@ -9055,10 +9092,21 @@ async function _handleShowAllProfilesStorageEvent(e){
   if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
 }
 
+function _handleUnreadStorageEvent(e){
+  if(!e || !e.key) return;
+  // A concurrent WebUI client on the same origin/profile changed one of the
+  // unread stores. Drop our cached copy so the next read re-syncs from
+  // localStorage instead of our stale in-memory map clobbering their write
+  // (which would resurrect a cleared completion-unread marker).
+  if(e.key === SESSION_VIEWED_COUNTS_KEY) _sessionViewedCounts = null;
+  else if(e.key === SESSION_COMPLETION_UNREAD_KEY) _sessionCompletionUnread = null;
+}
+
 if(typeof window!=='undefined'){
   window.addEventListener('storage', (e) => {
     void _handleActiveSessionStorageEvent(e);
     void _handleShowAllProfilesStorageEvent(e);
+    void _handleUnreadStorageEvent(e);
   });
   window.addEventListener('popstate', () => {
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;

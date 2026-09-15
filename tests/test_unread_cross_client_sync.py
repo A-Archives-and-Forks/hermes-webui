@@ -542,28 +542,34 @@ console.log(JSON.stringify({ tombs }));
     )
 
 
-def test_new_clear_is_also_published_for_rolling_clients():
-    """An already-open client on the previous PR head must see a clear created
-    by the new implementation in the legacy whole-map key."""
+def test_new_clear_does_not_dual_write_the_legacy_whole_map():
+    """The independently addressable representation is authoritative. Keeping
+    dual-write compatibility would retain the old lost-update race forever."""
     out = _run_node(_script("""
 const A = makeClient();
 A.writeClear('new', 2000);
-console.log(JSON.stringify({ legacy: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY), all: readAllClears(A) }));
+console.log(JSON.stringify({
+  legacyPresent: Object.prototype.hasOwnProperty.call(_store, SESSION_COMPLETION_UNREAD_CLEARED_KEY),
+  all: readAllClears(A),
+}));
 """))
-    assert out["legacy"] == {"new": 2000}
+    assert out["legacyPresent"] is False
     assert out["all"] == {"new": 2000}
 
 
-def test_legacy_tombstone_map_is_kept_for_rolling_clients():
-    """An already-open client on the previous PR head only understands the
-    whole-map key, so migration must not delete it during a rolling session."""
+def test_legacy_tombstone_map_is_migrated_then_removed():
+    """A reloaded client imports existing clear facts once, then removes the
+    unbounded whole map instead of pretending concurrent old/new writes are safe."""
     out = _run_node(_script("""
 setDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY, { legacy: 1000 });
 const A = makeClient();
 A.writeClear('new', 2000);
-console.log(JSON.stringify({ legacy: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY), all: readAllClears(A) }));
+console.log(JSON.stringify({
+  legacyPresent: Object.prototype.hasOwnProperty.call(_store, SESSION_COMPLETION_UNREAD_CLEARED_KEY),
+  all: readAllClears(A),
+}));
 """))
-    assert out["legacy"] == {"legacy": 1000, "new": 2000}
+    assert out["legacyPresent"] is False
     assert out["all"] == {"legacy": 1000, "new": 2000}
 
 
@@ -619,10 +625,7 @@ A.markUnread('Y', 1);
 A.clearUnread('Y');
 console.log(JSON.stringify({ tombs: readAllClears(A) }));
 """))
-    assert out["tombs"] == {"GONE": 1002, "Y": 2002}, (
-        "the versioned tombstone may be pruned, while its legacy compatibility "
-        "fact remains available to already-open clients"
-    )
+    assert out["tombs"] == {"Y": 2002}
 
 
 def test_tombstones_are_capped_by_age():
@@ -652,11 +655,7 @@ console.log(JSON.stringify({
     )
     assert out["afterAge"] == {
         "Y": out["young"] + 8 * 24 * 60 * 60 * 1000 + 2,
-        "Z": out["young"] + 2,
-    }, (
-        "the old versioned record is dropped, while the rollout compatibility "
-        "map remains available to older clients"
-    )
+    }, "a tombstone older than the cap must be removed from storage"
 
 
 # ── The registration itself ──────────────────────────────────────────────────

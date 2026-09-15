@@ -755,8 +755,11 @@ function _mergeSessionCompletionUnread(disk, cache, cleared) {
     const ours = cache[sid];
     if (_markerLosesToUnreadClear(ours, (cleared || {})[sid])) continue;
     if (Object.prototype.hasOwnProperty.call(markers, sid)) {
-      const theirs = Number((markers[sid] || {}).completed_at) || 0;
-      if ((Number(ours && ours.completed_at) || 0) > theirs) {
+      // Both sides hold a marker: the later logical operation wins, which is the
+      // same order the clear comparison uses. Comparing completed_at here would
+      // keep the earlier of two markers written in one millisecond and leave that
+      // one's message count or cron profile metadata for later cleanup.
+      if (_sessionCompletionUnreadOrder(ours) > _sessionCompletionUnreadOrder(markers[sid])) {
         markers[sid] = ours;
         changed = true;
       }

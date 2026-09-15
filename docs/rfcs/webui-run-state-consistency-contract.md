@@ -177,7 +177,10 @@ writes.
   acknowledgement prunes it instead of writing it back. List membership cannot
   decide this, because the sidebar filters by profile, project, and source, so an
   absent row is not evidence of deletion. Deletion records expire on the same
-  7-day policy as clear records.
+  7-day policy as clear records, so a tab left open longer than that can re-add a
+  count for a session deleted more than seven days earlier. That consequence is
+  bounded and invisible: the session is no longer listed, so the retained entry
+  produces no indicator, and it is re-examined only on the next deletion or clear.
 - **Completion markers are ordered by logical stamps, not wall clock.**
   Markers are add/remove and cannot be max-ordered, so each clear records a stamp
   under `hermes-session-completion-unread-cleared:v1:<encoded-sid>:<stamp>`.

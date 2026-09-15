@@ -432,6 +432,31 @@ console.log(JSON.stringify({
     assert out["afterAge"] == 0, "an expired deletion record must be pruned"
 
 
+def test_marker_merge_keeps_the_later_operation_within_one_tick():
+    """Two clients can complete a session in the same millisecond. The merge must
+    pick the later logical operation, not compare wall-clock completion times,
+    or the retained marker keeps the older message count and metadata."""
+    out = _run_node(_script("""
+listed('Y');
+const A = makeClient();
+const B = makeClient();
+_now = 1000;
+A.markUnread('Y', 3);
+B.markUnread('Y', 7);
+const disk = readDisk(SESSION_COMPLETION_UNREAD_KEY);
+console.log(JSON.stringify({
+  count: (disk.Y || {}).message_count || null,
+  completedAt: (disk.Y || {}).completed_at || null,
+}));
+"""))
+    assert out["count"] == 7, (
+        "the later completion must win even though both markers share a millisecond"
+    )
+    assert out["completedAt"] == 1000, (
+        "the wall-clock completion time is still recorded for display and pruning"
+    )
+
+
 def test_stale_client_cannot_resurrect_a_cleared_completion_marker():
     """The field symptom: a marker cleared by opening the chat must not come
     back when another client that still holds it saves later."""

@@ -1,26 +1,44 @@
 """Regression: unread state must not be clobbered by a second WebUI client.
 
 Two WebUI windows/tabs on the same origin and browser profile share one
-``localStorage``. Each client caches the unread stores
-(``hermes-session-viewed-counts`` and ``hermes-session-completion-unread``) in
-module state and serialises that cache wholesale on save. With no ``storage``
-listener for either key, a stale client overwrites the other client's writes:
+``localStorage``, and each caches the unread stores in module state. A stale
+client that re-serialises its cache wholesale -- or that drops its cache and
+re-reads a value another client's write already destroyed -- breaks two stores:
 
-- a session's *viewed* count can be rolled backwards, so ``message_count >
-  viewed_count`` re-lights a dot the user just cleared; and
-- a completion-unread marker cleared in one client is resurrected by the other.
+- ``hermes-session-viewed-counts``: a viewed count means "seen at least up to N
+  messages", so it is monotonic per session and additive across clients. It must
+  never roll back, and after a concurrent write the client that holds the higher
+  count must re-assert it into the store (repair) instead of dropping its cache
+  and re-reading whatever the losing write left behind.
 
-This fixes the class by (a) max-merging viewed counts on save so a count can
-never go down or drop another client's entries, and (b) invalidating both
-caches on ``storage`` events so a concurrent write is re-read instead of
-overwritten.
+- ``hermes-session-completion-unread``: markers are add/remove, so they cannot be
+  max-merged. Every clear records a tombstone in
+  ``hermes-session-completion-unread-cleared`` (sid -> clearedAt), and the later
+  event wins: a marker whose ``completed_at`` does not postdate the clear is
+  dropped, while a genuinely later re-mark survives. This is the store behind the
+  visible dot, and the reported field symptom was a cleared dot coming back.
+
+These tests drive the real functions extracted from ``static/sessions.js``
+against a two-client harness that shares one fake ``localStorage``. The harness
+injects the merge/tombstone helpers when the module defines them, so the same
+assertions run against the pre-fix code and report the observable failure.
 """
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+VIEWED_KEY = "hermes-session-viewed-counts"
+UNREAD_KEY = "hermes-session-completion-unread"
+CLEARED_KEY = "hermes-session-completion-unread-cleared"
 
 
 def _extract(name: str) -> str:
@@ -40,18 +58,47 @@ def _extract(name: str) -> str:
     raise AssertionError(f"could not brace-match {name}")
 
 
+def _extract_optional(name: str) -> str:
+    """Extraction for functions a change may add (empty string when absent).
+
+    The same assertions therefore run before and after the fix: on the pre-fix
+    code the harness simply has no merge/tombstone helper to inject.
+    """
+    return _extract(name) if f"function {name}(" in SESSIONS_JS else ""
+
+
+def _extract_storage_listener() -> str:
+    """The module-level ``window.addEventListener('storage', ...)`` statement."""
+    marker = "window.addEventListener('storage'"
+    start = SESSIONS_JS.index(marker)
+    brace = SESSIONS_JS.index("{", start)
+    depth = 0
+    for i in range(brace, len(SESSIONS_JS)):
+        ch = SESSIONS_JS[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return SESSIONS_JS[start:i + 3]  # include the closing "});"
+    raise AssertionError("could not brace-match the storage listener")
+
+
 def _run_node(script: str) -> dict:
-    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        [NODE, "-e", script], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, f"node harness failed:\n{result.stderr}"
     return json.loads(result.stdout)
 
 
-_VIEWED_FNS = [
+# Functions the unread stores are made of. All of these exist before and after
+# the fix, so a missing one is a real extraction failure.
+_CLIENT_FNS = [
     "_getSessionViewedCounts",
     "_saveSessionViewedCounts",
     "_setSessionViewedCount",
     "_clearSessionViewedCount",
-]
-_UNREAD_FNS = [
     "_getSessionCompletionUnread",
     "_saveSessionCompletionUnread",
     "_markSessionCompletionUnread",
@@ -59,118 +106,400 @@ _UNREAD_FNS = [
     "_hasSessionCompletionUnread",
 ]
 
-_HEADER = """
-const _store = {};
-const localStorage = {
-  getItem: (k) => (k in _store ? _store[k] : null),
-  setItem: (k, v) => { _store[k] = String(v); },
-};
-const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
-const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+# Helpers that carry the merge/tombstone rules; injected when present.
+_HELPER_FNS = [
+    "_readStoredJsonMap",
+    "_sessionExistsForUnreadState",
+    "_sessionListLoaded",
+    "_mergeSessionViewedCounts",
+    "_markerLosesToUnreadClear",
+    "_mergeSessionCompletionUnread",
+    "_writeSessionCompletionUnreadCleared",
+]
+
+_HEADER = f"""
+// One fake localStorage shared by every client, counting writes so a test can
+// assert a repair converges instead of ping-ponging writes between clients.
+const _store = {{}};
+let storageWrites = 0;
+let _onRead = null;
+const localStorage = {{
+  getItem: (k) => {{
+    const value = Object.prototype.hasOwnProperty.call(_store, k) ? _store[k] : null;
+    // Test hook: runs after the value is captured, i.e. inside a read-modify-write.
+    if (_onRead) {{ const hook = _onRead; _onRead = null; hook(); }}
+    return value;
+  }},
+  setItem: (k, v) => {{ storageWrites += 1; _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+}};
+const SESSION_VIEWED_COUNTS_KEY = {VIEWED_KEY!r};
+const SESSION_COMPLETION_UNREAD_KEY = {UNREAD_KEY!r};
+const SESSION_COMPLETION_UNREAD_CLEARED_KEY = {CLEARED_KEY!r};
+// Mirrors the module constant. The age assertions use hours vs 8 days so they
+// do not depend on the exact cap.
+const SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+let _now = 1000;
+Date.now = () => _now;
+// The session list this client can see: the authority on "still exists".
+let _allSessions = [];
+const _sessionListSnapshotById = new Map();
+const listed = (...ids) => {{ _allSessions = ids.map((sid) => ({{session_id: sid}})); }};
+const readDisk = (key) => JSON.parse(_store[key] || '{{}}');
+const setDisk = (key, value) => {{ _store[key] = JSON.stringify(value); }};
+const _storageHandlers = [];
+const window = {{
+  addEventListener: (type, fn) => {{
+    if (type === 'storage') _storageHandlers.push(fn);
+  }},
+}};
+// The neighbours the storage registration also routes to; only the unread
+// handler is under test here.
+async function _handleActiveSessionStorageEvent() {{}}
+async function _handleShowAllProfilesStorageEvent() {{}}
 """
 
 
-def _make_client_block():
-    """A factory that defines one client's module state and returns its API."""
-    fns = "\n".join(_extract(n) for n in _VIEWED_FNS + _UNREAD_FNS)
-    handler = ""
-    if "function _handleUnreadStorageEvent(" in SESSIONS_JS:
-        handler = _extract("_handleUnreadStorageEvent")
+def _client_factory(with_listener: bool = False) -> str:
+    """One client's module state plus the whole unread-store API."""
+    fns = "\n".join(_extract(name) for name in _CLIENT_FNS)
+    helpers = "\n".join(_extract_optional(name) for name in _HELPER_FNS)
+    handler = _extract_optional("_handleUnreadStorageEvent")
+    listener = _extract_storage_listener() if with_listener else ""
     return f"""
 function makeClient() {{
   let _sessionViewedCounts = null;
   let _sessionCompletionUnread = null;
   {fns}
+  {helpers}
   {handler}
+  {listener}
   return {{
+    viewed: (sid) => {{
+      const counts = _getSessionViewedCounts();
+      return Object.prototype.hasOwnProperty.call(counts, sid) ? counts[sid] : null;
+    }},
     setViewed: _setSessionViewedCount,
     clearViewed: _clearSessionViewedCount,
-    getViewed: (sid) => {{
-      const c = _getSessionViewedCounts();
-      return c[sid] === undefined ? null : c[sid];
-    }},
     markUnread: _markSessionCompletionUnread,
     clearUnread: _clearSessionCompletionUnread,
     hasUnread: _hasSessionCompletionUnread,
-    handleStorage: (typeof _handleUnreadStorageEvent === 'function') ? _handleUnreadStorageEvent : null,
+    handleStorage: (typeof _handleUnreadStorageEvent === 'function')
+      ? _handleUnreadStorageEvent
+      : () => {{}},
   }};
 }}
 """
 
 
-def test_viewed_count_is_monotonic_across_clients():
-    """A stale client must not roll a session's viewed count backwards.
+def _script(body: str, with_listener: bool = False) -> str:
+    return _HEADER + _client_factory(with_listener) + body
 
-    Fails before the fix: client B serialises its stale cache and overwrites
-    client A's newer value, so the cleared dot re-lights via the count rule.
-    """
-    script = _HEADER + _make_client_block() + """
+
+# ── Viewed counts: monotonic, repaired, never resurrected ────────────────────
+
+def test_stale_client_cannot_roll_a_viewed_count_back():
+    """Sequential rollback: a client that saw an older list snapshot must not
+    lower a count another client already acknowledged."""
+    out = _run_node(_script("""
+listed('X');
 const A = makeClient();
 const B = makeClient();
 A.setViewed('X', 417);
-B.setViewed('X', 131);          // stale client believes the session has 131 msgs
+B.setViewed('X', 131);
 console.log(JSON.stringify({
-  disk: _store['hermes-session-viewed-counts'] ? JSON.parse(_store['hermes-session-viewed-counts']).X : null,
-  bCache: B.getViewed('X'),
+  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  bView: B.viewed('X'),
 }));
-"""
-    out = _run_node(script)
-    assert out["disk"] == 417, (
-        "a stale client must not lower a session's viewed count (disk was "
-        f"{out['disk']}, expected 417)"
+"""))
+    assert out["disk"] == {"X": 417}, (
+        "a stale client must not lower a session's viewed count"
     )
-    assert out["bCache"] == 417, (
-        "the stale client's cache must be re-synced to the merged count"
-    )
+    assert out["bView"] == 417, "the stale client must converge on the merged count"
 
 
 def test_clear_viewed_count_still_removes_from_disk():
-    """Guard: session deletion must still prune the viewed-count entry."""
-    script = _HEADER + _make_client_block() + """
+    """Guard: session deletion must still prune the viewed count."""
+    out = _run_node(_script("""
+listed('D');
 const A = makeClient();
 A.setViewed('D', 5);
 A.clearViewed('D');
-const parsed = JSON.parse(_store['hermes-session-viewed-counts'] || '{}');
-console.log(JSON.stringify({ diskStillHas: Object.prototype.hasOwnProperty.call(parsed, 'D') }));
-"""
-    out = _run_node(script)
-    assert out["diskStillHas"] is False, "clearing a viewed count must remove it from disk"
+console.log(JSON.stringify({
+  diskHasD: Object.prototype.hasOwnProperty.call(readDisk(SESSION_VIEWED_COUNTS_KEY), 'D'),
+}));
+"""))
+    assert out["diskHasD"] is False, "clearing a viewed count must remove it from disk"
 
 
-def test_storage_event_invalidates_unread_caches():
-    """A storage event for either unread key must drop the in-memory cache so a
-    concurrent client's write is re-read, not clobbered.
-
-    Skipped before the fix (the handler does not exist yet); passes after.
-    """
-    if "function _handleUnreadStorageEvent(" not in SESSIONS_JS:
-        import pytest
-        pytest.skip("_handleUnreadStorageEvent not present yet")
-
-    script = _HEADER + _make_client_block() + """
+def test_interleaved_acknowledgements_both_survive():
+    """Both clients read one baseline, then each write lands inside the other's
+    read-modify-write window. Neither acknowledgement may be lost."""
+    out = _run_node(_script("""
+listed('X', 'Y');
 const A = makeClient();
 const B = makeClient();
-A.markUnread('Y', 3);            // A records a completion
-B.hasUnread('Y');                // B loads the marker into its cache
-A.clearUnread('Y');              // A clears it (e.g. the user visited Y in A)
-// B sees A's storage event and must forget its cached copy.
-B.handleStorage({ key: 'hermes-session-completion-unread' });
-B.markUnread('Z', 7);            // B writes for an unrelated session
-const disk = JSON.parse(_store['hermes-session-completion-unread'] || '{}');
+// Both clients read the same baseline before either write commits.
+A.viewed('X');
+B.viewed('Y');
+// A's save reads the store; B's write for its own session lands in that window,
+// so A's write (built from the store it read) drops B's entry.
+_onRead = () => { B.setViewed('Y', 999); };
+A.setViewed('X', 417);
+const clobbered = readDisk(SESSION_VIEWED_COUNTS_KEY);
+// B still holds its own acknowledgement, and now processes A's storage event.
+B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
+const disk = readDisk(SESSION_VIEWED_COUNTS_KEY);
+const writesAfterRepair = storageWrites;
+B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
 console.log(JSON.stringify({
-  yResurrected: Object.prototype.hasOwnProperty.call(disk, 'Y'),
-  zPresent: Object.prototype.hasOwnProperty.call(disk, 'Z'),
+  clobbered: clobbered,
+  disk: disk,
+  stable: storageWrites === writesAfterRepair,
+  aView: A.viewed('X'),
+  bView: B.viewed('Y'),
 }));
-"""
-    out = _run_node(script)
-    assert out["zPresent"] is True, "B's new marker must be persisted"
-    assert out["yResurrected"] is False, (
-        "a marker cleared in one client must not be resurrected by another"
+"""))
+    assert out["clobbered"] == {"X": 417}, (
+        "precondition: the interleaved write dropped B's entry"
+    )
+    assert out["disk"] == {"X": 417, "Y": 999}, (
+        "the client that still holds an acknowledgement must re-assert it after "
+        "the other client's storage event, not re-read the store it just lost"
+    )
+    assert out["aView"] == 417 and out["bView"] == 999, (
+        "both clients must converge on a view that contains both acknowledgements"
+    )
+    assert out["stable"] is True, (
+        "a repair must converge: a second event must not write again"
     )
 
 
-def test_unread_storage_handler_is_wired():
-    """The window storage listener must route to the unread-cache handler."""
-    assert "void _handleUnreadStorageEvent(e);" in SESSIONS_JS, (
-        "the storage listener must invoke _handleUnreadStorageEvent"
+def test_repair_does_not_resurrect_a_deleted_sessions_viewed_count():
+    """A session deleted in one client is pruned from the store; a stale client
+    that still caches its count must not write it back."""
+    out = _run_node(_script("""
+listed('S', 'T');
+const A = makeClient();
+const B = makeClient();
+A.setViewed('S', 5);
+B.viewed('S');
+A.clearViewed('S');
+listed('T');
+B.setViewed('T', 1);
+B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
+console.log(JSON.stringify({
+  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  tView: B.viewed('T'),
+}));
+"""))
+    assert out["disk"] == {"T": 1}, (
+        "a deleted session's pruned count must not be resurrected by a stale "
+        f"client's save or repair (disk was {out['disk']})"
+    )
+    assert out["tView"] == 1, "the live acknowledgement for the listed session must survive"
+
+
+# ── Completion unread: the later event wins ──────────────────────────────────
+
+def test_stale_client_cannot_resurrect_a_cleared_completion_marker():
+    """The field symptom: a marker cleared by opening the chat must not come
+    back when another client that still holds it saves later."""
+    out = _run_node(_script("""
+listed('Y', 'Z');
+const A = makeClient();
+const B = makeClient();
+_now = 1000;
+A.markUnread('Y', 3);
+B.hasUnread('Y');
+_now = 2000;
+A.clearUnread('Y');
+// B has not processed A's storage event yet and saves for another session.
+B.markUnread('Z', 7);
+const disk = readDisk(SESSION_COMPLETION_UNREAD_KEY);
+console.log(JSON.stringify({
+  y: Object.prototype.hasOwnProperty.call(disk, 'Y'),
+  z: Object.prototype.hasOwnProperty.call(disk, 'Z'),
+  yViewA: A.hasUnread('Y'),
+}));
+"""))
+    assert out["z"] is True, "precondition: the stale client's own marker is persisted"
+    assert out["y"] is False, (
+        "a marker cleared in one client must not be resurrected by another "
+        "client that still holds it"
+    )
+    assert out["yViewA"] is False, "the cleared marker must stay cleared for the clear's own client"
+
+
+def test_a_genuine_later_re_mark_survives_the_earlier_clear():
+    """Control: ordering must not over-clear. A completion that happened after
+    the clear is new information and must win."""
+    out = _run_node(_script("""
+listed('Y');
+const A = makeClient();
+const B = makeClient();
+_now = 1000;
+A.markUnread('Y', 3);
+B.hasUnread('Y');
+_now = 2000;
+A.clearUnread('Y');
+_now = 3000;
+A.markUnread('Y', 9);
+B.handleStorage({ key: SESSION_COMPLETION_UNREAD_KEY });
+const disk = readDisk(SESSION_COMPLETION_UNREAD_KEY);
+console.log(JSON.stringify({
+  marker: disk.Y || null,
+  aView: A.hasUnread('Y'),
+  bView: B.hasUnread('Y'),
+}));
+"""))
+    assert out["marker"] == {"message_count": 9, "completed_at": 3000}, (
+        "a completion that postdates the clear must be kept"
+    )
+    assert out["aView"] is True and out["bView"] is True, (
+        "both clients must show the genuine re-mark"
+    )
+
+
+def test_repair_removes_a_marker_that_lost_to_a_clear():
+    """A stale client's write can land after the clear. The repair must drop the
+    losing marker from the store, or the dot returns on every client."""
+    out = _run_node(_script("""
+listed('Y', 'Z');
+const A = makeClient();
+const B = makeClient();
+_now = 1000;
+A.markUnread('Y', 3);
+B.hasUnread('Y');
+_now = 2000;
+A.clearUnread('Y');
+// The stale write lands after the clear (saved before the event was processed).
+setDisk(SESSION_COMPLETION_UNREAD_KEY, {
+  Y: { message_count: 3, completed_at: 1000 },
+  Z: { message_count: 2, completed_at: 1500 },
+});
+A.handleStorage({ key: SESSION_COMPLETION_UNREAD_KEY });
+const disk = readDisk(SESSION_COMPLETION_UNREAD_KEY);
+console.log(JSON.stringify({
+  diskY: Object.prototype.hasOwnProperty.call(disk, 'Y'),
+  diskZ: Object.prototype.hasOwnProperty.call(disk, 'Z'),
+  yView: A.hasUnread('Y'),
+  zView: A.hasUnread('Z'),
+}));
+"""))
+    assert out["diskY"] is False, (
+        "a repair must remove a marker that lost to a clear, not leave it for "
+        "the next reader"
+    )
+    assert out["diskZ"] is True, "an unrelated marker must be left alone"
+    assert out["yView"] is False and out["zView"] is True, (
+        "the repaired view must match the store"
+    )
+
+
+def test_tombstones_are_pruned_when_their_session_is_gone():
+    """Tombstones are keyed by session id; one whose session no longer exists
+    must not accumulate."""
+    out = _run_node(_script("""
+listed('Y', 'GONE');
+const A = makeClient();
+_now = 1000;
+A.markUnread('GONE', 1);
+A.clearUnread('GONE');
+listed('Y');
+_now = 2000;
+A.markUnread('Y', 1);
+A.clearUnread('Y');
+console.log(JSON.stringify({ tombs: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY) }));
+"""))
+    assert out["tombs"] == {"Y": 2000}, (
+        "only the tombstone for a session that still exists may be kept"
+    )
+
+
+def test_tombstones_are_capped_by_age():
+    """Quota guard: an old tombstone is dropped when a newer clear is recorded."""
+    out = _run_node(_script("""
+listed('Y', 'Z');
+const A = makeClient();
+_now = 1000;
+A.markUnread('Y', 1);
+A.clearUnread('Y');
+const young = _now + 60 * 60 * 1000;
+_now = young;
+A.markUnread('Z', 1);
+A.clearUnread('Z');
+const keptYoung = readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+_now = young + 8 * 24 * 60 * 60 * 1000;
+A.markUnread('Y', 1);
+A.clearUnread('Y');
+console.log(JSON.stringify({
+  keptYoung: keptYoung,
+  afterAge: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY),
+  young: young,
+}));
+"""))
+    assert out["keptYoung"] == {"Y": 1000, "Z": out["young"]}, (
+        "a tombstone younger than the cap must survive a newer clear"
+    )
+    assert out["afterAge"] == {"Y": out["young"] + 8 * 24 * 60 * 60 * 1000}, (
+        "a tombstone older than the cap must be dropped"
+    )
+
+
+# ── The registration itself ──────────────────────────────────────────────────
+
+def test_registered_storage_listener_syncs_both_unread_keys_from_storage():
+    """Behavioural wiring test: capture the handler the module registers on
+    ``storage``, dispatch synthetic events for both keys, and assert the client's
+    view comes from the updated store."""
+    out = _run_node(_script("""
+listed('X', 'Q', 'R');
+const A = makeClient();
+const dispatch = (key) => {
+  const value = Object.prototype.hasOwnProperty.call(_store, key) ? _store[key] : null;
+  for (const handler of _storageHandlers) handler({ key: key, newValue: value });
+};
+A.setViewed('X', 511);
+A.hasUnread('Q');
+// A stale client clobbers the store with its lower count.
+setDisk(SESSION_VIEWED_COUNTS_KEY, { X: 131 });
+dispatch(SESSION_VIEWED_COUNTS_KEY);
+const writesAfterRepair = storageWrites;
+dispatch(SESSION_VIEWED_COUNTS_KEY);
+const repairStable = storageWrites === writesAfterRepair;
+// A marker another client just recorded, and a clear it recorded.
+setDisk(SESSION_COMPLETION_UNREAD_KEY, { Q: { message_count: 2, completed_at: 5000 } });
+const qStale = A.hasUnread('Q');
+dispatch(SESSION_COMPLETION_UNREAD_KEY);
+setDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY, { R: 9000 });
+setDisk(SESSION_COMPLETION_UNREAD_KEY, {
+  Q: { message_count: 2, completed_at: 5000 },
+  R: { message_count: 3, completed_at: 8000 },
+});
+dispatch(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+const disk = readDisk(SESSION_COMPLETION_UNREAD_KEY);
+console.log(JSON.stringify({
+  handlers: _storageHandlers.length,
+  xView: A.viewed('X'),
+  diskX: readDisk(SESSION_VIEWED_COUNTS_KEY).X,
+  stable: repairStable,
+  qStale: qStale,
+  qView: A.hasUnread('Q'),
+  rView: A.hasUnread('R'),
+  diskR: Object.prototype.hasOwnProperty.call(disk, 'R'),
+}));
+""", with_listener=True))
+    assert out["handlers"] == 1, "the module must register exactly one storage listener"
+    assert out["xView"] == 511 and out["diskX"] == 511, (
+        "a storage event must repair the store with the count this client still "
+        "holds instead of adopting the clobbering value"
+    )
+    assert out["stable"] is True, "the repair must not write again for the same state"
+    assert out["qStale"] is False and out["qView"] is True, (
+        "a storage event for the unread key must refresh the client's marker view"
+    )
+    assert out["rView"] is False and out["diskR"] is False, (
+        "the cleared-marker key must be routed to the handler and its tombstone "
+        "must win over the stale marker in the store"
     )

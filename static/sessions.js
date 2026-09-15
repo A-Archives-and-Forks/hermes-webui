@@ -347,6 +347,11 @@ function _clearComposerDraft(sid, text, files) {
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+// Cleared completion-unread markers leave a tombstone (sid -> clearedAt epoch ms)
+// so a stale client that still holds the marker cannot resurrect it. Ordering
+// facts live here, never in the marker map consumers read.
+const SESSION_COMPLETION_UNREAD_CLEARED_KEY = 'hermes-session-completion-unread-cleared';
+const SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
 // Per-profile session-count cache (issue #4717 / #4662 Phase 1.5). Records how
 // many sessions each profile rendered last time, keyed by profile name, so a
@@ -476,29 +481,95 @@ function _knownSessionProfileCount(profile) {
   return (typeof v === 'number' && Number.isFinite(v)) ? v : null;
 }
 
+// Read a persisted sid -> value map. Missing or unreadable values read as an
+// empty map, matching the getters above.
+function _readStoredJsonMap(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    return {};
+  }
+}
+
+// Does this session still exist as far as this client can tell? The sidebar list
+// is the authority (deletion drops the row) and the visit snapshot covers the
+// window before the first list render.
+function _sessionExistsForUnreadState(sid) {
+  if (!sid) return false;
+  if (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions)
+    && _allSessions.some((s) => s && s.session_id === sid)) {
+    return true;
+  }
+  return typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById
+    && typeof _sessionListSnapshotById.has === 'function'
+    && _sessionListSnapshotById.has(sid);
+}
+
+// Is there a session list to judge existence against at all? Without one,
+// "unknown" must not be read as "deleted": a client that has not rendered a list
+// yet would otherwise refuse to persist a fresh acknowledgement, and would prune
+// every tombstone it holds.
+function _sessionListLoaded() {
+  if (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions)
+    && _allSessions.length > 0) {
+    return true;
+  }
+  return typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById
+    && typeof _sessionListSnapshotById.size === 'number'
+    && _sessionListSnapshotById.size > 0;
+}
+
+// A viewed count is "seen at least up to N messages": monotonic per session and
+// additive across clients, so merging is a max that never rolls a count back and
+// never drops another client's entry. A value that exists only in our cache is
+// written back only for a session the list still shows (see
+// _sessionExistsForUnreadState) so a session deleted in another client, and
+// already pruned from disk by _clearSessionViewedCount, is not resurrected. It
+// is always kept in the live view regardless: dropping it here would lose the
+// acknowledgement for a session that still exists.
+function _mergeSessionViewedCounts(disk, cache) {
+  const counts = {};
+  for (const sid of Object.keys(disk || {})) counts[sid] = Number(disk[sid]) || 0;
+  let changed = false;
+  for (const sid of Object.keys(cache || {})) {
+    const ours = Number(cache[sid]) || 0;
+    if (Object.prototype.hasOwnProperty.call(counts, sid)) {
+      if (ours > counts[sid]) {
+        counts[sid] = ours;
+        changed = true;
+      }
+      continue;
+    }
+    if (!ours) continue;
+    if (_sessionListLoaded() && !_sessionExistsForUnreadState(sid)) continue;
+    counts[sid] = ours;
+    changed = true;
+  }
+  const live = {};
+  for (const sid of Object.keys(counts)) live[sid] = counts[sid];
+  for (const sid of Object.keys(cache || {})) {
+    const ours = Number(cache[sid]) || 0;
+    if (ours > (Object.prototype.hasOwnProperty.call(live, sid) ? live[sid] : 0)) {
+      live[sid] = ours;
+    }
+  }
+  return {counts, live, changed};
+}
+
 function _saveSessionViewedCounts() {
   try {
-    // Merge against the persisted map instead of blindly overwriting it. Another
-    // WebUI client on the same origin/profile may have written newer counts since
-    // this client's cache was last loaded; serialising only our (possibly stale)
-    // in-memory copy would drop those entries and could roll a session's viewed
-    // count backwards, resurrecting a cleared unread dot. Max-merging keeps the
-    // map monotonic and additive across clients.
-    const cache = _getSessionViewedCounts();
-    let merged = {};
-    try {
-      const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) merged = parsed;
-    } catch (_){
-      merged = {};
+    const merged = _mergeSessionViewedCounts(
+      _readStoredJsonMap(SESSION_VIEWED_COUNTS_KEY),
+      _getSessionViewedCounts()
+    );
+    // Write only when we hold something the store does not (a strictly greater
+    // count, or an entry it is missing). Rewriting an unchanged map would let two
+    // clients ping-pong storage events forever.
+    if (merged.changed) {
+      localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(merged.counts));
     }
-    for (const sid of Object.keys(cache)) {
-      const prev = Number(merged[sid]) || 0;
-      const next = Number(cache[sid]) || 0;
-      merged[sid] = Math.max(prev, next);
-    }
-    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(merged));
-    _sessionViewedCounts = merged;
+    _sessionViewedCounts = merged.live;
   } catch (_){
     // Ignore localStorage write failures.
   }
@@ -529,9 +600,60 @@ function _getSessionCompletionUnread() {
   return _sessionCompletionUnread;
 }
 
+// Completion-unread markers are add/remove, so unlike viewed counts they cannot
+// be max-merged: the later event has to win. Every clear records a tombstone
+// (sid -> clearedAt) in SESSION_COMPLETION_UNREAD_CLEARED_KEY, and a marker only
+// survives when it does not predate its sid's clear.
+function _markerLosesToUnreadClear(marker, clearedAt) {
+  const cleared = Number(clearedAt) || 0;
+  if (!cleared) return false;
+  return (Number(marker && marker.completed_at) || 0) <= cleared;
+}
+
+// Merge the persisted marker map with our cache under the tombstones. Markers
+// the store holds that a clear already outranks are dropped from the result, so
+// the caller can write the repaired map back and no reader sees them again.
+function _mergeSessionCompletionUnread(disk, cache, cleared) {
+  const markers = {};
+  let changed = false;
+  for (const sid of Object.keys(disk || {})) {
+    const stored = disk[sid];
+    if (_markerLosesToUnreadClear(stored, (cleared || {})[sid])) {
+      changed = true;
+      continue;
+    }
+    markers[sid] = stored;
+  }
+  for (const sid of Object.keys(cache || {})) {
+    const ours = cache[sid];
+    if (_markerLosesToUnreadClear(ours, (cleared || {})[sid])) continue;
+    if (Object.prototype.hasOwnProperty.call(markers, sid)) {
+      const theirs = Number((markers[sid] || {}).completed_at) || 0;
+      if ((Number(ours && ours.completed_at) || 0) > theirs) {
+        markers[sid] = ours;
+        changed = true;
+      }
+      continue;
+    }
+    markers[sid] = ours;
+    changed = true;
+  }
+  return {markers, changed};
+}
+
 function _saveSessionCompletionUnread() {
   try {
-    localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(_getSessionCompletionUnread()));
+    const merged = _mergeSessionCompletionUnread(
+      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY),
+      _getSessionCompletionUnread(),
+      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY)
+    );
+    // Same convergence rule as the viewed counts: write only when the store does
+    // not already hold the merged result.
+    if (merged.changed) {
+      localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(merged.markers));
+    }
+    _sessionCompletionUnread = merged.markers;
   } catch (_){
     // Ignore localStorage write failures.
   }
@@ -573,11 +695,51 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   return true;
 }
 
+// Record that the completion-unread marker(s) for `sidOrSids` were cleared at
+// `clearedAt`. This is the ordering fact a merge needs: markers carry
+// completed_at, so a marker that does not postdate the clear loses to it, while a
+// completion that happened afterwards still wins. The tombstone store is bounded
+// like the maps it guards: entries for sessions the list no longer shows are
+// dropped, as are entries older than SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS.
+function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
+  const sids = Array.isArray(sidOrSids) ? sidOrSids : [sidOrSids];
+  const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  for (const sid of sids) cleared[sid] = clearedAt;
+  const justCleared = new Set(sids);
+  const listLoaded = _sessionListLoaded();
+  for (const key of Object.keys(cleared)) {
+    if (clearedAt - (Number(cleared[key]) || 0) > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS) {
+      delete cleared[key];
+      continue;
+    }
+    // The tombstones just written stay even when their sessions are already
+    // gone: session deletion is exactly the case where the marker must not come
+    // back from a client that still holds it.
+    if (listLoaded && !justCleared.has(key) && !_sessionExistsForUnreadState(key)) {
+      delete cleared[key];
+    }
+  }
+  try {
+    localStorage.setItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY, JSON.stringify(cleared));
+  } catch (_){
+    // Ignore localStorage write failures; the marker map write below still runs.
+  }
+}
+
 function _clearSessionCompletionUnread(sid) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
-  if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
+  if (!Object.prototype.hasOwnProperty.call(unread, sid)) {
+    // Another client may have recorded this marker since our cache was loaded,
+    // so the store decides whether there is anything to clear.
+    const stored = Object.prototype.hasOwnProperty.call(
+      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY), sid);
+    if (!stored) return;
+  }
   delete unread[sid];
+  // Durable ordering fact, written before the marker map: a client that still
+  // holds this marker (completed_at not after the clear) loses to it.
+  _writeSessionCompletionUnreadCleared(sid, Date.now());
   _saveSessionCompletionUnread();
 }
 
@@ -689,6 +851,7 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
     : 'default';
   const unread = _getSessionCompletionUnread();
   let changed = false;
+  const clearedSids = [];
   for (const sid of Object.keys(unread)) {
     const marker = unread[sid];
     if (!marker || typeof marker !== 'object' || Array.isArray(marker)) continue;
@@ -699,9 +862,14 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
     if (!resolved.profile) continue;
     if (_cronMarkerProfileMatchesActive(resolved.profile, active)) continue;
     delete unread[sid];
+    clearedSids.push(sid);
     changed = true;
   }
   if (!changed) return false;
+  // Each cleared marker needs its durable ordering fact, or the merge in
+  // _saveSessionCompletionUnread() (and a stale client's later save) would
+  // restore it from the store.
+  _writeSessionCompletionUnreadCleared(clearedSids, Date.now());
   _saveSessionCompletionUnread();
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
@@ -9095,11 +9263,15 @@ async function _handleShowAllProfilesStorageEvent(e){
 function _handleUnreadStorageEvent(e){
   if(!e || !e.key) return;
   // A concurrent WebUI client on the same origin/profile changed one of the
-  // unread stores. Drop our cached copy so the next read re-syncs from
-  // localStorage instead of our stale in-memory map clobbering their write
-  // (which would resurrect a cleared completion-unread marker).
-  if(e.key === SESSION_VIEWED_COUNTS_KEY) _sessionViewedCounts = null;
-  else if(e.key === SESSION_COMPLETION_UNREAD_KEY) _sessionCompletionUnread = null;
+  // unread stores. Both saves re-read the store, merge our cache into it (max for
+  // viewed counts, tombstone-ordered for completion markers), keep the merged map
+  // as the live cache, and write back only what the store is missing. So this
+  // client re-asserts the acknowledgement it still holds instead of dropping it
+  // and re-reading a value the other client's write already lost.
+  if(e.key === SESSION_VIEWED_COUNTS_KEY) _saveSessionViewedCounts();
+  else if(e.key === SESSION_COMPLETION_UNREAD_KEY || e.key === SESSION_COMPLETION_UNREAD_CLEARED_KEY){
+    _saveSessionCompletionUnread();
+  }
 }
 
 if(typeof window!=='undefined'){

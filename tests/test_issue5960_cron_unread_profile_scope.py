@@ -181,6 +181,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -403,6 +405,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -468,6 +472,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -535,6 +541,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -614,6 +622,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -675,6 +685,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -803,6 +815,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};

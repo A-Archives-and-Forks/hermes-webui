@@ -75,7 +75,7 @@ and 5; it does not mark every run-state boundary implemented.
 | Compression summary / handoff | Gives the agent recovery context after automatic compression | Must remain agent-facing recovery material unless explicitly rendered as history | Pollute the active turn or become implicit current user intent |
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
-| Client-side unread stores (`localStorage`) | Backs the sidebar unread dot for every client on the origin | Converges across clients by merge and tombstone ordering; not atomic | Let one client's stale cache lower a count or resurrect a cleared marker |
+| Client-side unread stores (`localStorage`) | Backs the sidebar unread dot for every client on the origin | Converges counts/markers across clients and stores clear ordering independently per session | Let one client's stale cache lower a count or resurrect a cleared marker |
 
 ## Core Invariants
 
@@ -174,27 +174,32 @@ writes.
   count held only in a client's cache is written back only for a session the
   sidebar list still shows, so a session deleted in another client is not
   resurrected.
-- **Completion markers are ordered by tombstones.** Markers are add/remove and
-  cannot be max-ordered, so each clear records `sid -> clearedAt` in
-  `hermes-session-completion-unread-cleared`, and a marker that does not postdate
-  its clear loses; a genuine later completion still wins. The tombstone map is
-  bounded by session existence and a 7-day retention cap, and is never part of the
-  marker map consumers read.
+- **Completion markers are ordered by per-session tombstones.** Markers are
+  add/remove and cannot be max-ordered, so each clear records `clearedAt` under
+  `hermes-session-completion-unread-cleared:v1:<encoded-sid>:<clearedAt>`. Independent
+  immutable version keys mean clients clearing different sessions—or clearing the
+  same session in an interleaved operation—cannot replace newer ordering facts. A
+  marker that does not postdate its clear loses; a genuine later
+  completion still wins. During rolling upgrades, the previous unsuffixed
+  `hermes-session-completion-unread-cleared` map is both read and dual-written so
+  already-open clients on the prior revision observe new clears; it remains a
+  temporary compatibility store and is not pruned in this revision. Versioned
+  tombstones are bounded by session existence and a 7-day retention cap, and are
+  never part of the marker map consumers read.
 - **Cross-client repair, not cache invalidation.** The `storage` listener routes a
-  changed unread key back through that same merge instead of only dropping the
-  local cache. A client that still holds an acknowledgement re-asserts it after the
-  other client's write, the loser sees a value it cannot beat and stops, and repair
-  converges instead of ping-ponging storage events.
-- **The contract is convergence, not atomicity.** Each save is a read-modify-write
-  across separate `localStorage` operations with no lock between them, so two
-  clients writing inside the same window can still lose one update; repair
-  re-asserts held acknowledgements on the next storage event. The case repair
-  cannot fix is two concurrent *clears*: the later whole-map write can discard the
-  other client's tombstone, after which a later marker save can re-add the stale
-  marker and the cleared dot returns. A hard cross-tab guarantee needs either a
-  lock around those writes (Web Locks, with a documented fallback for contexts
-  without it) or per-session versioned records. This contract deliberately claims
-  only the convergence described here.
+  changed unread key (including any per-session clear key) back through the same
+  merge instead of only dropping the local cache. A client that still holds an
+  acknowledgement re-asserts it after the other client's write, the loser sees a
+  value it cannot beat and stops, and repair converges instead of ping-ponging
+  storage events.
+- **Whole-map facts converge; clear ordering does not share a map.** Viewed counts
+  and completion markers still use read-modify-write maps, so interleaved writes
+  can transiently lose an entry. Their monotonic cache merge and storage-event
+  repair re-assert held facts. Clear ordering is different: each session has its
+  own atomic `localStorage` write, so concurrent clears of different sessions
+  cannot clobber each other. A viewed-count advance records its clear even when a
+  competing client has prepared but not yet persisted the older completion
+  marker; repeated observations at the same count do not refresh the tombstone.
 
 ## Review Checklist
 

@@ -21,6 +21,9 @@ _HELPER_NAMES = (
     "_sessionListLoaded",
     "_mergeSessionViewedCounts",
     "_markerLosesToUnreadClear",
+    "_sessionCompletionUnreadClearedKey",
+    "_parseSessionCompletionUnreadClearedKey",
+    "_readSessionCompletionUnreadCleared",
     "_mergeSessionCompletionUnread",
     "_writeSessionCompletionUnreadCleared",
 )
@@ -29,6 +32,7 @@ _HELPER_NAMES = (
 # module uses. Harnesses keep their own stub keys for the two older stores.
 _CONST_NAMES = (
     "SESSION_COMPLETION_UNREAD_CLEARED_KEY",
+    "SESSION_COMPLETION_UNREAD_CLEARED_PREFIX",
     "SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS",
 )
 

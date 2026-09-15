@@ -347,10 +347,11 @@ function _clearComposerDraft(sid, text, files) {
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
-// Cleared completion-unread markers leave a tombstone (sid -> clearedAt epoch ms)
-// so a stale client that still holds the marker cannot resurrect it. Ordering
-// facts live here, never in the marker map consumers read.
+// Clear ordering is stored per session so two clients clearing different
+// sessions never replace one another's tombstones with whole-map writes. The
+// unsuffixed key is the legacy map read during migration.
 const SESSION_COMPLETION_UNREAD_CLEARED_KEY = 'hermes-session-completion-unread-cleared';
+const SESSION_COMPLETION_UNREAD_CLEARED_PREFIX = `${SESSION_COMPLETION_UNREAD_CLEARED_KEY}:v1:`;
 const SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
 // Per-profile session-count cache (issue #4717 / #4662 Phase 1.5). Records how
@@ -579,14 +580,17 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  const hadCount = Object.prototype.hasOwnProperty.call(counts, sid);
+  const previous = Number(counts[sid]) || 0;
   // A viewed count records "seen at least up to N messages" — keep it monotonic.
   // A transient lower count (e.g. a list snapshot mid-compaction) must not
   // resurrect a cleared unread dot before the save below.
-  counts[sid] = Math.max(Number(counts[sid]) || 0, next);
+  counts[sid] = Math.max(previous, next);
   _saveSessionViewedCounts();
-  // If the viewed count is now current, any prior completion-unread marker is
-  // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
-  _clearSessionCompletionUnread(sid);
+  // Advancing the acknowledgement records a clear even if another client has
+  // only prepared (not persisted) its older completion marker. Repeated polling
+  // at the same count does not refresh the tombstone or emit storage events.
+  _clearSessionCompletionUnread(sid, !hadCount || next > previous);
 }
 
 function _getSessionCompletionUnread() {
@@ -608,6 +612,42 @@ function _markerLosesToUnreadClear(marker, clearedAt) {
   const cleared = Number(clearedAt) || 0;
   if (!cleared) return false;
   return (Number(marker && marker.completed_at) || 0) <= cleared;
+}
+
+function _sessionCompletionUnreadClearedKey(sid, clearedAt = null) {
+  const base = `${SESSION_COMPLETION_UNREAD_CLEARED_PREFIX}${encodeURIComponent(String(sid))}`;
+  return clearedAt == null ? base : `${base}:${Number(clearedAt) || 0}`;
+}
+
+function _parseSessionCompletionUnreadClearedKey(key) {
+  if (!key || !key.startsWith(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX)) return null;
+  const suffix = key.slice(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX.length);
+  const separator = suffix.lastIndexOf(':');
+  const encodedSid = separator > 0 ? suffix.slice(0, separator) : suffix;
+  const version = separator > 0 ? Number(suffix.slice(separator + 1)) || 0 : 0;
+  let sid = '';
+  try { sid = decodeURIComponent(encodedSid); } catch (_) { return null; }
+  if (!sid) return null;
+  return { sid, version };
+}
+
+// Read the legacy whole-map key plus independent versioned clear records. A
+// clear writes a new key rather than replacing an older operation, so readers
+// can fold the maximum timestamp without a cross-context compare-and-set.
+function _readSessionCompletionUnreadCleared() {
+  const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      const parsed = _parseSessionCompletionUnreadClearedKey(key);
+      if (!parsed) continue;
+      const value = Math.max(parsed.version, Number(localStorage.getItem(key)) || 0);
+      if (value > (Number(cleared[parsed.sid]) || 0)) cleared[parsed.sid] = value;
+    }
+  } catch (_) {
+    // A storage implementation that cannot enumerate still retains legacy data.
+  }
+  return cleared;
 }
 
 // Merge the persisted marker map with our cache under the tombstones. Markers
@@ -646,7 +686,7 @@ function _saveSessionCompletionUnread() {
     const merged = _mergeSessionCompletionUnread(
       _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY),
       _getSessionCompletionUnread(),
-      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY)
+      _readSessionCompletionUnreadCleared()
     );
     // Same convergence rule as the viewed counts: write only when the store does
     // not already hold the merged result.
@@ -663,7 +703,15 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  const entry = {message_count: count, completed_at: Date.now()};
+  // If a clear and a genuine later completion share one millisecond, preserve
+  // event order rather than letting the clear's <= comparison erase the later
+  // marker.
+  const intendedAt = Date.now();
+  const clearedAt = Number(_readSessionCompletionUnreadCleared()[sid]) || 0;
+  const completedAt = clearedAt && clearedAt <= intendedAt
+    ? Math.max(intendedAt, clearedAt + 1)
+    : intendedAt;
+  const entry = {message_count: count, completed_at: completedAt};
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
@@ -696,49 +744,76 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
 }
 
 // Record that the completion-unread marker(s) for `sidOrSids` were cleared at
-// `clearedAt`. This is the ordering fact a merge needs: markers carry
-// completed_at, so a marker that does not postdate the clear loses to it, while a
-// completion that happened afterwards still wins. The tombstone store is bounded
-// like the maps it guards: entries for sessions the list no longer shows are
-// dropped, as are entries older than SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS.
+// `clearedAt`. Each session owns a separate key: clears for different sessions
+// are independent atomic writes and cannot discard one another. Markers carry a
+// completed_at timestamp, so a marker that does not postdate the clear loses,
+// while a completion that happened afterwards still wins. Old or deleted-session
+// tombstones are pruned opportunistically to bound quota use.
 function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
-  const sids = Array.isArray(sidOrSids) ? sidOrSids : [sidOrSids];
-  const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
-  for (const sid of sids) cleared[sid] = clearedAt;
-  const justCleared = new Set(sids);
-  const listLoaded = _sessionListLoaded();
-  for (const key of Object.keys(cleared)) {
-    if (clearedAt - (Number(cleared[key]) || 0) > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS) {
-      delete cleared[key];
-      continue;
-    }
-    // The tombstones just written stay even when their sessions are already
-    // gone: session deletion is exactly the case where the marker must not come
-    // back from a client that still holds it.
-    if (listLoaded && !justCleared.has(key) && !_sessionExistsForUnreadState(key)) {
-      delete cleared[key];
-    }
+  const justCleared = new Set(
+    (Array.isArray(sidOrSids) ? sidOrSids : [sidOrSids]).map((sid) => String(sid))
+  );
+  const at = Number(clearedAt) || 0;
+  const legacyClears = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  for (const sid of justCleared) {
+    try {
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, at), String(at));
+    } catch (_) {}
+    // Rolling compatibility: clients already open on the previous revision only
+    // understand the whole-map key. Publish new clears there too, while the
+    // immutable key remains authoritative for clients on this revision.
+    legacyClears[sid] = Math.max(Number(legacyClears[sid]) || 0, at);
   }
+  try { localStorage.setItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY, JSON.stringify(legacyClears)); } catch (_) {}
+
+  // Copy ordering facts from the old whole-map representation, but keep the
+  // legacy map until this PR no longer needs rolling compatibility. An
+  // already-open older client only understands that key; deleting it would let
+  // that client reassert stale markers. Keeping it also avoids a racy
+  // read/copy/remove migration losing a clear written by an older client.
+  for (const [sid, value] of Object.entries(legacyClears)) {
+    const version = Number(value) || 0;
+    if (!version) continue;
+    try {
+      localStorage.setItem(
+        _sessionCompletionUnreadClearedKey(sid, version), String(version));
+    } catch (_) {}
+  }
+
+  const cleared = _readSessionCompletionUnreadCleared();
+  const listLoaded = _sessionListLoaded();
+  let keys = [];
   try {
-    localStorage.setItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY, JSON.stringify(cleared));
-  } catch (_){
-    // Ignore localStorage write failures; the marker map write below still runs.
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {}
+  for (const key of keys) {
+    const parsed = _parseSessionCompletionUnreadClearedKey(key);
+    if (!parsed) continue;
+    try {
+      const version = Math.max(parsed.version, Number(localStorage.getItem(key)) || 0);
+      const expired = at - version > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS;
+      const deleted = listLoaded && !justCleared.has(parsed.sid)
+        && !_sessionExistsForUnreadState(parsed.sid);
+      const superseded = version < (Number(cleared[parsed.sid]) || 0);
+      if (expired || deleted || superseded) localStorage.removeItem(key);
+    } catch (_) {}
   }
 }
 
-function _clearSessionCompletionUnread(sid) {
+function _clearSessionCompletionUnread(sid, recordIfMissing = true) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
+  let stored = false;
   if (!Object.prototype.hasOwnProperty.call(unread, sid)) {
     // Another client may have recorded this marker since our cache was loaded,
     // so the store decides whether there is anything to clear.
-    const stored = Object.prototype.hasOwnProperty.call(
+    stored = Object.prototype.hasOwnProperty.call(
       _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY), sid);
-    if (!stored) return;
+    if (!stored && !recordIfMissing) return;
   }
   delete unread[sid];
-  // Durable ordering fact, written before the marker map: a client that still
-  // holds this marker (completed_at not after the clear) loses to it.
+  // Write the ordering fact before the marker map. This is required even when
+  // the marker has been prepared by another client but has not reached storage.
   _writeSessionCompletionUnreadCleared(sid, Date.now());
   _saveSessionCompletionUnread();
 }
@@ -9276,7 +9351,10 @@ function _handleUnreadStorageEvent(e){
   // client re-asserts the acknowledgement it still holds instead of dropping it
   // and re-reading a value the other client's write already lost.
   if(e.key === SESSION_VIEWED_COUNTS_KEY) _saveSessionViewedCounts();
-  else if(e.key === SESSION_COMPLETION_UNREAD_KEY || e.key === SESSION_COMPLETION_UNREAD_CLEARED_KEY){
+  else if(e.key === SESSION_COMPLETION_UNREAD_KEY
+    || e.key === SESSION_COMPLETION_UNREAD_CLEARED_KEY
+    || (typeof e.key === 'string'
+      && e.key.startsWith(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX))){
     _saveSessionCompletionUnread();
   }
 }

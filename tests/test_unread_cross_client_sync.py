@@ -113,6 +113,9 @@ _HELPER_FNS = [
     "_sessionListLoaded",
     "_mergeSessionViewedCounts",
     "_markerLosesToUnreadClear",
+    "_sessionCompletionUnreadClearedKey",
+    "_parseSessionCompletionUnreadClearedKey",
+    "_readSessionCompletionUnreadCleared",
     "_mergeSessionCompletionUnread",
     "_writeSessionCompletionUnreadCleared",
 ]
@@ -132,10 +135,13 @@ const localStorage = {{
   }},
   setItem: (k, v) => {{ storageWrites += 1; _store[k] = String(v); }},
   removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = {VIEWED_KEY!r};
 const SESSION_COMPLETION_UNREAD_KEY = {UNREAD_KEY!r};
 const SESSION_COMPLETION_UNREAD_CLEARED_KEY = {CLEARED_KEY!r};
+const SESSION_COMPLETION_UNREAD_CLEARED_PREFIX = `${{SESSION_COMPLETION_UNREAD_CLEARED_KEY}}:v1:`;
 // Mirrors the module constant. The age assertions use hours vs 8 days so they
 // do not depend on the exact cap.
 const SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -147,6 +153,10 @@ const _sessionListSnapshotById = new Map();
 const listed = (...ids) => {{ _allSessions = ids.map((sid) => ({{session_id: sid}})); }};
 const readDisk = (key) => JSON.parse(_store[key] || '{{}}');
 const setDisk = (key, value) => {{ _store[key] = JSON.stringify(value); }};
+// Aggregate either the legacy whole map or independent per-session records.
+const readAllClears = (client) => client && typeof client.clears === 'function'
+  ? client.clears()
+  : readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
 const _storageHandlers = [];
 const window = {{
   addEventListener: (type, fn) => {{
@@ -183,7 +193,11 @@ function makeClient() {{
     clearViewed: _clearSessionViewedCount,
     markUnread: _markSessionCompletionUnread,
     clearUnread: _clearSessionCompletionUnread,
+    writeClear: _writeSessionCompletionUnreadCleared,
     hasUnread: _hasSessionCompletionUnread,
+    clears: (typeof _readSessionCompletionUnreadCleared === 'function')
+      ? _readSessionCompletionUnreadCleared
+      : () => readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY),
     handleStorage: (typeof _handleUnreadStorageEvent === 'function')
       ? _handleUnreadStorageEvent
       : () => {{}},
@@ -454,6 +468,92 @@ console.log(JSON.stringify({
     )
 
 
+def test_concurrent_clears_keep_both_ordering_facts():
+    """Clearing different sessions in the same read/write window must not let
+    either whole-map write erase the other session's ordering fact."""
+    out = _run_node(_script("""
+listed('X', 'Y');
+const A = makeClient();
+const B = makeClient();
+_now = 1000;
+A.markUnread('X', 1);
+B.markUnread('Y', 1);
+A.hasUnread('Y');
+B.hasUnread('X');
+_now = 2000;
+// A captures the old tombstone state; B's clear lands before A writes.
+_onRead = () => { B.clearUnread('Y'); };
+A.clearUnread('X');
+const tombs = readAllClears(A);
+console.log(JSON.stringify({ tombs }));
+"""))
+    assert out["tombs"] == {"X": 2000, "Y": 2000}, (
+        "concurrent clears for different sessions must retain both tombstones"
+    )
+
+
+def test_new_clear_is_also_published_for_rolling_clients():
+    """An already-open client on the previous PR head must see a clear created
+    by the new implementation in the legacy whole-map key."""
+    out = _run_node(_script("""
+const A = makeClient();
+A.writeClear('new', 2000);
+console.log(JSON.stringify({ legacy: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY), all: readAllClears(A) }));
+"""))
+    assert out["legacy"] == {"new": 2000}
+    assert out["all"] == {"new": 2000}
+
+
+def test_legacy_tombstone_map_is_kept_for_rolling_clients():
+    """An already-open client on the previous PR head only understands the
+    whole-map key, so migration must not delete it during a rolling session."""
+    out = _run_node(_script("""
+setDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY, { legacy: 1000 });
+const A = makeClient();
+A.writeClear('new', 2000);
+console.log(JSON.stringify({ legacy: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY), all: readAllClears(A) }));
+"""))
+    assert out["legacy"] == {"legacy": 1000, "new": 2000}
+    assert out["all"] == {"legacy": 1000, "new": 2000}
+
+
+def test_same_session_clear_versions_fold_to_the_newest_operation():
+    """An older clear operation that lands after a newer one must not lower the
+    ordering fact for that session."""
+    out = _run_node(_script("""
+listed('Y');
+const A = makeClient();
+A.writeClear('Y', 2000);
+A.writeClear('Y', 1000);
+console.log(JSON.stringify({ tombs: readAllClears(A) }));
+"""))
+    assert out["tombs"] == {"Y": 2000}
+
+
+def test_clear_orders_out_a_marker_prepared_but_not_yet_persisted():
+    """A user visit after completion intent but before its delayed marker write
+    must record a clear even when neither its cache nor storage has the marker."""
+    out = _run_node(_script("""
+listed('Y');
+const A = makeClient();
+const B = makeClient();
+A.hasUnread('Y');
+B.hasUnread('Y');
+_now = 1000;
+// B's marker carries t=1000. Its save captures the empty marker map, then A
+// visits at t=2000 before B's delayed write commits.
+_onRead = () => { _now = 2000; A.clearUnread('Y'); };
+B.markUnread('Y', 3);
+const marker = readDisk(SESSION_COMPLETION_UNREAD_KEY).Y || null;
+const tombstone = readAllClears(A).Y || null;
+console.log(JSON.stringify({ marker, tombstone }));
+"""))
+    assert out["tombstone"] == 2000, (
+        "a clear must persist its ordering fact even when the marker write is delayed"
+    )
+    assert out["marker"] is None, "the completion that predates the visit must remain cleared"
+
+
 def test_tombstones_are_pruned_when_their_session_is_gone():
     """Tombstones are keyed by session id; one whose session no longer exists
     must not accumulate."""
@@ -467,10 +567,11 @@ listed('Y');
 _now = 2000;
 A.markUnread('Y', 1);
 A.clearUnread('Y');
-console.log(JSON.stringify({ tombs: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY) }));
+console.log(JSON.stringify({ tombs: readAllClears(A) }));
 """))
-    assert out["tombs"] == {"Y": 2000}, (
-        "only the tombstone for a session that still exists may be kept"
+    assert out["tombs"] == {"GONE": 1000, "Y": 2000}, (
+        "the versioned tombstone may be pruned, while its legacy compatibility "
+        "fact remains available to already-open clients"
     )
 
 
@@ -486,21 +587,25 @@ const young = _now + 60 * 60 * 1000;
 _now = young;
 A.markUnread('Z', 1);
 A.clearUnread('Z');
-const keptYoung = readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+const keptYoung = readAllClears(A);
 _now = young + 8 * 24 * 60 * 60 * 1000;
 A.markUnread('Y', 1);
 A.clearUnread('Y');
 console.log(JSON.stringify({
   keptYoung: keptYoung,
-  afterAge: readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY),
+  afterAge: readAllClears(A),
   young: young,
 }));
 """))
     assert out["keptYoung"] == {"Y": 1000, "Z": out["young"]}, (
         "a tombstone younger than the cap must survive a newer clear"
     )
-    assert out["afterAge"] == {"Y": out["young"] + 8 * 24 * 60 * 60 * 1000}, (
-        "a tombstone older than the cap must be dropped"
+    assert out["afterAge"] == {
+        "Y": out["young"] + 8 * 24 * 60 * 60 * 1000,
+        "Z": out["young"],
+    }, (
+        "the old versioned record is dropped, while the rollout compatibility "
+        "map remains available to older clients"
     )
 
 
@@ -529,12 +634,13 @@ const repairStable = storageWrites === writesAfterRepair;
 setDisk(SESSION_COMPLETION_UNREAD_KEY, { Q: { message_count: 2, completed_at: 5000 } });
 const qStale = A.hasUnread('Q');
 dispatch(SESSION_COMPLETION_UNREAD_KEY);
-setDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY, { R: 9000 });
+const rClearKey = `${SESSION_COMPLETION_UNREAD_CLEARED_PREFIX}${encodeURIComponent('R')}:9000`;
+_store[rClearKey] = '9000';
 setDisk(SESSION_COMPLETION_UNREAD_KEY, {
   Q: { message_count: 2, completed_at: 5000 },
   R: { message_count: 3, completed_at: 8000 },
 });
-dispatch(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+dispatch(rClearKey);
 const disk = readDisk(SESSION_COMPLETION_UNREAD_KEY);
 console.log(JSON.stringify({
   handlers: _storageHandlers.length,

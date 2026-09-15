@@ -182,6 +182,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -245,6 +248,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -343,6 +349,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';

@@ -7445,7 +7445,9 @@ function _isApprovalDismissed(sid, approvalId) {
   if (!key) return false;
   const dismissed = _getDismissedApprovals();
   if (dismissed.includes(key)) return true;
-  const legacyKey = _legacyApprovalDismissKey(sid, approvalId);
+  const pending = typeof approvalId === "object" ? approvalId : {approval_id: approvalId};
+  const legacyId = pending && pending.approval_id;
+  const legacyKey = sid && legacyId ? String(sid) + "\0" + String(legacyId) : "";
   if (!legacyKey || !dismissed.includes(legacyKey)) return false;
   // Bind an old session/ID tombstone to the currently observed full owner.
   // This keeps an unresolved dismissal quiet through upgrade without letting

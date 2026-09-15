@@ -36,7 +36,7 @@ const flush=()=>new Promise(r=>setImmediate(r));
 ''' + source + '\n(async()=>{\n' + body + '\n})().catch(e=>{console.error(e);process.exit(1)});')
 
 
-def test_legacy_dismissal_migrates_to_current_full_owner():
+def test_legacy_dismissal_does_not_transfer_to_distinct_full_owner():
     result = run(r'''
 const pending={approval_id:'id',run_id:'run-2',_gateway_mirror_token:'token-2'};
 const legacy='s'+'\0'+'id';
@@ -45,8 +45,20 @@ const dismissed=_isApprovalDismissed('s',pending);
 const keys=JSON.parse(store.get(_DISMISSED_APPROVALS_KEY));
 console.log(JSON.stringify({dismissed,legacyPresent:keys.includes(legacy),fullPresent:keys.includes(_approvalDismissKey('s',pending))}));
 ''')
-    assert result == dict(dismissed=True, legacyPresent=False, fullPresent=True)
+    assert result == dict(dismissed=False, legacyPresent=False, fullPresent=False)
 
+
+
+def test_legacy_dismissal_migrates_when_no_stronger_owner_exists():
+    result = run(r"""
+const pending={approval_id:"id"};
+const legacy="s"+"\0"+"id";
+store.set(_DISMISSED_APPROVALS_KEY,JSON.stringify([legacy]));
+const dismissed=_isApprovalDismissed("s",pending);
+const keys=JSON.parse(store.get(_DISMISSED_APPROVALS_KEY));
+console.log(JSON.stringify({dismissed,legacyPresent:keys.includes(legacy),fullPresent:keys.includes(_approvalDismissKey("s",pending))}));
+""")
+    assert result == dict(dismissed=True, legacyPresent=False, fullPresent=True)
 
 def test_dismiss_poll_resolution_and_new_run_owner():
     result = run('''

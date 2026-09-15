@@ -7453,10 +7453,13 @@ function _isApprovalDismissed(sid, approvalId) {
   // This keeps an unresolved dismissal quiet through upgrade without letting
   // the ambiguous legacy key suppress every future gateway run forever.
   const migrated = dismissed.filter(item => item !== legacyKey && item !== key);
-  migrated.push(key);
+  const hasFullOwner = !!(pending && pending.run_id && pending._gateway_mirror_token);
+  // A legacy tombstone cannot identify a gateway run. Consume it rather than
+  // transferring its authority to an unrelated later owner that reused the ID.
+  if (!hasFullOwner) migrated.push(key);
   try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(migrated.slice(-100))); }
   catch (_) {}
-  return true;
+  return !hasFullOwner;
 }
 
 function _markApprovalDismissed(sid, approvalId) {

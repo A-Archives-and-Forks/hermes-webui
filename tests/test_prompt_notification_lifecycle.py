@@ -7,7 +7,7 @@ def run(body, extra=()):
              '_approvalPromptGeneration', '_bumpApprovalPromptGeneration',
              '_clarifyPromptGeneration', '_bumpClarifyPromptGeneration',
              '_rememberApprovalPending', '_clearApprovalPendingForSession',
-             '_clearClarifyPendingForSession', '_approvalDismissKey',
+             '_clearClarifyPendingForSession', '_approvalDismissKey', '_legacyApprovalDismissKey',
              '_getDismissedApprovals', '_isApprovalDismissed', '_markApprovalDismissed',
              '_unmarkApprovalDismissed', 'dismissApprovalCard',
              '_startApprovalFallbackPoll', 'showApprovalCard',
@@ -34,6 +34,18 @@ const setInterval=()=>1;
 const _isSessionActivelyViewed=()=>false;
 const flush=()=>new Promise(r=>setImmediate(r));
 ''' + source + '\n(async()=>{\n' + body + '\n})().catch(e=>{console.error(e);process.exit(1)});')
+
+
+def test_legacy_dismissal_migrates_to_current_full_owner():
+    result = run(r'''
+const pending={approval_id:'id',run_id:'run-2',_gateway_mirror_token:'token-2'};
+const legacy='s'+'\0'+'id';
+store.set(_DISMISSED_APPROVALS_KEY,JSON.stringify([legacy]));
+const dismissed=_isApprovalDismissed('s',pending);
+const keys=JSON.parse(store.get(_DISMISSED_APPROVALS_KEY));
+console.log(JSON.stringify({dismissed,legacyPresent:keys.includes(legacy),fullPresent:keys.includes(_approvalDismissKey('s',pending))}));
+''')
+    assert result == dict(dismissed=True, legacyPresent=False, fullPresent=True)
 
 
 def test_dismiss_poll_resolution_and_new_run_owner():

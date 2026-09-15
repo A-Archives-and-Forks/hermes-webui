@@ -1537,12 +1537,43 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
+                # The on-disk count, without reading the body.
+                #
+                # The decision below is a function of ONE integer -- how many
+                # messages the file on disk holds -- and save() already writes
+                # that integer into the metadata prefix, before `messages`, as
+                # `message_count` (see METADATA_FIELDS above; load_metadata_only
+                # and the sidebar freshness check read it the same way). So read
+                # THAT through a bounded 64 KiB prefix instead of the whole file.
+                # Measured before this: a 203,439,398-byte sidecar cost 20,377 ms
+                # (17,453 in read_text, 2,924 in json.loads) to yield one integer,
+                # on EVERY save -- including the grow-saves that never back
+                # anything up. The prefix read is O(64 KiB), and because the count
+                # is part of the bytes on disk it travels with any rewrite of them.
+                #
+                # An in-memory "I wrote this, stat says nothing changed" cache is
+                # NOT sufficient here, and was removed after review: (inode, size,
+                # mtime_ns) is not a content identity. A same-length in-place
+                # rewrite inside one mtime tick keeps all three fields -- ext4
+                # stamps mtime from a coarse clock, so two writes in the same tick
+                # share one mtime_ns -- and a stale cached count then reads a real
+                # shrink as a growth and skips the #1558 backup. The prefix count
+                # cannot be fooled that way.
+                #
+                # Every unknown falls through to the full read + parse below: a
+                # legacy (pre-#5854) sidecar whose count is not in the prefix, a
+                # corrupt or truncated prefix, a file with no top-level `messages`
+                # key at all, or metadata alone that overflows the budget.
+                # Fail-open is the contract -- never "assume no shrink".
+                existing_text = None
+                existing_msg_count = _prefix_message_count(self.path)
+                if existing_msg_count is None:
+                    existing_text = self.path.read_text(encoding='utf-8')
+                    try:
+                        existing = json.loads(existing_text)
+                        existing_msg_count = len(existing.get('messages') or [])
+                    except (json.JSONDecodeError, ValueError):
+                        existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
                 if (
                     existing_msg_count > 0
@@ -1560,6 +1591,10 @@ class Session:
                     return
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
+                    if existing_text is None:
+                        # The .bak body is the one thing that needs the full text,
+                        # and a shrink is the one time it is needed.
+                        existing_text = self.path.read_text(encoding='utf-8')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
                     # mirroring the main save() pattern below. Prevents a
                     # torn .bak from a crash mid-write or a concurrent
@@ -4237,6 +4272,43 @@ def _sidecar_stat_signature(path):
         return None
     return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+
+
+def _prefix_message_count(path):
+    """The sidecar's own persisted ``message_count``, from a bounded prefix.
+
+    The #1558 shrink check in save() needs exactly one integer -- how many
+    messages the file on disk holds -- and the writer puts that integer in the
+    metadata prefix, before ``messages``, precisely so readers can have it
+    without parsing the body (see METADATA_FIELDS). Reading the prefix costs
+    O(64 KiB) against O(file size) for ``read_text`` + ``json.loads`` (measured
+    2026-09-15: 20,377 ms for one integer on a 203,439,398-byte sidecar).
+
+    Content-derived on purpose. A stat identity cannot stand in for it: an
+    in-place rewrite of the same length inside one mtime tick keeps inode, size
+    *and* mtime_ns, so a cached count would read a real shrink as a growth and
+    skip the backup. The count is part of the bytes, so any rewrite of them
+    rewrites it too.
+
+    Returns None -- meaning "the caller must fall back to the full read +
+    parse" -- for every shape that does not carry a usable count: a legacy
+    pre-#5854 sidecar (scenes serialized before the count), a file with no
+    top-level ``messages`` key at all, a corrupt or truncated prefix, an
+    unreadable path, or metadata alone that overflows the budget.
+    """
+    try:
+        raw = _read_metadata_json_prefix(path)
+    except (OSError, ValueError):
+        return None
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return _parse_nonnegative_int(parsed.get('message_count'))
 
 
 def _legacy_sidecar_facts_get(sid):

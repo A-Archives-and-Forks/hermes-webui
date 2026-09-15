@@ -232,6 +232,63 @@ console.log(JSON.stringify({
     assert out["diskHasD"] is False, "clearing a viewed count must remove it from disk"
 
 
+def test_delete_prunes_a_viewed_count_only_the_store_holds():
+    """Deletion must consult the store, not just our cache. An entry another
+    client added after this client's cache was loaded is exactly what the prune
+    path exists to remove, and an early return on the cache miss leaves it
+    behind for a session the list no longer shows."""
+    out = _run_node(_script("""
+listed('E');
+const A = makeClient();
+const B = makeClient();
+// B's cache loads while the store is still empty, so B never sees E.
+B.viewed('E');
+// A acknowledges E, which B cannot know about from its own cache.
+A.setViewed('E', 17);
+const bCached = B.viewed('E');
+B.clearViewed('E');
+console.log(JSON.stringify({
+  bCached: bCached,
+  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+}));
+"""))
+    assert out["bCached"] is None, "precondition: B's cache must not hold E"
+    assert out["disk"] == {}, (
+        "deleting a session must prune its viewed count from the store even "
+        "when this client's cache never held the key"
+    )
+
+
+def test_delete_keeps_the_higher_count_this_client_holds_for_others():
+    """Pruning one session must not cost this client the acknowledgement it
+    holds for another. Adopting the store's view wholesale while pruning would
+    drop a count another client already lowered, and this client is the only
+    one that can still repair it."""
+    out = _run_node(_script("""
+listed('X', 'E');
+const A = makeClient();
+A.setViewed('X', 417);
+// Another client lowered X while recording its own acknowledgement for E.
+setDisk(SESSION_VIEWED_COUNTS_KEY, { X: 131, E: 17 });
+A.clearViewed('E');
+const held = A.viewed('X');
+// A now processes the storage event that clobber arrived with.
+A.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
+console.log(JSON.stringify({
+  held: held,
+  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+}));
+"""))
+    assert out["held"] == 417, (
+        "pruning one session must not drop the higher count this client holds "
+        "for another"
+    )
+    assert out["disk"] == {"X": 417}, (
+        "the client must still hold the acknowledgement that repairs the "
+        "lowered count in the store"
+    )
+
+
 def test_interleaved_acknowledgements_both_survive():
     """Both clients read one baseline, then each write lands inside the other's
     read-modify-write window. Neither acknowledgement may be lost."""

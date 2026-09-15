@@ -878,23 +878,30 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
 function _clearSessionViewedCount(sid) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
-  if (!Object.prototype.hasOwnProperty.call(counts, sid)) return;
+  const hadCachedEntry = Object.prototype.hasOwnProperty.call(counts, sid);
   delete counts[sid];
   // A removal must actually leave disk, unlike the additive max-merge used on
   // the set path (which never deletes). Delete just this key from the persisted
-  // map so entries a concurrent client added are preserved.
+  // map so entries a concurrent client added are preserved. The store is
+  // consulted even when our cache never held the key: an entry another client
+  // added since our cache was loaded is exactly the one this path has to prune.
   try {
     const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      delete parsed[sid];
-      localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(parsed));
-      _sessionViewedCounts = parsed;
+      if (Object.prototype.hasOwnProperty.call(parsed, sid)) {
+        delete parsed[sid];
+        localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(parsed));
+      }
+      // Adopt the store's entries but keep any higher count we already hold: we
+      // are the only client left that can repair a count another client
+      // lowered, so dropping ours here would lose the acknowledgement.
+      _sessionViewedCounts = _mergeSessionViewedCounts(parsed, counts).live;
       return;
     }
   } catch (_){
     // Fall through to the cache-only write on read/parse failure.
   }
-  _saveSessionViewedCounts();
+  if (hadCachedEntry) _saveSessionViewedCounts();
 }
 
 function _hasSessionCompletionUnread(sid) {

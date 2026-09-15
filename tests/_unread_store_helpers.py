@@ -20,6 +20,9 @@ _HELPER_NAMES = (
     "_sessionExistsForUnreadState",
     "_sessionListLoaded",
     "_mergeSessionViewedCounts",
+    "_sessionViewedCountDeletedKey",
+    "_readSessionViewedCountDeletions",
+    "_recordSessionViewedCountDeleted",
     "_markerLosesToUnreadClear",
     "_sessionCompletionUnreadOrder",
     "_nextSessionCompletionUnreadOrder",
@@ -33,6 +36,8 @@ _HELPER_NAMES = (
 # Declared from the module source so a harness cannot drift from the values the
 # module uses. Harnesses keep their own stub keys for the two older stores.
 _CONST_NAMES = (
+    "SESSION_VIEWED_COUNTS_DELETED_PREFIX",
+    "SESSION_VIEWED_COUNTS_DELETED_TTL_MS",
     "SESSION_COMPLETION_UNREAD_CLEARED_KEY",
     "SESSION_COMPLETION_UNREAD_CLEARED_PREFIX",
     "SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS",

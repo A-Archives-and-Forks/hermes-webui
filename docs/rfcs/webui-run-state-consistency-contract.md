@@ -170,22 +170,39 @@ writes.
 
 - **Viewed counts merge by maximum.** The fact is monotonic per session and
   additive across clients, so a save reads the store, merges its cache in with a
-  max, and writes only when the store does not already hold the merged result. A
-  count held only in a client's cache is written back only for a session the
-  sidebar list still shows, so a session deleted in another client is not
-  resurrected.
-- **Completion markers are ordered by per-session tombstones.** Markers are
-  add/remove and cannot be max-ordered, so each clear records `clearedAt` under
-  `hermes-session-completion-unread-cleared:v1:<encoded-sid>:<clearedAt>`. Independent
-  immutable version keys mean clients clearing different sessions—or clearing the
-  same session in an interleaved operation—cannot replace newer ordering facts. A
-  marker that does not postdate its clear loses; a genuine later
-  completion still wins. During rolling upgrades, the previous unsuffixed
-  `hermes-session-completion-unread-cleared` map is both read and dual-written so
-  already-open clients on the prior revision observe new clears; it remains a
-  temporary compatibility store and is not pruned in this revision. Versioned
-  tombstones are bounded by session existence and a 7-day retention cap, and are
-  never part of the marker map consumers read.
+  max, and writes only when the store does not already hold the merged result.
+  A deletion records its own key under
+  `hermes-session-viewed-counts:deleted:v1:<encoded-sid>`; merges drop any count
+  whose session has a live deletion record, so a client that still caches the
+  acknowledgement prunes it instead of writing it back. List membership cannot
+  decide this, because the sidebar filters by profile, project, and source, so an
+  absent row is not evidence of deletion. Deletion records expire on the same
+  7-day policy as clear records.
+- **Completion markers are ordered by logical stamps, not wall clock.**
+  Markers are add/remove and cannot be max-ordered, so each clear records a stamp
+  under `hermes-session-completion-unread-cleared:v1:<encoded-sid>:<stamp>`.
+  Independent immutable keys mean clients clearing different sessions—or clearing
+  the same session in an interleaved operation—cannot replace newer ordering
+  facts, and a reader folds the maximum per session. Markers carry
+  `unread_order`: the greatest stamp the marker's creator had observed (its own
+  clear state, its cached and stored markers) plus one. A marker whose stamp does
+  not exceed its session's clear stamp loses, so a clear wins the tie when a
+  marker was prepared before it but written after; a completion that happens after
+  the clear observes it and stamps higher, so it still wins. Milliseconds are not
+  used for ordering: a clear and a genuine later completion can share one tick, and
+  a single observed clock cannot order them.
+- **The previous clear representation is migrated once, then dropped.** The
+  unsuffixed `hermes-session-completion-unread-cleared` whole map is read, its
+  facts are imported as independent records, and the key is removed. Keeping it
+  would retain both of the defects it caused: concurrent clears could replace one
+  another in the shared blob, and the blob grew with every session ever cleared.
+  A client still running the previous revision therefore does not observe clears
+  recorded after the migration; that reload boundary is deliberate, because a
+  dual write cannot make the shared blob concurrency-safe. Versioned records are
+  pruned by age (7 days) and supersession only — never by session existence,
+  because the sidebar list is filtered by profile, project, and source, so an
+  absent row may simply be hidden. They are never part of the marker map
+  consumers read.
 - **Cross-client repair, not cache invalidation.** The `storage` listener routes a
   changed unread key (including any per-session clear key) back through the same
   merge instead of only dropping the local cache. A client that still holds an

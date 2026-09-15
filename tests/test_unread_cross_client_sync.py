@@ -112,6 +112,9 @@ _HELPER_FNS = [
     "_sessionExistsForUnreadState",
     "_sessionListLoaded",
     "_mergeSessionViewedCounts",
+    "_sessionViewedCountDeletedKey",
+    "_readSessionViewedCountDeletions",
+    "_recordSessionViewedCountDeleted",
     "_markerLosesToUnreadClear",
     "_sessionCompletionUnreadOrder",
     "_nextSessionCompletionUnreadOrder",
@@ -141,6 +144,10 @@ const localStorage = {{
   get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = {VIEWED_KEY!r};
+const SESSION_VIEWED_COUNTS_DELETED_PREFIX = `${{SESSION_VIEWED_COUNTS_KEY}}:deleted:v1:`;
+const SESSION_VIEWED_COUNTS_DELETED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const readViewedDeletions = () =>
+  Object.keys(_store).filter((k) => k.startsWith(SESSION_VIEWED_COUNTS_DELETED_PREFIX));
 const SESSION_COMPLETION_UNREAD_KEY = {UNREAD_KEY!r};
 const SESSION_COMPLETION_UNREAD_CLEARED_KEY = {CLEARED_KEY!r};
 const SESSION_COMPLETION_UNREAD_CLEARED_PREFIX = `${{SESSION_COMPLETION_UNREAD_CLEARED_KEY}}:v1:`;
@@ -203,6 +210,9 @@ function makeClient() {{
     handleStorage: (typeof _handleUnreadStorageEvent === 'function')
       ? _handleUnreadStorageEvent
       : () => {{}},
+    deletions: (typeof _readSessionViewedCountDeletions === 'function')
+      ? _readSessionViewedCountDeletions
+      : () => ({{}}),
   }};
 }}
 """
@@ -374,6 +384,53 @@ console.log(JSON.stringify({
 
 
 # ── Completion unread: the later event wins ──────────────────────────────────
+
+def test_stale_client_cannot_resurrect_a_deleted_sessions_count():
+    """Deleting a session records its own fact, so a client that still caches the
+    acknowledgement prunes it instead of writing it back — list membership cannot
+    decide this, because the sidebar filters by profile, project, and source."""
+    out = _run_node(_script("""
+listed('S', 'T');
+const A = makeClient();
+const B = makeClient();
+A.setViewed('S', 5);
+B.viewed('S');
+A.clearViewed('S');
+B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
+B.setViewed('T', 1);
+console.log(JSON.stringify({
+  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  deletions: readViewedDeletions().length,
+  bView: B.viewed('S'),
+}));
+"""))
+    assert out["disk"] == {"T": 1}, (
+        "a deleted session's count must not come back from a stale client"
+    )
+    assert out["deletions"] == 1
+    assert out["bView"] is None
+
+
+def test_viewed_count_deletion_records_are_pruned_by_age():
+    """The deletion records are bounded like the other stores: a later merge
+    drops one that has aged out."""
+    out = _run_node(_script("""
+listed('S', 'X');
+const A = makeClient();
+const young = (() => { A.clearViewed('S'); return readViewedDeletions().length; })();
+const keptYoung = (() => { A.setViewed('X', 2); return readViewedDeletions().length; })();
+_now = 1000 + 8 * 24 * 60 * 60 * 1000;
+A.setViewed('X', 3);
+console.log(JSON.stringify({
+  young: young,
+  keptYoung: keptYoung,
+  afterAge: readViewedDeletions().length,
+}));
+"""))
+    assert out["young"] == 1
+    assert out["keptYoung"] == 1, "a fresh deletion record must survive an unrelated merge"
+    assert out["afterAge"] == 0, "an expired deletion record must be pruned"
+
 
 def test_stale_client_cannot_resurrect_a_cleared_completion_marker():
     """The field symptom: a marker cleared by opening the chat must not come
@@ -610,9 +667,10 @@ console.log(JSON.stringify({ marker, tombstone }));
     assert out["marker"] is None, "the completion that predates the visit must remain cleared"
 
 
-def test_tombstones_are_pruned_when_their_session_is_gone():
-    """Tombstones are keyed by session id; one whose session no longer exists
-    must not accumulate."""
+def test_clear_records_survive_a_session_missing_from_the_list():
+    """A session absent from the visible list is not proof of deletion: the list
+    is filtered by profile, project, and source. Dropping its clear record would
+    re-light a dot the user already cleared, so age is the only pruning signal."""
     out = _run_node(_script("""
 listed('Y', 'GONE');
 const A = makeClient();
@@ -625,7 +683,7 @@ A.markUnread('Y', 1);
 A.clearUnread('Y');
 console.log(JSON.stringify({ tombs: readAllClears(A) }));
 """))
-    assert out["tombs"] == {"Y": 2002}
+    assert out["tombs"] == {"GONE": 1002, "Y": 2002}
 
 
 def test_tombstones_are_capped_by_age():

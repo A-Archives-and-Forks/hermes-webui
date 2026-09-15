@@ -346,6 +346,13 @@ function _clearComposerDraft(sid, text, files) {
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+// A deleted session's acknowledgement must not return from a stale client's
+// cache. Membership in the rendered list cannot decide this: the sidebar filters
+// by profile, project, and source, so an absent row is not evidence of deletion.
+// Each deletion therefore records its own key, and merges drop any entry whose
+// session has one. Records are pruned by age so the store stays bounded.
+const SESSION_VIEWED_COUNTS_DELETED_PREFIX = 'hermes-session-viewed-counts:deleted:v1:';
+const SESSION_VIEWED_COUNTS_DELETED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 // Clear ordering is stored per session so two clients clearing different
 // sessions never replace one another's tombstones with whole-map writes. The
@@ -530,10 +537,19 @@ function _sessionListLoaded() {
 // is always kept in the live view regardless: dropping it here would lose the
 // acknowledgement for a session that still exists.
 function _mergeSessionViewedCounts(disk, cache) {
+  const deleted = _readSessionViewedCountDeletions();
+  const gone = (sid) => Object.prototype.hasOwnProperty.call(deleted, sid);
   const counts = {};
-  for (const sid of Object.keys(disk || {})) counts[sid] = Number(disk[sid]) || 0;
   let changed = false;
+  for (const sid of Object.keys(disk || {})) {
+    if (gone(sid)) {
+      changed = true;
+      continue;
+    }
+    counts[sid] = Number(disk[sid]) || 0;
+  }
   for (const sid of Object.keys(cache || {})) {
+    if (gone(sid)) continue;
     const ours = Number(cache[sid]) || 0;
     if (Object.prototype.hasOwnProperty.call(counts, sid)) {
       if (ours > counts[sid]) {
@@ -550,12 +566,60 @@ function _mergeSessionViewedCounts(disk, cache) {
   const live = {};
   for (const sid of Object.keys(counts)) live[sid] = counts[sid];
   for (const sid of Object.keys(cache || {})) {
+    if (gone(sid)) continue;
     const ours = Number(cache[sid]) || 0;
     if (ours > (Object.prototype.hasOwnProperty.call(live, sid) ? live[sid] : 0)) {
       live[sid] = ours;
     }
   }
   return {counts, live, changed};
+}
+
+function _sessionViewedCountDeletedKey(sid) {
+  return `${SESSION_VIEWED_COUNTS_DELETED_PREFIX}${encodeURIComponent(String(sid))}`;
+}
+
+// Read the deletion records, dropping any that have aged out.
+function _readSessionViewedCountDeletions() {
+  const deleted = {};
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {
+    return deleted;
+  }
+  const now = Date.now();
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key.startsWith(SESSION_VIEWED_COUNTS_DELETED_PREFIX)) continue;
+    const encoded = key.slice(SESSION_VIEWED_COUNTS_DELETED_PREFIX.length);
+    let sid = '';
+    try {
+      sid = decodeURIComponent(encoded);
+    } catch (_) {
+      continue;
+    }
+    if (!sid) continue;
+    let stamp = 0;
+    try {
+      stamp = Number(localStorage.getItem(key)) || 0;
+    } catch (_) {}
+    if (stamp && now - stamp > SESSION_VIEWED_COUNTS_DELETED_TTL_MS) {
+      try { localStorage.removeItem(key); } catch (_) {}
+      continue;
+    }
+    deleted[sid] = stamp;
+  }
+  return deleted;
+}
+
+function _recordSessionViewedCountDeleted(sid) {
+  if (!sid) return;
+  try {
+    localStorage.setItem(_sessionViewedCountDeletedKey(sid), String(Date.now()));
+  } catch (_) {
+    // Without the record the deletion still removed the entry; the next delete
+    // or merge attempt records it again.
+  }
 }
 
 function _saveSessionViewedCounts() {
@@ -774,34 +838,35 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
     (Array.isArray(sidOrSids) ? sidOrSids : [sidOrSids]).map((sid) => String(sid))
   );
   const at = Number(clearedAt) || 0;
-  const legacyClears = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+
+  // One-way migration. The previous representation kept every clear fact in one
+  // shared blob, so concurrent clears could replace one another and the blob
+  // only ever grew. Import those facts as independently addressable records and
+  // drop the blob. A client still running the previous revision will not observe
+  // clears recorded after this point; that is a reload boundary, not something a
+  // dual write could have fixed, because the shared blob cannot be written
+  // concurrently without losing an update.
+  const legacy = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  let migrated = true;
+  for (const [sid, value] of Object.entries(legacy)) {
+    const stamp = Number(value) || 0;
+    if (!stamp) continue;
+    try {
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, stamp), String(stamp));
+    } catch (_) {
+      migrated = false;
+    }
+  }
   for (const sid of justCleared) {
     try {
       localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, at), String(at));
     } catch (_) {}
-    // Rolling compatibility: clients already open on the previous revision only
-    // understand the whole-map key. Publish new clears there too, while the
-    // immutable key remains authoritative for clients on this revision.
-    legacyClears[sid] = Math.max(Number(legacyClears[sid]) || 0, at);
   }
-  try { localStorage.setItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY, JSON.stringify(legacyClears)); } catch (_) {}
-
-  // Copy ordering facts from the old whole-map representation, but keep the
-  // legacy map until this PR no longer needs rolling compatibility. An
-  // already-open older client only understands that key; deleting it would let
-  // that client reassert stale markers. Keeping it also avoids a racy
-  // read/copy/remove migration losing a clear written by an older client.
-  for (const [sid, value] of Object.entries(legacyClears)) {
-    const version = Number(value) || 0;
-    if (!version) continue;
-    try {
-      localStorage.setItem(
-        _sessionCompletionUnreadClearedKey(sid, version), String(version));
-    } catch (_) {}
+  if (Object.keys(legacy).length && migrated) {
+    try { localStorage.removeItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY); } catch (_) {}
   }
 
   const cleared = _readSessionCompletionUnreadCleared();
-  const listLoaded = _sessionListLoaded();
   let keys = [];
   try {
     keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
@@ -812,10 +877,12 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
     try {
       const version = Math.max(parsed.version, Number(localStorage.getItem(key)) || 0);
       const expired = at - version > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS;
-      const deleted = listLoaded && !justCleared.has(parsed.sid)
-        && !_sessionExistsForUnreadState(parsed.sid);
       const superseded = version < (Number(cleared[parsed.sid]) || 0);
-      if (expired || deleted || superseded) localStorage.removeItem(key);
+      // Records are pruned by age and supersession only. Session existence is
+      // not a pruning signal: the sidebar list is filtered by profile, project,
+      // and source, so a session missing from it may simply be hidden, and
+      // dropping its clear record would re-light a cleared dot.
+      if (expired || superseded) localStorage.removeItem(key);
     } catch (_) {}
   }
 }
@@ -978,6 +1045,10 @@ function _clearSessionViewedCount(sid) {
   const counts = _getSessionViewedCounts();
   const hadCachedEntry = Object.prototype.hasOwnProperty.call(counts, sid);
   delete counts[sid];
+  // Record the deletion before any merge, so this client cannot re-adopt the
+  // entry it is deleting and another client holding the same acknowledgement
+  // prunes it instead of writing it back.
+  _recordSessionViewedCountDeleted(sid);
   // A removal must actually leave disk, unlike the additive max-merge used on
   // the set path (which never deletes). Delete just this key from the persisted
   // map so entries a concurrent client added are preserved. The store is
@@ -9373,7 +9444,10 @@ function _handleUnreadStorageEvent(e){
   // as the live cache, and write back only what the store is missing. So this
   // client re-asserts the acknowledgement it still holds instead of dropping it
   // and re-reading a value the other client's write already lost.
-  if(e.key === SESSION_VIEWED_COUNTS_KEY) _saveSessionViewedCounts();
+  if(e.key === SESSION_VIEWED_COUNTS_KEY
+    || (typeof e.key === 'string' && e.key.startsWith(SESSION_VIEWED_COUNTS_DELETED_PREFIX))){
+    _saveSessionViewedCounts();
+  }
   else if(e.key === SESSION_COMPLETION_UNREAD_KEY
     || e.key === SESSION_COMPLETION_UNREAD_CLEARED_KEY
     || (typeof e.key === 'string'

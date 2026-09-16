@@ -193,3 +193,33 @@ def test_settle_keeps_unclosed_marker_as_is(monkeypatch):
 
     assert session.messages[-1]["content"] == "Smoke checks passed."
     assert "truncated" in json.dumps(session.messages)
+
+
+def test_settle_heals_a_transcript_that_already_stored_the_wrapper(monkeypatch):
+    """A transcript polluted by an earlier settle is scrubbed on the next one.
+
+    The display merge carries earlier rows across turns verbatim, so without a
+    scrub on the merged transcript the wrapper written before this fix would stay
+    visible for the rest of the session (and the agent replays it with the
+    wrapper still in place).
+    """
+    session = _session_with_prior_turn()
+    # Turn settled before the guard existed: the tool row kept the raw wrapper.
+    session.messages[2]["content"] = f"deploy finished: revision 41\n{OOB_BLOCK}"
+    session.context_messages = copy.deepcopy(session.messages)
+    monkeypatch.setattr(
+        _streaming, "_annotate_media_snapshots_for_settled_messages", lambda messages: None
+    )
+    previous = list(session.messages)
+    previous_context = list(session.context_messages)
+    result = copy.deepcopy(previous_context) + [
+        {"role": "user", "content": PROMPT, "timestamp": 1788440000},
+        {"role": "assistant", "content": "Nothing else changed.", "timestamp": 1788440001},
+    ]
+
+    _settle_result_messages(session, previous, previous_context, result, PROMPT, "webui", None)
+
+    assert not _contains_oob(session.messages)
+    assert not _contains_oob(session.context_messages)
+    assert sum(1 for m in session.messages if m.get("role") == "tool") == 1
+    assert "deploy finished: revision 41" in json.dumps(session.messages)

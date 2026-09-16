@@ -2294,6 +2294,11 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
+    # The merge carries earlier display rows across turns verbatim, so a row
+    # settled before this guard existed would keep its raw wrapper forever.
+    # Scrub the persisted display copy too — after the merge, so identity
+    # matching above still saw the rows unchanged. (#7600)
+    session.messages = _strip_oob_markers_from_messages(session.messages)
     _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831

@@ -1046,6 +1046,7 @@ MIME_MAP = {
     ".ico": "image/x-icon",
     ".bmp": "image/bmp",
     ".pdf": "application/pdf",
+    ".zip": "application/zip",
     ".json": "application/json",
     ".html": "text/html",
     ".htm": "text/html",

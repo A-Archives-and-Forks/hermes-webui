@@ -14,8 +14,10 @@ Usage::
         --confirm-drained [--lock-file /path/to/agent-activity.lock]
 
 ``--confirm-drained`` is mandatory. When ``--lock-file`` is given, the tool
-takes an exclusive non-blocking ``flock`` on that path so that a deployment
-which serialises agent turns on a lock file cannot start a turn mid-rebuild.
+takes an exclusive non-blocking lock on that path (``flock`` on POSIX,
+``msvcrt.locking`` on Windows) so that a deployment which serialises agent
+turns on a lock file cannot start a turn mid-rebuild. Without ``--lock-file``
+no lock primitive is needed, so the script runs on every supported platform.
 
 Existing indexes are verified for table, key shape and collation and must be
 covering (``EXPLAIN QUERY PLAN``); an incompatible index is reported, never
@@ -23,10 +25,24 @@ silently replaced.
 """
 import argparse
 from contextlib import closing, nullcontext
-import fcntl
 import json
 from pathlib import Path
 import sqlite3
+import sys
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # native Windows
+    fcntl = None
+try:  # Windows
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from api.agent_sessions import state_db_file_uri  # same UNC-aware URI as the readers
 
 INDEXES = {
     "idx_messages_session": ("messages", (("session_id", "BINARY"), ("timestamp", "BINARY"))),
@@ -39,9 +55,17 @@ INDEXES = {
 def _exclusive_lock(lock_file):
     if lock_file is None:
         return nullcontext()
+    if fcntl is None and msvcrt is None:
+        raise RuntimeError("--lock-file needs fcntl (POSIX) or msvcrt (Windows); "
+                           "neither is available on this interpreter")
     handle = open(lock_file, "a+")
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            # Lock one byte at offset 0 without blocking; raises OSError when held.
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     except BaseException:
         handle.close()
         raise
@@ -54,7 +78,8 @@ def ensure_read_indexes(db_path, *, confirmed_drained=False, lock_file=None):
     db_path = Path(db_path).resolve(strict=True)
     statuses = {}
     with _exclusive_lock(lock_file):
-        with closing(sqlite3.connect(db_path.as_uri() + "?mode=rw", uri=True)) as db:
+        # mode=rw (not rwc): never create a ghost database at a mistyped path.
+        with closing(sqlite3.connect(state_db_file_uri(db_path) + "?mode=rw", uri=True)) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 for name, (table, keys) in INDEXES.items():

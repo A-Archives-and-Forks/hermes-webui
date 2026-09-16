@@ -1,8 +1,10 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import logging
 import sqlite3
+import sys
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,49 @@ logger = logging.getLogger(__name__)
 # agent still needs upgrading). Plain ``set`` mutation under the GIL is
 # sufficient here; a duplicate line from two racing first calls is harmless.
 _SOURCE_COLUMN_WARNED_DB_PATHS: set[str] = set()
+
+
+def state_db_file_uri(db_path, platform: str | None = None) -> str:
+    """Build the ``file:`` URI (no query string) for an absolute ``state.db`` path.
+
+    ``Path.as_uri()`` is not usable here: for a UNC share it emits
+    ``file://server/share/state.db`` and SQLite rejects any non-local URI
+    authority unless compiled with ``SQLITE_ALLOW_URI_AUTHORITY`` (the
+    CPython 3.11-3.13 Windows builds are not). SQLite instead accepts the
+    *empty*-authority spelling ``file:////server/share/state.db``, whose path
+    ``//server/share/...`` the Windows VFS opens as the UNC name. Drive-letter
+    paths keep the documented ``file:///C:/...`` form and POSIX paths are
+    unchanged. Only ``/`` survives unescaped, so ``?`` and ``#`` in path
+    components cannot leak into the query string.
+
+    ``platform`` defaults to the running interpreter; tests pass it explicitly
+    so the Windows shapes are checked from any host.
+    """
+    platform = platform or sys.platform
+    if platform == "win32":
+        win = PureWindowsPath(str(db_path))
+        drive = win.drive
+        if drive.startswith("\\\\?\\"):
+            # Extended-length prefix: "\\?\C:" or "\\?\UNC\server\share".
+            drive = drive[4:]
+            if drive.upper().startswith("UNC\\"):
+                drive = "\\\\" + drive[4:]
+        parts = win.parts[1:]  # drop the anchor, keep the path components
+        if drive.startswith("\\\\"):
+            host_share = drive[2:].replace("\\", "/")
+            posix_path = "//" + "/".join((host_share, *parts))
+        else:
+            posix_path = "/" + "/".join((drive, *parts))
+        # ``:`` stays literal so the drive letter keeps SQLite's documented
+        # ``file:///C:/...`` shape (``Path.as_uri()`` leaves it unescaped too).
+        return "file://" + quote(posix_path, safe="/:")
+    posix_path = PurePosixPath(str(db_path)).as_posix()
+    return "file://" + quote(posix_path, safe="/")
+
+
+def state_db_readonly_uri(db_path, platform: str | None = None) -> str:
+    """Strict read-only (``mode=ro``) form of :func:`state_db_file_uri`."""
+    return state_db_file_uri(db_path, platform=platform) + "?mode=ro"
 
 
 def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
@@ -33,8 +78,7 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
     """
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
-    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    return sqlite3.connect(read_only_uri, uri=True)
+    return sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
 
 
 MESSAGING_SOURCES = {
@@ -620,7 +664,6 @@ def read_importable_agent_session_rows(
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
-        included = ()
         if include_sources:
             included = tuple(str(source) for source in include_sources if source)
             if included:
@@ -634,10 +677,16 @@ def read_importable_agent_session_rows(
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
 
+        # Without ``idx_messages_session`` the correlated ``MAX(mx.timestamp)``
+        # candidate ordering rescans ``messages`` once per session (seconds on
+        # a few thousand sessions). Every missing-index projection — default
+        # sidebar, gateway watcher, cron/webhook/kanban views — orders through
+        # one read-only pre-aggregation pass instead; the listing never creates
+        # the index itself (that is drained maintenance, see
+        # ``scripts/ensure_state_db_read_indexes.py``).
         use_preaggregated_candidate_order = (
             use_messages_join
             and messages_has_timestamp
-            and included == ("cron",)
             and not messages_index_present
         )
         if use_preaggregated_candidate_order:

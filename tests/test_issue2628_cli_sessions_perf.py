@@ -209,7 +209,8 @@ def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
     assert "JOIN candidates c ON c.id = s.id" in src
     assert "latest_messages AS" in src
     assert "LEFT JOIN latest_messages lm ON lm.session_id = s.id" in src
-    assert 'included == ("cron",)' in src
+    # Pre-aggregation covers every missing-index projection, not only cron (#7445 review).
+    assert 'included == ("cron",)' not in src
     assert "not messages_index_present" in src
     assert "PRAGMA index_list(messages)" in src
     # Listing is a pure read: index creation lives in the drained maintenance tool.

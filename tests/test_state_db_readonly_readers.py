@@ -11,7 +11,6 @@ Contract under test:
   (``scripts/ensure_state_db_read_indexes.py``);
 * the cron sidebar read in ``api/routes.py`` uses the read-only opener.
 """
-import fcntl
 import sqlite3
 from contextlib import closing
 
@@ -94,6 +93,7 @@ def test_index_maintenance_without_lock_file_still_requires_drain(tmp_path):
 
 
 def test_index_maintenance_refuses_when_lock_is_held(tmp_path):
+    fcntl = pytest.importorskip("fcntl", reason="flock-held scenario needs a POSIX interpreter")
     from scripts.ensure_state_db_read_indexes import ensure_read_indexes
     path = tmp_path / "state.db"
     _maintenance_schema(path)

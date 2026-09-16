@@ -5457,7 +5457,7 @@ def _content_has_oob_marker(content) -> bool:
 
 
 def _strip_oob_markers_from_messages(messages):
-    """Drop consumed OOB steer wrappers from rows bound for persistence.
+    """Drop consumed OOB steer wrappers from the tool rows that carry them.
 
     A mid-turn ``/steer`` is delivered as an ``[OUT-OF-BAND USER MESSAGE ...]``
     block appended to the turn's last tool result. The wrapper is agent control
@@ -5465,17 +5465,27 @@ def _strip_oob_markers_from_messages(messages):
     copy, and the settled transcript must not keep it either — ``session.messages``
     is rendered verbatim in the UI (#7600).
 
-    Rows without a marker are returned untouched (same object) so the identity
-    of rows carrying stable ids / reasoning metadata is preserved, and so the
-    scrubbed rows still compare equal to the marker-free rows already persisted
-    from earlier turns.
+    Only ``role == 'tool'`` rows are candidates, because that is the only place
+    the transport ever appends a wrapper. User and assistant rows are
+    user-visible content: a message that quotes a complete marker — a pasted
+    example, a log excerpt — must survive verbatim, so the scrub never reaches
+    those rows. Only the carrier's ``content`` is rebuilt; every other field
+    stays the object it already is, so stable ids, reasoning metadata, and turn
+    bookkeeping are untouched and the scrubbed rows still compare equal to the
+    marker-free rows already persisted from earlier turns.
     """
     cleaned = []
     for message in messages or []:
-        if isinstance(message, dict) and _content_has_oob_marker(message.get('content')):
-            cleaned.append(_strip_oob_blocks(message))
+        if not isinstance(message, dict) or message.get('role') != 'tool':
+            cleaned.append(message)
             continue
-        cleaned.append(message)
+        content = message.get('content')
+        if not _content_has_oob_marker(content):
+            cleaned.append(message)
+            continue
+        scrubbed = dict(message)
+        scrubbed['content'] = _strip_oob_blocks(content)
+        cleaned.append(scrubbed)
     return cleaned
 
 

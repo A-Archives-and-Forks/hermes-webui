@@ -223,3 +223,82 @@ def test_settle_heals_a_transcript_that_already_stored_the_wrapper(monkeypatch):
     assert not _contains_oob(session.context_messages)
     assert sum(1 for m in session.messages if m.get("role") == "tool") == 1
     assert "deploy finished: revision 41" in json.dumps(session.messages)
+
+
+def test_settle_keeps_literal_markers_in_user_text_intact_and_unduplicated(monkeypatch):
+    """A complete marker inside user text is content, not transport control data.
+
+    The scrub may only touch the tool row the transport appended the wrapper to.
+    A user row that quotes a *complete* marker — a pasted log excerpt, or the very
+    prompt asking about this feature — is user-visible content: it must survive
+    byte-for-byte and exactly once in both written copies. Before the role gate,
+    the pre-match scrub also shortened the current turn's own prompt row, which
+    broke active-turn identity matching and duplicated the turn.
+    """
+    pasted = (
+        "our bot log shows this block, is that normal?\n"
+        f"{OOB_BLOCK}\n"
+        "the docs say the gateway adds it"
+    )
+    asked = f"is this wrapper expected?\n{OOB_VARIANT}\nit showed up mid-turn"
+    session = _session_with_prior_turn()
+    # Prior turn, already settled: its user row quotes the wrapper as an example.
+    session.messages[0]["content"] = pasted
+    session.context_messages = copy.deepcopy(session.messages)
+    previous = list(session.messages)
+    previous_context = list(session.context_messages)
+    monkeypatch.setattr(
+        _streaming, "_annotate_media_snapshots_for_settled_messages", lambda messages: None
+    )
+
+    ts = 1788440000
+    token = "direct-stream:2"
+    identity = {
+        "token": token,
+        "text": asked,
+        "timestamp": float(ts),
+        "source": "webui",
+        "attachments": [],
+        "current_turn_user_idx": len(previous_context),
+        "turn_id": "turn-2",
+        "agent_turn_boundary_resolved": True,
+    }
+    result = copy.deepcopy(previous_context) + [
+        {"role": "user", "content": asked, "timestamp": ts, "_active_turn_token": token},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-2"}],
+            "timestamp": ts + 1,
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-2",
+            "content": f"checks passed\n\n{OOB_BLOCK}",
+            "timestamp": ts + 2,
+        },
+        {"role": "assistant", "content": "Smoke checks passed.", "timestamp": ts + 3},
+    ]
+
+    _settle_result_messages(
+        session, previous, previous_context, result, asked, "webui", identity
+    )
+
+    expected_user_rows = [pasted, asked]
+    for written in (session.messages, session.context_messages):
+        user_texts = [
+            m.get("content")
+            for m in written
+            if isinstance(m, dict) and m.get("role") == "user"
+        ]
+        assert user_texts == expected_user_rows, (
+            "a literal marker in user text must survive intact and exactly once, "
+            f"got {user_texts!r}"
+        )
+    assert session.messages[-1]["content"] == "Smoke checks passed."
+    # The consumed steer wrapper on the carrier tool row is still dropped.
+    tool_bodies = [
+        m.get("content") for m in session.messages if isinstance(m, dict) and m.get("role") == "tool"
+    ]
+    assert not _contains_oob(tool_bodies), "wrapper leaked into a tool row"
+    assert "checks passed" in json.dumps(tool_bodies)

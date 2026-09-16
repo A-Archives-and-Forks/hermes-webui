@@ -52,7 +52,7 @@ def test_background_completion_unread_uses_explicit_marker_not_message_delta():
     has_unread_block = SESSIONS_JS[has_unread_idx:SESSIONS_JS.find("async function newSession", has_unread_idx)]
 
     marker_idx = has_unread_block.find("_hasSessionCompletionUnread(s.session_id)")
-    count_idx = has_unread_block.find("s.message_count > Number")
+    count_idx = has_unread_block.find("s.message_count > viewed.message_count")
     assert marker_idx != -1, "_hasUnreadForSession must check explicit completion unread marker"
     assert count_idx != -1, "_hasUnreadForSession must keep the existing message_count fallback"
     assert marker_idx < count_idx, (
@@ -561,6 +561,6 @@ def test_historical_sessions_are_not_marked_unread_on_list_render():
     assert "_markSessionCompletionUnread" not in has_unread_block, (
         "rendering old historical sessions must not create completion-unread markers"
     )
-    assert "_setSessionViewedCount(s.session_id, Number(s.message_count || 0));" in has_unread_block, (
+    assert "_setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);" in has_unread_block, (
         "missing viewed-count baseline should still initialize as read for historical sessions"
     )

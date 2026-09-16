@@ -372,6 +372,7 @@ const SESSION_PROFILE_COUNTS_KEY = 'hermes-session-profile-counts';
 let _sessionProfileCounts = null;
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
+let _sessionCompletionUnreadClearedMemory = {};
 let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
@@ -528,14 +529,52 @@ function _sessionListLoaded() {
     && _sessionListSnapshotById.size > 0;
 }
 
-// A viewed count is "seen at least up to N messages": monotonic per session and
-// additive across clients, so merging is a max that never rolls a count back and
-// never drops another client's entry. A value that exists only in our cache is
-// written back only for a session the list still shows (see
-// _sessionExistsForUnreadState) so a session deleted in another client, and
-// already pruned from disk by _clearSessionViewedCount, is not resurrected. It
-// is always kept in the live view regardless: dropping it here would lose the
-// acknowledgement for a session that still exists.
+// Viewed acknowledgements are generation-scoped. Transcript mutation routes
+// increment `transcript_generation` whenever the visible message list shrinks;
+// counts are monotonic only within one generation. Legacy numeric entries belong
+// to generation zero and are migrated on their next save.
+function _sessionViewedCountRecord(value, transcriptGeneration = 0) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return {
+      message_count: Number(value.message_count) || 0,
+      transcript_generation: Math.max(0, Number(value.transcript_generation) || 0),
+    };
+  }
+  return {
+    message_count: Number(value) || 0,
+    transcript_generation: Math.max(0, Number(transcriptGeneration) || 0),
+  };
+}
+
+function _sessionViewedCountValue(value) {
+  return _sessionViewedCountRecord(value).message_count;
+}
+
+function _sessionViewedRecordWins(candidate, current) {
+  const ours = _sessionViewedCountRecord(candidate);
+  const theirs = _sessionViewedCountRecord(current);
+  if (ours.transcript_generation !== theirs.transcript_generation) {
+    return ours.transcript_generation > theirs.transcript_generation;
+  }
+  return ours.message_count > theirs.message_count;
+}
+
+function _sessionTranscriptGenerationForUnread(sid, explicit = null) {
+  if (explicit !== null && explicit !== undefined && Number.isFinite(Number(explicit))) {
+    return Math.max(0, Number(explicit) || 0);
+  }
+  let active = null;
+  try {
+    active = (S && S.session && S.session.session_id === sid) ? S.session : null;
+  } catch (_) {}
+  const snapshot = (typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById)
+    ? _sessionListSnapshotById.get(sid) : null;
+  const listed = (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions))
+    ? _allSessions.find((s) => s && s.session_id === sid) : null;
+  const session = active || snapshot || listed;
+  return Math.max(0, Number(session && session.transcript_generation) || 0);
+}
+
 function _mergeSessionViewedCounts(disk, cache) {
   const deleted = _readSessionViewedCountDeletions();
   const gone = (sid) => Object.prototype.hasOwnProperty.call(deleted, sid);
@@ -546,19 +585,20 @@ function _mergeSessionViewedCounts(disk, cache) {
       changed = true;
       continue;
     }
-    counts[sid] = Number(disk[sid]) || 0;
+    const record = _sessionViewedCountRecord(disk[sid]);
+    counts[sid] = record;
+    if (!disk[sid] || typeof disk[sid] !== 'object' || Array.isArray(disk[sid])) changed = true;
   }
   for (const sid of Object.keys(cache || {})) {
     if (gone(sid)) continue;
-    const ours = Number(cache[sid]) || 0;
+    const ours = _sessionViewedCountRecord(cache[sid]);
     if (Object.prototype.hasOwnProperty.call(counts, sid)) {
-      if (ours > counts[sid]) {
+      if (_sessionViewedRecordWins(ours, counts[sid])) {
         counts[sid] = ours;
         changed = true;
       }
       continue;
     }
-    if (!ours) continue;
     if (_sessionListLoaded() && !_sessionExistsForUnreadState(sid)) continue;
     counts[sid] = ours;
     changed = true;
@@ -567,8 +607,8 @@ function _mergeSessionViewedCounts(disk, cache) {
   for (const sid of Object.keys(counts)) live[sid] = counts[sid];
   for (const sid of Object.keys(cache || {})) {
     if (gone(sid)) continue;
-    const ours = Number(cache[sid]) || 0;
-    if (ours > (Object.prototype.hasOwnProperty.call(live, sid) ? live[sid] : 0)) {
+    const ours = _sessionViewedCountRecord(cache[sid]);
+    if (!Object.prototype.hasOwnProperty.call(live, sid) || _sessionViewedRecordWins(ours, live[sid])) {
       live[sid] = ours;
     }
   }
@@ -640,21 +680,26 @@ function _saveSessionViewedCounts() {
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0) {
+function _setSessionViewedCount(sid, messageCount = 0, transcriptGeneration = null) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  const generation = _sessionTranscriptGenerationForUnread(sid, transcriptGeneration);
+  const incoming = _sessionViewedCountRecord(next, generation);
   const hadCount = Object.prototype.hasOwnProperty.call(counts, sid);
-  const previous = Number(counts[sid]) || 0;
-  // A viewed count records "seen at least up to N messages" — keep it monotonic.
-  // A transient lower count (e.g. a list snapshot mid-compaction) must not
-  // resurrect a cleared unread dot before the save below.
-  counts[sid] = Math.max(previous, next);
+  const previous = hadCount ? _sessionViewedCountRecord(counts[sid]) : null;
+  if (!previous || _sessionViewedRecordWins(incoming, previous)) {
+    counts[sid] = incoming;
+  } else {
+    counts[sid] = previous;
+  }
   _saveSessionViewedCounts();
-  // Advancing the acknowledgement records a clear even if another client has
-  // only prepared (not persisted) its older completion marker. Repeated polling
-  // at the same count does not refresh the tombstone or emit storage events.
-  _clearSessionCompletionUnread(sid, !hadCount || next > previous);
+  // A generation change or count advance acknowledges completion state even if
+  // another client prepared an older marker before this save.
+  const advanced = !previous
+    || generation > previous.transcript_generation
+    || (generation === previous.transcript_generation && next > previous.message_count);
+  _clearSessionCompletionUnread(sid, advanced);
 }
 
 function _getSessionCompletionUnread() {
@@ -712,11 +757,22 @@ function _readSessionCompletionUnreadCleared() {
     keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
   } catch (_) {}
   const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  const now = Date.now();
+  for (const [sid, memoryRecord] of Object.entries(_sessionCompletionUnreadClearedMemory || {})) {
+    const value = Number(memoryRecord && memoryRecord.order) || 0;
+    const recordedAt = Number(memoryRecord && memoryRecord.recorded_at) || 0;
+    if (recordedAt && now - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS) {
+      delete _sessionCompletionUnreadClearedMemory[sid];
+      continue;
+    }
+    if (value > (Number(cleared[sid]) || 0)) cleared[sid] = value;
+  }
   try {
     for (const key of keys) {
       const parsed = _parseSessionCompletionUnreadClearedKey(key);
       if (!parsed) continue;
-      const value = Math.max(parsed.version, Number(localStorage.getItem(key)) || 0);
+      const storedValue = Number(localStorage.getItem(key)) || 0;
+      const value = parsed.version || storedValue;
       if (value > (Number(cleared[parsed.sid]) || 0)) cleared[parsed.sid] = value;
     }
   } catch (_) {
@@ -841,6 +897,12 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
     (Array.isArray(sidOrSids) ? sidOrSids : [sidOrSids]).map((sid) => String(sid))
   );
   const at = Number(clearedAt) || 0;
+  for (const sid of justCleared) {
+    const previous = _sessionCompletionUnreadClearedMemory[sid];
+    if (at > (Number(previous && previous.order) || 0)) {
+      _sessionCompletionUnreadClearedMemory[sid] = {order: at, recorded_at: Date.now()};
+    }
+  }
 
   // One-way migration. The previous representation kept every clear fact in one
   // shared blob, so concurrent clears could replace one another and the blob
@@ -855,14 +917,14 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
     const stamp = Number(value) || 0;
     if (!stamp) continue;
     try {
-      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, stamp), String(stamp));
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, stamp), String(Date.now()));
     } catch (_) {
       migrated = false;
     }
   }
   for (const sid of justCleared) {
     try {
-      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, at), String(at));
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, at), String(Date.now()));
     } catch (_) {}
   }
   if (Object.keys(legacy).length && migrated) {
@@ -878,8 +940,9 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
     const parsed = _parseSessionCompletionUnreadClearedKey(key);
     if (!parsed) continue;
     try {
-      const version = Math.max(parsed.version, Number(localStorage.getItem(key)) || 0);
-      const expired = at - version > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS;
+      const recordedAt = Number(localStorage.getItem(key)) || 0;
+      const version = parsed.version || recordedAt;
+      const expired = recordedAt > 0 && Date.now() - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS;
       const superseded = version < (Number(cleared[parsed.sid]) || 0);
       // Records are pruned by age and supersession only. Session existence is
       // not a pruning signal: the sidebar list is filtered by profile, project,
@@ -1123,12 +1186,22 @@ function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
   if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
+  const generation = _sessionTranscriptGenerationForUnread(s.session_id, s.transcript_generation);
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
-    _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
+    _setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);
     return false;
   }
-  if (!Number.isFinite(s.message_count)) return false;
-  return s.message_count > Number(counts[s.session_id] || 0);
+  const viewed = _sessionViewedCountRecord(counts[s.session_id]);
+  if (generation > viewed.transcript_generation) {
+    const baseline = Math.max(0, Math.min(
+      Number(s.message_count || 0),
+      Number(s.transcript_generation_baseline) || 0
+    ));
+    _setSessionViewedCount(s.session_id, baseline, generation);
+    return Number.isFinite(s.message_count) && s.message_count > baseline;
+  }
+  if (generation < viewed.transcript_generation || !Number.isFinite(s.message_count)) return false;
+  return s.message_count > viewed.message_count;
 }
 
 // Keep the sidebar polling snapshot current for a just-visited session so a

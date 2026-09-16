@@ -104,6 +104,7 @@ _CLIENT_FNS = [
     "_markSessionCompletionUnread",
     "_clearSessionCompletionUnread",
     "_hasSessionCompletionUnread",
+    "_hasUnreadForSession",
 ]
 
 # Helpers that carry the merge/tombstone rules; injected when present.
@@ -111,6 +112,10 @@ _HELPER_FNS = [
     "_readStoredJsonMap",
     "_sessionExistsForUnreadState",
     "_sessionListLoaded",
+    "_sessionViewedCountRecord",
+    "_sessionViewedCountValue",
+    "_sessionViewedRecordWins",
+    "_sessionTranscriptGenerationForUnread",
     "_mergeSessionViewedCounts",
     "_sessionViewedCountDeletedKey",
     "_readSessionViewedCountDeletions",
@@ -161,6 +166,12 @@ let _allSessions = [];
 const _sessionListSnapshotById = new Map();
 const listed = (...ids) => {{ _allSessions = ids.map((sid) => ({{session_id: sid}})); }};
 const readDisk = (key) => JSON.parse(_store[key] || '{{}}');
+const readViewedDisk = () => Object.fromEntries(
+  Object.entries(readDisk(SESSION_VIEWED_COUNTS_KEY)).map(([sid, value]) => [
+    sid,
+    value && typeof value === 'object' ? Number(value.message_count) || 0 : Number(value) || 0,
+  ])
+);
 const setDisk = (key, value) => {{ _store[key] = JSON.stringify(value); }};
 // Aggregate either the legacy whole map or independent per-session records.
 const readAllClears = (client) => client && typeof client.clears === 'function'
@@ -189,6 +200,7 @@ def _client_factory(with_listener: bool = False) -> str:
 function makeClient() {{
   let _sessionViewedCounts = null;
   let _sessionCompletionUnread = null;
+  let _sessionCompletionUnreadClearedMemory = {{}};
   {fns}
   {helpers}
   {handler}
@@ -196,7 +208,7 @@ function makeClient() {{
   return {{
     viewed: (sid) => {{
       const counts = _getSessionViewedCounts();
-      return Object.prototype.hasOwnProperty.call(counts, sid) ? counts[sid] : null;
+      return Object.prototype.hasOwnProperty.call(counts, sid) ? _sessionViewedCountValue(counts[sid]) : null;
     }},
     setViewed: _setSessionViewedCount,
     clearViewed: _clearSessionViewedCount,
@@ -204,6 +216,12 @@ function makeClient() {{
     clearUnread: _clearSessionCompletionUnread,
     writeClear: _writeSessionCompletionUnreadCleared,
     hasUnread: _hasSessionCompletionUnread,
+    hasUnreadFor: (sid, messageCount, transcriptGeneration = 0, transcriptGenerationBaseline = 0) => _hasUnreadForSession({{
+      session_id: sid,
+      message_count: messageCount,
+      transcript_generation: transcriptGeneration,
+      transcript_generation_baseline: transcriptGenerationBaseline,
+    }}),
     clears: (typeof _readSessionCompletionUnreadCleared === 'function')
       ? _readSessionCompletionUnreadCleared
       : () => readDisk(SESSION_COMPLETION_UNREAD_CLEARED_KEY),
@@ -222,7 +240,92 @@ def _script(body: str, with_listener: bool = False) -> str:
     return _HEADER + _client_factory(with_listener) + body
 
 
-# ── Viewed counts: monotonic, repaired, never resurrected ────────────────────
+# ── Viewed counts: generation-scoped, repaired, never resurrected ─────────────
+
+def test_shrink_then_growth_is_unread_in_the_new_transcript_generation():
+    """A pre-shrink high-water mark must not mask new messages after truncation."""
+    out = _run_node(_script("""
+listed('X');
+const A = makeClient();
+A.setViewed('X', 10, 0);
+A.setViewed('X', 2, 1);
+console.log(JSON.stringify({
+  afterShrink: A.viewed('X'),
+  unreadAtThree: A.hasUnreadFor('X', 3, 1),
+}));
+"""))
+    assert out["afterShrink"] == 2
+    assert out["unreadAtThree"] is True
+
+
+def test_first_observation_of_new_generation_keeps_post_shrink_growth_unread():
+    """A coalesced shrink-plus-growth refresh must acknowledge only the shrink baseline."""
+    out = _run_node(_script("""
+listed('X');
+const A = makeClient();
+A.setViewed('X', 10, 0);
+console.log(JSON.stringify({
+  unread: A.hasUnreadFor('X', 3, 1, 2),
+  viewed: A.viewed('X'),
+}));
+"""))
+    assert out == {"unread": True, "viewed": 2}
+
+
+def test_zero_message_baseline_survives_persistence_and_marks_first_message_unread():
+    """Presence of a zero baseline is meaningful; it is not a missing record."""
+    out = _run_node(_script("""
+listed('X');
+const A = makeClient();
+A.setViewed('X', 0, 0);
+console.log(JSON.stringify({
+  diskHasX: Object.prototype.hasOwnProperty.call(readViewedDisk(), 'X'),
+  unreadAtOne: A.hasUnreadFor('X', 1, 0),
+}));
+"""))
+    assert out["diskHasX"] is True
+    assert out["unreadAtOne"] is True
+
+
+def test_in_memory_clear_expiry_uses_recorded_time_not_future_logical_order():
+    """A future logical stamp must not extend the seven-day memory lifetime."""
+    out = _run_node(_script("""
+const A = makeClient();
+_now = 1000;
+A.writeClear('X', 999999999999);
+const initially = A.clears();
+_now += 8 * 24 * 60 * 60 * 1000;
+A.writeClear('Y', 5);
+const expired = A.clears();
+console.log(JSON.stringify({initially, expired}));
+"""))
+    assert out["initially"]["X"] == 999999999999
+    assert "X" not in out["expired"]
+
+
+def test_unread_clear_survives_quota_rejecting_a_new_tombstone_key():
+    """Clearing must still shrink the existing marker map when allocation fails."""
+    out = _run_node(_script("""
+listed('X');
+setDisk(SESSION_COMPLETION_UNREAD_KEY, {
+  X: {message_count: 3, completed_at: 1000, unread_order: 1},
+});
+const A = makeClient();
+const before = A.hasUnread('X');
+const ordinarySetItem = localStorage.setItem;
+localStorage.setItem = (key, value) => {
+  if (!Object.prototype.hasOwnProperty.call(_store, key)) throw new Error('QuotaExceededError');
+  ordinarySetItem(key, value);
+};
+A.clearUnread('X');
+console.log(JSON.stringify({
+  before,
+  after: A.hasUnread('X'),
+  diskHasX: Object.prototype.hasOwnProperty.call(readDisk(SESSION_COMPLETION_UNREAD_KEY), 'X'),
+}));
+"""))
+    assert out == {"before": True, "after": False, "diskHasX": False}
+
 
 def test_stale_client_cannot_roll_a_viewed_count_back():
     """Sequential rollback: a client that saw an older list snapshot must not
@@ -234,7 +337,7 @@ const B = makeClient();
 A.setViewed('X', 417);
 B.setViewed('X', 131);
 console.log(JSON.stringify({
-  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  disk: readViewedDisk(),
   bView: B.viewed('X'),
 }));
 """))
@@ -252,7 +355,7 @@ const A = makeClient();
 A.setViewed('D', 5);
 A.clearViewed('D');
 console.log(JSON.stringify({
-  diskHasD: Object.prototype.hasOwnProperty.call(readDisk(SESSION_VIEWED_COUNTS_KEY), 'D'),
+  diskHasD: Object.prototype.hasOwnProperty.call(readViewedDisk(), 'D'),
 }));
 """))
     assert out["diskHasD"] is False, "clearing a viewed count must remove it from disk"
@@ -275,7 +378,7 @@ const bCached = B.viewed('E');
 B.clearViewed('E');
 console.log(JSON.stringify({
   bCached: bCached,
-  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  disk: readViewedDisk(),
 }));
 """))
     assert out["bCached"] is None, "precondition: B's cache must not hold E"
@@ -302,7 +405,7 @@ const held = A.viewed('X');
 A.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
 console.log(JSON.stringify({
   held: held,
-  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  disk: readViewedDisk(),
 }));
 """))
     assert out["held"] == 417, (
@@ -329,10 +432,10 @@ B.viewed('Y');
 // so A's write (built from the store it read) drops B's entry.
 _onRead = () => { B.setViewed('Y', 999); };
 A.setViewed('X', 417);
-const clobbered = readDisk(SESSION_VIEWED_COUNTS_KEY);
+const clobbered = readViewedDisk();
 // B still holds its own acknowledgement, and now processes A's storage event.
 B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
-const disk = readDisk(SESSION_VIEWED_COUNTS_KEY);
+const disk = readViewedDisk();
 const writesAfterRepair = storageWrites;
 B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
 console.log(JSON.stringify({
@@ -372,7 +475,7 @@ listed('T');
 B.setViewed('T', 1);
 B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
 console.log(JSON.stringify({
-  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  disk: readViewedDisk(),
   tView: B.viewed('T'),
 }));
 """))
@@ -399,7 +502,7 @@ A.clearViewed('S');
 B.handleStorage({ key: SESSION_VIEWED_COUNTS_KEY });
 B.setViewed('T', 1);
 console.log(JSON.stringify({
-  disk: readDisk(SESSION_VIEWED_COUNTS_KEY),
+  disk: readViewedDisk(),
   deletions: readViewedDeletions().length,
   bView: B.viewed('S'),
 }));
@@ -777,7 +880,7 @@ const disk = readDisk(SESSION_COMPLETION_UNREAD_KEY);
 console.log(JSON.stringify({
   handlers: _storageHandlers.length,
   xView: A.viewed('X'),
-  diskX: readDisk(SESSION_VIEWED_COUNTS_KEY).X,
+  diskX: readViewedDisk().X,
   stable: repairStable,
   qStale: qStale,
   qView: A.hasUnread('Q'),

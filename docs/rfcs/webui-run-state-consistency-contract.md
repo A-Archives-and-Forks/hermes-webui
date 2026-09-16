@@ -165,13 +165,21 @@ writes.
 
 | Store | Key | Semantics |
 |---|---|---|
-| Viewed counts | `hermes-session-viewed-counts` | `sid -> N`, meaning "seen at least up to N messages" |
+| Viewed counts | `hermes-session-viewed-counts` | `sid -> {message_count, transcript_generation}`, meaning "seen up to N messages in this transcript generation" |
 | Completion markers | `hermes-session-completion-unread` | `sid -> {message_count, completed_at, ...}` behind the visible dot |
 
-- **Viewed counts merge by maximum.** The fact is monotonic per session and
-  additive across clients, so a save reads the store, merges its cache in with a
-  max, and writes only when the store does not already hold the merged result.
-  A deletion records its own key under
+- **Viewed counts are generation-scoped.** Session mutation routes increment the
+  persisted `transcript_generation` whenever edit, regenerate, retry, undo, clear,
+  or truncate reduces the visible transcript, and record the retained count as
+  `transcript_generation_baseline`. A newer generation replaces an older one even
+  when its count is lower; counts are monotonic only within one generation and
+  merge by maximum there. A client first observing a newer generation acknowledges
+  only that retained baseline, so messages added after the shrink remain unread
+  even when the shrink and later growth arrive in one coalesced sidebar refresh.
+  Legacy numeric records are generation zero and migrate to the structured
+  representation on their next save. This prevents an old pre-truncate high-water
+  mark from masking messages added after a transcript reset. A deletion records
+  its own key under
   `hermes-session-viewed-counts:deleted:v1:<encoded-sid>`; merges drop any count
   whose session has a live deletion record, so a client that still caches the
   acknowledgement prunes it instead of writing it back. List membership cannot
@@ -205,7 +213,15 @@ writes.
   pruned by age (7 days) and supersession only — never by session existence,
   because the sidebar list is filtered by profile, project, and source, so an
   absent row may simply be hidden. They are never part of the marker map
-  consumers read.
+  consumers read. A clear order is retained in module memory even when storage
+  quota prevents allocating its versioned key; the client still attempts the
+  smaller write that removes the marker from the existing marker map, so a user
+  can dismiss unread state under storage pressure. Logical clear order and
+  retention time are separate: records compare markers using their order stamp,
+  but the 7-day cap uses the wall-clock time at which the record was written, so
+  a future logical stamp cannot extend retention indefinitely. The in-memory
+  fallback lasts until reload, while successfully persisted records retain the
+  same 7-day policy.
 - **Cross-client repair, not cache invalidation.** The `storage` listener routes a
   changed unread key (including any per-session clear key) back through the same
   merge instead of only dropping the local cache. A client that still holds an

@@ -19,6 +19,10 @@ _HELPER_NAMES = (
     "_readStoredJsonMap",
     "_sessionExistsForUnreadState",
     "_sessionListLoaded",
+    "_sessionViewedCountRecord",
+    "_sessionViewedCountValue",
+    "_sessionViewedRecordWins",
+    "_sessionTranscriptGenerationForUnread",
     "_mergeSessionViewedCounts",
     "_sessionViewedCountDeletedKey",
     "_readSessionViewedCountDeletions",
@@ -83,6 +87,7 @@ def _const_source(name: str) -> str:
 
 # Ready to interpolate into a node harness.
 BLOCK = "\n".join(
-    [_const_source(name) for name in _CONST_NAMES]
+    ["var _sessionCompletionUnreadClearedMemory = {};\n"]
+    + [_const_source(name) for name in _CONST_NAMES]
     + [_function_source(name) for name in _HELPER_NAMES if f"function {name}(" in SESSIONS_JS]
 )

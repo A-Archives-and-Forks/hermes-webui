@@ -212,7 +212,7 @@ const before = Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(
 _acknowledgeSessionVisit('open', 5, 10);
 const after = Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'open');
 const snap = _sessionListSnapshotById.get('open');
-console.log(JSON.stringify({{before, after, repaints, viewed: _getSessionViewedCounts()['open'], snap}}));
+console.log(JSON.stringify({{before, after, repaints, viewed: _sessionViewedCountValue(_getSessionViewedCounts()['open']), snap}}));
 """
     out = _run_node(script)
     assert out["before"] is True, "precondition: marker seeded"
@@ -419,12 +419,13 @@ function _hasMarker() {{
   _releaseApi({{ session: {{ session_id: 'open', message_count: 6, messages: [{{ role: 'assistant', content: 'x' }}] }} }});
   await p;
   const markerAfter = _hasMarker();
-  const viewed = _getSessionViewedCounts()['open'];
+  const viewedRecord = _getSessionViewedCounts()['open'];
+  const viewed = viewedRecord === undefined ? null : _sessionViewedCountValue(viewedRecord);
   console.log(JSON.stringify({{
     apiIssued,
     markerBefore,
     markerAfter,
-    viewed: viewed === undefined ? null : viewed,
+    viewed,
   }}));
 }})();
 """

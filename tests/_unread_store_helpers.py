@@ -32,6 +32,7 @@ _HELPER_NAMES = (
     "_nextSessionCompletionUnreadOrder",
     "_sessionCompletionUnreadClearedKey",
     "_parseSessionCompletionUnreadClearedKey",
+    "_readPersistedSessionCompletionUnreadCleared",
     "_readSessionCompletionUnreadCleared",
     "_mergeSessionCompletionUnread",
     "_writeSessionCompletionUnreadCleared",

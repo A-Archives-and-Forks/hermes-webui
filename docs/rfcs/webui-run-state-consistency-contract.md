@@ -210,14 +210,17 @@ writes.
   A client still running the previous revision therefore does not observe clears
   recorded after the migration; that reload boundary is deliberate, because a
   dual write cannot make the shared blob concurrency-safe. Versioned records are
-  pruned by age (7 days) and supersession only — never by session existence,
-  because the sidebar list is filtered by profile, project, and source, so an
-  absent row may simply be hidden. They are never part of the marker map
-  consumers read. A clear order is retained in module memory even when storage
-  quota prevents allocating its versioned key; the client still attempts the
-  smaller write that removes the marker from the existing marker map, so a user
-  can dismiss unread state under storage pressure. Logical clear order and
-  retention time are separate: records compare markers using their order stamp,
+  pruned by age (7 days), or when a newer ordering fact for that session was
+  successfully persisted — never by an in-memory-only superseding clear and never
+  by session existence, because the sidebar list is filtered by profile, project,
+  and source, so an absent row may simply be hidden. They are never part of the
+  marker map consumers read. A clear order is retained in module memory even when
+  storage quota prevents allocating its versioned key; the client still attempts
+  the smaller write that removes the marker from the existing marker map, so a user
+  can dismiss unread state under storage pressure. The failed allocation also
+  leaves any older durable clear record in place so reload does not lose the last
+  persisted ordering fact. Logical clear order and retention time are separate:
+  records compare markers using their order stamp,
   but the 7-day cap uses the wall-clock time at which the record was written, so
   a future logical stamp cannot extend retention indefinitely. The in-memory
   fallback lasts until reload, while successfully persisted records retain the

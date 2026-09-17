@@ -125,6 +125,7 @@ _HELPER_FNS = [
     "_nextSessionCompletionUnreadOrder",
     "_sessionCompletionUnreadClearedKey",
     "_parseSessionCompletionUnreadClearedKey",
+    "_readPersistedSessionCompletionUnreadCleared",
     "_readSessionCompletionUnreadCleared",
     "_mergeSessionCompletionUnread",
     "_writeSessionCompletionUnreadCleared",
@@ -325,6 +326,36 @@ console.log(JSON.stringify({
 }));
 """))
     assert out == {"before": True, "after": False, "diskHasX": False}
+
+
+def test_quota_failed_clear_keeps_the_older_durable_tombstone_after_reload():
+    """An in-memory-only higher clear must not prune the durable ordering fact."""
+    out = _run_node(_script("""
+listed('X');
+const oldClearKey = `${SESSION_COMPLETION_UNREAD_CLEARED_PREFIX}${encodeURIComponent('X')}:2000`;
+_store[oldClearKey] = '1000';
+const A = makeClient();
+const ordinarySetItem = localStorage.setItem;
+localStorage.setItem = (key, value) => {
+  if (!Object.prototype.hasOwnProperty.call(_store, key)) throw new Error('QuotaExceededError');
+  ordinarySetItem(key, value);
+};
+// This advances X to 2001 in A's memory, but quota rejects that new durable key.
+A.clearUnread('X');
+const durableAfterClear = Object.prototype.hasOwnProperty.call(_store, oldClearKey);
+// Simulate a reload, then a stale client restoring a marker the durable clear
+// already outranks. Module memory is gone; only localStorage may suppress it.
+const B = makeClient();
+setDisk(SESSION_COMPLETION_UNREAD_KEY, {
+  X: {message_count: 3, completed_at: 1500, unread_order: 1500},
+});
+B.handleStorage({ key: oldClearKey });
+console.log(JSON.stringify({
+  durableAfterClear,
+  unreadAfterReload: B.hasUnread('X'),
+}));
+"""))
+    assert out == {"durableAfterClear": True, "unreadAfterReload": False}
 
 
 def test_stale_client_cannot_roll_a_viewed_count_back():

@@ -744,10 +744,10 @@ function _parseSessionCompletionUnreadClearedKey(key) {
   return { sid, version };
 }
 
-// Read the legacy whole-map key plus independent versioned clear records. A
-// clear writes a new key rather than replacing an older operation, so readers
-// can fold the maximum timestamp without a cross-context compare-and-set.
-function _readSessionCompletionUnreadCleared() {
+// Read persisted clear ordering independently from the in-memory fallback. The
+// distinction matters during pruning: a higher clear that failed quota and lives
+// only in memory must not delete the older durable record it supersedes.
+function _readPersistedSessionCompletionUnreadCleared() {
   // Snapshot keys before values. A clear that starts after this operation began
   // is deliberately excluded, so a marker prepared first gets the same logical
   // order and loses the clear-wins tie. A marker started after a completed clear
@@ -757,16 +757,6 @@ function _readSessionCompletionUnreadCleared() {
     keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
   } catch (_) {}
   const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
-  const now = Date.now();
-  for (const [sid, memoryRecord] of Object.entries(_sessionCompletionUnreadClearedMemory || {})) {
-    const value = Number(memoryRecord && memoryRecord.order) || 0;
-    const recordedAt = Number(memoryRecord && memoryRecord.recorded_at) || 0;
-    if (recordedAt && now - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS) {
-      delete _sessionCompletionUnreadClearedMemory[sid];
-      continue;
-    }
-    if (value > (Number(cleared[sid]) || 0)) cleared[sid] = value;
-  }
   try {
     for (const key of keys) {
       const parsed = _parseSessionCompletionUnreadClearedKey(key);
@@ -777,6 +767,23 @@ function _readSessionCompletionUnreadCleared() {
     }
   } catch (_) {
     // A storage implementation that cannot enumerate still retains legacy data.
+  }
+  return cleared;
+}
+
+// Combine durable clear ordering with this client's in-memory fallback. The
+// fallback keeps the current window correct when quota rejects a new key.
+function _readSessionCompletionUnreadCleared() {
+  const cleared = _readPersistedSessionCompletionUnreadCleared();
+  const now = Date.now();
+  for (const [sid, memoryRecord] of Object.entries(_sessionCompletionUnreadClearedMemory || {})) {
+    const value = Number(memoryRecord && memoryRecord.order) || 0;
+    const recordedAt = Number(memoryRecord && memoryRecord.recorded_at) || 0;
+    if (recordedAt && now - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS) {
+      delete _sessionCompletionUnreadClearedMemory[sid];
+      continue;
+    }
+    if (value > (Number(cleared[sid]) || 0)) cleared[sid] = value;
   }
   return cleared;
 }
@@ -931,7 +938,7 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
     try { localStorage.removeItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY); } catch (_) {}
   }
 
-  const cleared = _readSessionCompletionUnreadCleared();
+  const persistedCleared = _readPersistedSessionCompletionUnreadCleared();
   let keys = [];
   try {
     keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
@@ -943,11 +950,10 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
       const recordedAt = Number(localStorage.getItem(key)) || 0;
       const version = parsed.version || recordedAt;
       const expired = recordedAt > 0 && Date.now() - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS;
-      const superseded = version < (Number(cleared[parsed.sid]) || 0);
-      // Records are pruned by age and supersession only. Session existence is
-      // not a pruning signal: the sidebar list is filtered by profile, project,
-      // and source, so a session missing from it may simply be hidden, and
-      // dropping its clear record would re-light a cleared dot.
+      const superseded = version < (Number(persistedCleared[parsed.sid]) || 0);
+      // Prune by age, or when a newer ordering fact is itself durable. A
+      // memory-only clear may keep this window correct under quota pressure, but
+      // it cannot safely replace the older record across reload.
       if (expired || superseded) localStorage.removeItem(key);
     } catch (_) {}
   }

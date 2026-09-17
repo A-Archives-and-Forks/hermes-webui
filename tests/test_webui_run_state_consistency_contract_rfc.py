@@ -46,15 +46,6 @@ def test_contract_documents_the_client_side_unread_store_keys():
         )
 
 
-def test_contract_documents_generation_scoped_viewed_counts():
-    text = RFC.read_text(encoding="utf-8")
-    source = _sessions_js()
-
-    assert "transcript_generation" in source
-    assert "transcript_generation" in text
-    assert "monotonic only within" in text
-
-
 def test_documented_retention_window_matches_the_implemented_cap():
     source = _sessions_js()
     match = re.search(

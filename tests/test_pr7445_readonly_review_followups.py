@@ -15,9 +15,13 @@ Contract under test:
   query string is always the strict ``mode=ro``;
 * ``scripts/ensure_state_db_read_indexes.py`` imports and runs its no-lock path
   on a platform without ``fcntl`` (native Windows), and refuses ``--lock-file``
-  there with a clear error instead of an ``ImportError`` at import time.
+  there with a clear error instead of an ``ImportError`` at import time;
+* on the ``msvcrt`` branch the tool locks byte 0 of the lock file only after
+  making sure that byte exists, so a fresh (empty) ``--lock-file`` is acquired
+  without relying on the CRT's beyond-EOF locking behaviour.
 """
 import importlib
+import os
 import sqlite3
 import sys
 from contextlib import closing
@@ -260,3 +264,88 @@ def test_maintenance_cli_without_lock_file_works_without_fcntl(tmp_path, mainten
     module.main()
     out = capsys.readouterr().out
     assert '"idx_messages_session": "created"' in out
+
+
+# --------------------------------------------------------------------------
+# 4. The Windows lock branch acquires a fresh (empty) lock file.
+# --------------------------------------------------------------------------
+
+class _StrictMsvcrt:
+    """Stand-in for ``msvcrt`` that, like Windows, refuses to lock past EOF.
+
+    Records every ``locking`` call with the file size at the current offset so
+    the test can prove byte 0 existed when the lock was taken.
+    """
+
+    LK_NBLCK = 2
+    LK_UNLCK = 0
+
+    def __init__(self):
+        self.calls = []
+
+    def locking(self, fd, mode, nbytes):
+        offset = os.lseek(fd, 0, os.SEEK_CUR)
+        size = os.fstat(fd).st_size
+        self.calls.append((mode, offset, nbytes, size))
+        if mode == self.LK_NBLCK and offset + nbytes > size:
+            raise OSError(36, "Resource deadlock avoided: lock region beyond end of file")
+
+
+def test_windows_lock_branch_acquires_a_fresh_empty_lock_file(tmp_path, maintenance_without_fcntl, monkeypatch):
+    module = maintenance_without_fcntl
+    assert module.fcntl is None  # the fixture already routes the tool to the msvcrt branch
+    fake = _StrictMsvcrt()
+    monkeypatch.setattr(module, "msvcrt", fake)
+
+    path = tmp_path / "state.db"
+    _maintenance_schema(path)
+    lock = tmp_path / "turns.lock"
+    assert not lock.exists()
+
+    result = module.ensure_read_indexes(path, confirmed_drained=True, lock_file=lock)
+
+    assert set(result.values()) == {"created"}
+    # Exactly one non-blocking lock on byte 0, taken while that byte existed.
+    assert fake.calls == [(fake.LK_NBLCK, 0, 1, 1)]
+    assert lock.stat().st_size == 1
+    with closing(sqlite3.connect(str(path))) as conn:
+        names = {row[1] for row in conn.execute("PRAGMA index_list(messages)")}
+    assert "idx_messages_session" in names
+
+
+def test_windows_lock_branch_keeps_an_existing_lock_file_intact(tmp_path, maintenance_without_fcntl, monkeypatch):
+    module = maintenance_without_fcntl
+    fake = _StrictMsvcrt()
+    monkeypatch.setattr(module, "msvcrt", fake)
+
+    path = tmp_path / "state.db"
+    _maintenance_schema(path)
+    lock = tmp_path / "turns.lock"
+    lock.write_bytes(b"deployment-owned\n")
+
+    module.ensure_read_indexes(path, confirmed_drained=True, lock_file=lock)
+
+    assert fake.calls == [(fake.LK_NBLCK, 0, 1, len(b"deployment-owned\n"))]
+    assert lock.read_bytes() == b"deployment-owned\n"
+
+
+def test_windows_lock_branch_reports_a_held_lock_without_touching_the_db(tmp_path, maintenance_without_fcntl, monkeypatch):
+    module = maintenance_without_fcntl
+
+    class _HeldMsvcrt(_StrictMsvcrt):
+        def locking(self, fd, mode, nbytes):
+            super().locking(fd, mode, nbytes)
+            raise PermissionError(13, "Permission denied: lock held")
+
+    fake = _HeldMsvcrt()
+    monkeypatch.setattr(module, "msvcrt", fake)
+    path = tmp_path / "state.db"
+    _maintenance_schema(path)
+    lock = tmp_path / "turns.lock"
+
+    with pytest.raises(PermissionError):
+        module.ensure_read_indexes(path, confirmed_drained=True, lock_file=lock)
+
+    assert fake.calls == [(fake.LK_NBLCK, 0, 1, 1)]
+    with closing(sqlite3.connect(str(path))) as conn:
+        assert conn.execute("PRAGMA index_list(messages)").fetchall() == []

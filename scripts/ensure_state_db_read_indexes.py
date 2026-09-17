@@ -26,6 +26,7 @@ silently replaced.
 import argparse
 from contextlib import closing, nullcontext
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -64,6 +65,12 @@ def _exclusive_lock(lock_file):
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         else:
             # Lock one byte at offset 0 without blocking; raises OSError when held.
+            # ``a+`` may have just created an empty file, and Windows cannot lock
+            # a range beyond EOF, so make sure byte 0 exists first. An existing
+            # (deployment-owned) lock file is left untouched.
+            if os.fstat(handle.fileno()).st_size == 0:
+                handle.write("\n")
+                handle.flush()
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     except BaseException:

@@ -1104,7 +1104,9 @@ async function cmdTheme(args){
 // Subcommands owned by the agent's own /skills write-approval handler
 // (hermes_cli/write_approval_commands.py via gateway/slash_commands.py) — these must
 // fall through to the normal send path rather than be swallowed by the local search below.
-const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','reject','diff','approval','mode'];
+// Includes every alias that handler accepts: approve/apply, reject/deny/drop, approval/mode.
+// Keep in sync with handle_pending_subcommand() — a missing alias is silently swallowed here.
+const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
 
 function cmdSkills(args){
   const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();

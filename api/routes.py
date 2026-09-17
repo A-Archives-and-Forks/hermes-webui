@@ -20775,7 +20775,12 @@ def _handle_media(handler, parsed):
         "video/mp4", "video/quicktime", "video/webm", "video/ogg",
         "application/pdf",
     }
-    _SESSION_MEDIA_TOKEN_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | {"text/html"}
+    # Archives are download-only: never added to the inline-preview sets below,
+    # so they always get Content-Disposition: attachment.
+    _ARCHIVE_TYPES = {"application/zip"}
+    _SESSION_MEDIA_TOKEN_TYPES = (
+        _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | _ARCHIVE_TYPES | {"text/html"}
+    )
     session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
         target,
@@ -28836,7 +28841,8 @@ def _mcp_runtime_status_by_name() -> dict[str, dict]:
     is unavailable, fall back to an empty map so the API remains safe.
     """
     try:
-        from tools.mcp_tool import get_mcp_status
+        from api.agent_compat import agent_attr
+        get_mcp_status = agent_attr("tools.mcp_tool", "get_mcp_status", "tools.mcp_tool_discovery")
         statuses = get_mcp_status()
     except Exception:
         return {}

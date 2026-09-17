@@ -7777,7 +7777,15 @@ function renderMd(raw){
   s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
+  // Protect <br> inside markdown table rows so converting <br> to \n does not destroy the table
+  s=s.split('\n').map(line=>{
+    if(/^\s*\|.*\|\s*$/.test(line)){
+      return line.replace(/<br\s*\/?>/gi,'\x00BR\x00');
+    }
+    return line;
+  }).join('\n');
   s=s.replace(/<br\s*\/?>/gi,'\n');
+  s=s.replace(/\x00BR\x00/g,'<br>');
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:
@@ -7815,7 +7823,7 @@ function renderMd(raw){
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
-    t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
     // Strikethrough: ~~text~~ → <del>text</del>
     t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
@@ -7835,7 +7843,7 @@ function renderMd(raw){
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
-    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img)([\s>]|$)/i;
+    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img|br)([\s>]|$)/i;
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
     return t;
   }
@@ -7845,7 +7853,7 @@ function renderMd(raw){
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
-  s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=s.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);

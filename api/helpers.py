@@ -9,6 +9,7 @@ import logging
 import os
 import re as _re
 import ssl
+import sys
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
@@ -472,31 +473,26 @@ _redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
 # thousands of small recurring strings that actually benefit, or balloon RSS.
 _REDACT_CACHE_MAX_TEXT_LEN = 16384
 
-# Strings above that threshold used to bypass memoization entirely and re-run
-# the full ~15-pass redactor on every request. On a real 22MB session that was
-# 59 large strings (29 unique, 0.76MB) costing 1.68s per request — 99.9% of the
-# recurring redaction cost once the small-string cache is warm, paid again by
-# every tab and every poll for a byte-identical result.
+# Strings above that threshold deliberately stay UNCACHED and re-run the full
+# redactor on every request, even though they dominate the recurring cost of a
+# large session (measured: 59 large strings, 29 unique, 1.68s per request on a
+# real 22MB session). Memoizing them by input text alone is not safe:
+# ``agent.redact.register_redaction_patterns()`` lets a plugin extend the
+# secret matcher at runtime, and the installed registry exposes neither a
+# policy generation the cache key could include nor a hook that could clear
+# it. A large blob primed before such a registration would keep being served
+# with the newly-registered secret intact through session, SSE and
+# public-share projections. Until the agent registry exposes a generation,
+# large strings fail closed.
 #
-# They get their own small cache instead of sharing the 4096-entry one, so a
-# large blob can never evict the thousands of small recurring strings. Both the
-# entry count and the per-entry size are capped, which bounds retained bytes to
-# roughly _REDACT_LARGE_CACHE_SIZE * _REDACT_LARGE_CACHE_MAX_TEXT_LEN (key plus
-# value). Anything larger stays uncached: unbounded growth is the failure mode
-# this threshold exists to prevent.
-_REDACT_LARGE_CACHE_MAX_TEXT_LEN = 131072
-_REDACT_LARGE_CACHE_SIZE = 64
-
-_redact_fn_large_lru = functools.lru_cache(maxsize=_REDACT_LARGE_CACHE_SIZE)(
-    _redact_fn_uncached
-)
+# tests/test_redact_large_string_cache.py pins this against the real agent
+# registry: prime a large string, register a pattern, the next response must
+# be redacted.
 
 
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
-        if len(text) > _REDACT_LARGE_CACHE_MAX_TEXT_LEN:
-            return _redact_fn_uncached(text)
-        return _redact_fn_large_lru(text)
+        return _redact_fn_uncached(text)
     return _redact_fn_lru(text)
 
 
@@ -593,11 +589,21 @@ _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-
 # C-level algorithm, and a large regex alternation has to try each branch at
 # each position. Memoizing the verdict avoids the scan entirely instead.
 #
-# Bounds mirror the redaction caches: capping entry count and per-entry size
-# keeps retained bytes to roughly size * max_len, so a burst of giant unique
-# blobs cannot balloon RSS. Oversized strings simply run the scan uncached.
+# Bounds: the cache retains the raw text as its key, so what matters for RSS
+# is the object's byte size, not its character count -- a 16k-character
+# string of 4-byte code points is ~64 KiB, and 8192 of them would pin ~512 MiB
+# for the process lifetime. Each entry is therefore gated on
+# ``sys.getsizeof(text)`` (O(1), counts the actual allocation, width-aware),
+# and the entry count is capped, which gives a hard ceiling on retained key
+# bytes of _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+# (16 MiB) plus lru_cache's fixed per-entry link overhead. Values are the two
+# bool singletons and cost nothing. Strings above the byte gate -- clean or
+# sensitive -- simply run the scan uncached and are never retained.
 _SENSITIVE_PREFILTER_CACHE_SIZE = 8192
-_SENSITIVE_PREFILTER_MAX_TEXT_LEN = 16384
+_SENSITIVE_PREFILTER_MAX_ENTRY_BYTES = 2048
+_SENSITIVE_PREFILTER_MAX_RETAINED_KEY_BYTES = (
+    _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+)
 
 
 def _might_contain_sensitive_text_uncached(text: str) -> bool:
@@ -626,12 +632,13 @@ _might_contain_sensitive_text_lru = functools.lru_cache(
 def _might_contain_sensitive_text(text: str) -> bool:
     """Memoized wrapper around the prefilter.
 
-    Falls back to the uncached scan for non-strings and oversized text so the
-    cache can never be poisoned by an unhashable value or grow unbounded.
+    Falls back to the uncached scan for non-strings and for any string whose
+    object size exceeds the per-entry byte gate, so the cache can never be
+    poisoned by an unhashable value and its retained bytes stay hard-bounded.
     """
     if not isinstance(text, str) or not text:
         return False
-    if len(text) > _SENSITIVE_PREFILTER_MAX_TEXT_LEN:
+    if sys.getsizeof(text) > _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES:
         return _might_contain_sensitive_text_uncached(text)
     return _might_contain_sensitive_text_lru(text)
 

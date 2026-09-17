@@ -18,7 +18,9 @@ Contract under test:
   there with a clear error instead of an ``ImportError`` at import time;
 * on the ``msvcrt`` branch the tool locks byte 0 of the lock file only after
   making sure that byte exists, so a fresh (empty) ``--lock-file`` is acquired
-  without relying on the CRT's beyond-EOF locking behaviour.
+  without relying on the CRT's beyond-EOF locking behaviour; that byte is
+  written as exactly one byte even under the ``\\n`` → ``\\r\\n`` translation
+  native Windows applies to text-mode handles.
 """
 import importlib
 import os
@@ -291,7 +293,20 @@ class _StrictMsvcrt:
             raise OSError(36, "Resource deadlock avoided: lock region beyond end of file")
 
 
-def test_windows_lock_branch_acquires_a_fresh_empty_lock_file(tmp_path, maintenance_without_fcntl, monkeypatch):
+@pytest.fixture
+def windows_text_mode(maintenance_without_fcntl, monkeypatch):
+    """Make the tool's text-mode ``open`` translate ``\\n`` to ``\\r\\n`` as on native Windows."""
+    real_open = open
+
+    def crlf_text_open(file, mode="r", *args, **kwargs):
+        if "b" not in mode:
+            kwargs.setdefault("newline", "\r\n")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_without_fcntl, "open", crlf_text_open, raising=False)
+
+
+def test_windows_lock_branch_acquires_a_fresh_empty_lock_file(tmp_path, maintenance_without_fcntl, windows_text_mode, monkeypatch):
     module = maintenance_without_fcntl
     assert module.fcntl is None  # the fixture already routes the tool to the msvcrt branch
     fake = _StrictMsvcrt()
@@ -305,7 +320,8 @@ def test_windows_lock_branch_acquires_a_fresh_empty_lock_file(tmp_path, maintena
     result = module.ensure_read_indexes(path, confirmed_drained=True, lock_file=lock)
 
     assert set(result.values()) == {"created"}
-    # Exactly one non-blocking lock on byte 0, taken while that byte existed.
+    # Exactly one non-blocking lock on byte 0, taken while that byte existed
+    # and was the only one: no newline translation may inflate the file.
     assert fake.calls == [(fake.LK_NBLCK, 0, 1, 1)]
     assert lock.stat().st_size == 1
     with closing(sqlite3.connect(str(path))) as conn:
@@ -329,7 +345,7 @@ def test_windows_lock_branch_keeps_an_existing_lock_file_intact(tmp_path, mainte
     assert lock.read_bytes() == b"deployment-owned\n"
 
 
-def test_windows_lock_branch_reports_a_held_lock_without_touching_the_db(tmp_path, maintenance_without_fcntl, monkeypatch):
+def test_windows_lock_branch_reports_a_held_lock_without_touching_the_db(tmp_path, maintenance_without_fcntl, windows_text_mode, monkeypatch):
     module = maintenance_without_fcntl
 
     class _HeldMsvcrt(_StrictMsvcrt):

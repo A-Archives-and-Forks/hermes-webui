@@ -67,9 +67,11 @@ def _exclusive_lock(lock_file):
             # Lock one byte at offset 0 without blocking; raises OSError when held.
             # ``a+`` may have just created an empty file, and Windows cannot lock
             # a range beyond EOF, so make sure byte 0 exists first. An existing
-            # (deployment-owned) lock file is left untouched.
+            # (deployment-owned) lock file is left untouched. Write the byte on
+            # the descriptor: a text-mode ``handle.write("\n")`` becomes two
+            # bytes (``\r\n``) on native Windows.
             if os.fstat(handle.fileno()).st_size == 0:
-                handle.write("\n")
+                os.write(handle.fileno(), b"\0")
                 handle.flush()
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)

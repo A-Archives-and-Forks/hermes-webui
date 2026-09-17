@@ -619,15 +619,31 @@ def test_completion_unread_clears_only_when_session_is_opened():
 def test_historical_sessions_are_not_marked_unread_on_first_list_render():
     """First observation establishes a read baseline instead of inventing unread."""
     out = _run_unread_behavior("""
-const unread = _hasUnreadForSession({
+const session = {
   session_id: 'X', message_count: 5, transcript_generation: 3,
   transcript_generation_baseline: 0,
-});
+};
+const first = _hasUnreadForSession(session);
+// A first render that fabricates a completion-unread marker while still
+// returning false would surface as unread on the next render (in-memory
+// cache) or after a reload (persisted store), so inspect both before the
+// second call.
+const cachedMarker = Boolean(
+  _sessionCompletionUnread &&
+  Object.prototype.hasOwnProperty.call(_sessionCompletionUnread, 'X')
+);
+const persistedMarker = Object.prototype.hasOwnProperty.call(
+  JSON.parse(store[SESSION_COMPLETION_UNREAD_KEY] || '{}'), 'X'
+);
+const second = _hasUnreadForSession(session);
 const viewed = JSON.parse(store[SESSION_VIEWED_COUNTS_KEY]).X;
-console.log(JSON.stringify({unread, viewed}));
+console.log(JSON.stringify({first, second, cachedMarker, persistedMarker, viewed}));
 """)
     assert out == {
-        "unread": False,
+        "first": False,
+        "second": False,
+        "cachedMarker": False,
+        "persistedMarker": False,
         "viewed": {"message_count": 5, "transcript_generation": 3},
     }
 

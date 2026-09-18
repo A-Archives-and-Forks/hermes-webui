@@ -106,8 +106,9 @@ function _jumpToMessage(rawIdx) {
   // Row is outside the render window — reload the full session and retry.
   // Request the COMPLETE transcript via the explicit msg_limit=all escape
   // hatch: the target row is addressed by absolute index (msg-user-<rawIdx>),
-  // so a bounded tail window would miss early rows. (The server now defaults
-  // bare requests to a bounded window, so the full transcript must be opt-in.)
+  // so a bounded tail window would miss early rows. The bare no-limit shape
+  // is not used here intentionally — full-transcript intent must be explicit
+  // so recovery paths stay bounded (#7310/#7625).
   if (typeof api !== 'function') return;
   if (S.busy || S.activeStreamId) return;
   api('/api/session?session_id=' + encodeURIComponent(sid) +

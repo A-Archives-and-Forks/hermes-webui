@@ -6883,6 +6883,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        // A bounded cancel-recovery reload returns a tail window: keep the
+        // Load-earlier paging gate honest instead of hardcoding "not truncated"
+        // (#7310/#7625).
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         clearLiveToolCards();if(!assistantText)removeThinking();
         _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
@@ -6902,8 +6907,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
           // Fetch latest session from server to get accurate message list (includes cancel status)
           // This ensures messages stay in sync with server, fixing race condition where local
-          // "*Task cancelled.*" message gets lost when done event overwrites S.messages
-          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          // "*Task cancelled.*" message gets lost when done event overwrites S.messages.
+          // Bounded tail: a bare reload used to pull and re-redact the whole transcript
+          // on every cancel recovery (#7310/#7625).
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
@@ -6993,7 +7000,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      // Bounded tail: a bare reload used to pull and re-redact the whole
+      // transcript on every stream-end settle/reconnect recovery (#7310/#7625).
+      // The Load-earlier paging gate is restored from the response below.
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -7047,6 +7057,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
+        // Bounded settle reload returns a tail window: keep the Load-earlier
+        // paging gate honest instead of leaving the previous (possibly full)
+        // transcript's truncation state stale (#7310/#7625).
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         if(S.session&&S.session.session_id){

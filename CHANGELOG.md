@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/skills pending` and the other write-approval subcommands reach the agent again.** The WebUI's local `/skills` handler swallowed every argument into its own skill-name search, so the agent-owned write-approval subcommands never reached their handler — `/skills pending`, `/skills approve 3`, `/skills diff` and friends silently ran a name search instead of doing anything. Those subcommands now fall through to the normal send path using the existing opt-out contract that `/reasoning` already uses. Covers every alias the agent handler accepts, including `apply`, `deny` and `drop`, which a first pass missed. Thanks @totalitarian. (#7623)
+- **Disabled skills are no longer offered by the slash-command picker.** Skills in `skills.disabled` are already excluded from the backend skill-command map, but the WebUI listed every `/api/skills` entry regardless — so a disabled skill stayed selectable in both `/use <skill>` sub-args and the `/`-prefix skill suggestions. Both surfaces now share one filter. Switching profiles is also fenced: an `/api/skills` reply still in flight when the switch lands can no longer commit, so a payload generated for the outgoing profile cannot keep hiding a skill that is enabled in the new one. Separately, a transient `/api/skills` failure no longer wedges the picker — readiness was previously published even when the request rejected, which left an empty cache marked authoritative and stopped the composer from ever retrying until a page reload. Thanks @webtecnica. (#7511, #7509)
+
 ### Documentation
 
 - **`AGENTS.md` now routes contributors to the references that match their change.** The old "read first" list asked for four files up front regardless of what was being changed, and carried a compressed copy of the ten change guidelines that `docs/GUIDELINES.md` owns. It now maps each reference to the kind of work it applies to and states explicit completion/verification criteria instead. No information is lost — the ten rules remain in `docs/GUIDELINES.md`, which the new version still points to. Thanks @steveafrost. (#7593)

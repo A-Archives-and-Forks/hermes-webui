@@ -816,17 +816,20 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
     filter_idx = restore.index("S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);")
     attach_idx = restore.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = restore.index("syncTopbar();renderMessages({preserveScroll:true})")
-    assert carry_idx < filter_idx < attach_idx < render_idx
+    offset_idx = restore.index("_oldestIdx=session._messages_offset||0")
+    assert offset_idx < carry_idx < filter_idx < attach_idx < render_idx
+    assert "_stagedMatchesCurrentSuffix" in restore
 
 
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     cancel = _event_listener_body(MESSAGES_JS, "cancel")
 
     fetch_idx = cancel.index("const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
+    offset_idx = cancel.index("_oldestIdx=sessionPayload._messages_offset||0")
     attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
-    assert fetch_idx < attach_idx < carry_idx < render_idx
+    assert fetch_idx < offset_idx < attach_idx < carry_idx < render_idx
 
     embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
     # #7310/#7625: the HTTP fallback is a bounded tail now (full-transcript

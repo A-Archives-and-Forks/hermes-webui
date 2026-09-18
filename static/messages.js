@@ -6640,6 +6640,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
+            // Same persist-before-offset trap as settle/cancel: refresh paging
+            // before attaching the projected scene (#7628).
+            if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!d.session._messages_truncated;
+            if(typeof _oldestIdx!=='undefined') _oldestIdx=d.session._messages_offset||0;
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             if(S.session&&S.session.session_id){
@@ -6881,13 +6885,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
-        _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
-        S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         // A bounded cancel-recovery reload returns a tail window: keep the
-        // Load-earlier paging gate honest instead of hardcoding "not truncated"
-        // (#7310/#7625).
+        // Load-earlier paging gate honest, and refresh _oldestIdx BEFORE
+        // persisting the projected scene (#7310/#7625/#7628).
         if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
         if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
+        _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
+        S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         clearLiveToolCards();if(!assistantText)removeThinking();
         _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
@@ -7037,6 +7041,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
+        // Restore paging from the bounded tail BEFORE attaching/persisting the
+        // projected scene: _persistSettledAnchorScene reads _oldestIdx to
+        // compute the absolute transcript index (#7628).
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
+        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
+        if(S.session&&S.session.session_id){
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+        }
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);
         const _currentVisibleEndsWithTerminalMarker=(
           _currentVisibleMessages.length>0 &&
@@ -7052,22 +7066,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return !!stagedKey && stagedKey===currentKey;
           })
         );
-        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&_stagedMatchesCurrentPrefix;
+        // Bounded settle returns a suffix of the durable transcript, not a
+        // prefix of the currently visible window. On a long session the
+        // prefix check fails and would drop the terminal recovery marker
+        // (#7628). Treat a suffix match the same as a prefix match.
+        const _durableVisibleCount=_currentVisibleEndsWithTerminalMarker
+          ? _currentVisibleMessages.length-1
+          : _currentVisibleMessages.length;
+        const _stagedSuffixStart=_durableVisibleCount-_stagedMessages.length;
+        const _stagedMatchesCurrentSuffix=(
+          _stagedMessages.length>0 &&
+          _stagedSuffixStart>=0 &&
+          _stagedMessages.length<_currentVisibleMessages.length &&
+          _currentVisibleEndsWithTerminalMarker &&
+          _stagedMessages.every((message, idx)=>{
+            const stagedKey=_messageIdentityKey(message);
+            const currentKey=_messageIdentityKey(_currentVisibleMessages[_stagedSuffixStart+idx]);
+            return !!stagedKey && stagedKey===currentKey;
+          })
+        );
+        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&(_stagedMatchesCurrentPrefix||_stagedMatchesCurrentSuffix);
         const _resolvedMessages=_preserveCurrentTranscript
-          ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
+          ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMatchesCurrentPrefix?_stagedMessages.length:_stagedSuffixStart+_stagedMessages.length)]
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-        if(S.session&&S.session.session_id){
-          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-        }
-        // Bounded settle reload returns a tail window: keep the Load-earlier
-        // paging gate honest (#7310/#7625).
-        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
-        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
-        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{

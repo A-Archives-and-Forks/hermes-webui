@@ -111,10 +111,55 @@ def test_cancel_payload_restores_truncation_signal():
 
 
 def test_settle_restores_truncation_signal():
-    """"_restoreSettledSession keeps the Load-earlier paging gate honest after
+    """_restoreSettledSession keeps the Load-earlier paging gate honest after
     a bounded settle reload."""
     assert "!!session._messages_truncated" in _MESSAGES_JS
     assert "session._messages_offset||0" in _MESSAGES_JS
+
+
+def _restore_settled_session_body():
+    start = _MESSAGES_JS.index("async function _restoreSettledSession")
+    end = _MESSAGES_JS.index("function _handleStreamError", start)
+    return _MESSAGES_JS[start:end]
+
+
+def _apply_cancel_session_payload_body():
+    start = _MESSAGES_JS.index("const _applyCancelSessionPayload=(sessionPayload)=>")
+    end = _MESSAGES_JS.index("Prefer the canonical session snapshot", start)
+    return _MESSAGES_JS[start:end]
+
+
+def test_settle_refreshes_paging_before_anchor_persist():
+    """Anchor persist reads _oldestIdx; a bounded tail must refresh it first (#7628)."""
+    restore = _restore_settled_session_body()
+    offset_idx = restore.index("_oldestIdx=session._messages_offset||0")
+    attach_idx = restore.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
+    assert offset_idx < attach_idx
+
+
+def test_cancel_refreshes_paging_before_anchor_persist():
+    """Cancel recovery has the same persist-before-offset trap as settle (#7628)."""
+    cancel = _apply_cancel_session_payload_body()
+    offset_idx = cancel.index("_oldestIdx=sessionPayload._messages_offset||0")
+    attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
+    assert offset_idx < attach_idx
+
+
+def test_settle_preserves_terminal_marker_against_bounded_suffix():
+    """Long-session bounded tails are suffixes of S.messages, not prefixes (#7628)."""
+    restore = _restore_settled_session_body()
+    assert "_stagedMatchesCurrentSuffix" in restore
+    assert "_preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&(_stagedMatchesCurrentPrefix||_stagedMatchesCurrentSuffix)" in restore
+
+
+def test_apperror_embedded_session_refreshes_paging_before_anchor_persist():
+    """The apperror embedded-session path has the same persist-before-offset trap (#7628)."""
+    start = _MESSAGES_JS.index("source.addEventListener('apperror'")
+    end = _MESSAGES_JS.index("source.addEventListener('warning'", start)
+    block = _MESSAGES_JS[start:end]
+    offset_idx = block.index("_oldestIdx=d.session._messages_offset||0")
+    attach_idx = block.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
+    assert offset_idx < attach_idx
 
 
 def test_compress_preflight_uses_bounded_tail():

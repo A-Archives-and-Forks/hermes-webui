@@ -207,6 +207,36 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     return backend not in ('', 'local')
 
 
+# Per-profile-argument cache for `_resolve_profile_home_param`'s filesystem
+# `.resolve()` call. The webui's session list builds one `Session` per CLI
+# session row (`_load_cli_sessions_uncached`), and `Session.__init__` calls
+# `_resolve_profile_home_param(profile)` once per row -- with only one
+# profile in play (the common case) that is the SAME path resolved hundreds
+# of times per request. Individually a resolve() is ~1ms, but at a few
+# hundred sessions this compounded into multi-second sidebar hangs under
+# host load (confirmed via repeated "Slow WebUI request still running"
+# warnings pinned to this call site).
+#
+# Caching is safe for the life of the process: the mapping from a profile
+# argument to its home path is a pure function of process-startup constants
+# (`api.profiles._DEFAULT_HERMES_HOME`, `_INITIAL_HERMES_HOME`) that are
+# resolved once at import time and never mutated afterwards. Profile
+# *creation* only creates the directory at that already-deterministic path
+# -- it does not change what path a given profile argument resolves to --
+# so there is no runtime path that needs to invalidate an entry here.
+_PROFILE_HOME_RESOLVE_CACHE: dict[Path, Path] = {}
+
+
+def _cached_safe_resolve_profile_home(pre_resolve: Path) -> Path:
+    """Memoized `_safe_resolve()` for profile-home paths (see cache doc above)."""
+    cached = _PROFILE_HOME_RESOLVE_CACHE.get(pre_resolve)
+    if cached is not None:
+        return cached
+    resolved = _safe_resolve(pre_resolve)
+    _PROFILE_HOME_RESOLVE_CACHE[pre_resolve] = resolved
+    return resolved
+
+
 def _resolve_profile_home_param(profile: str | Path | None) -> Path:
     """Resolve a profile parameter (name string, directory path string, or Path) to a profile home Path.
 
@@ -244,14 +274,14 @@ def _resolve_profile_home_param(profile: str | Path | None) -> Path:
     raw = str(profile).strip()
 
     if isinstance(profile, Path):
-        return _safe_resolve(profile.expanduser())
+        return _cached_safe_resolve_profile_home(profile.expanduser())
 
     # Strings are LOGICAL PROFILE IDS ONLY — no path-shaped strings, ever.
     if not _PROFILE_NAME_RE.fullmatch(raw):
         raise ValueError(f"invalid profile name: {raw!r}")
 
     from api.profiles import get_hermes_home_for_profile
-    return _safe_resolve(get_hermes_home_for_profile(raw))
+    return _cached_safe_resolve_profile_home(get_hermes_home_for_profile(raw))
 
 
 def _is_default_profile_home(profile_home: Path) -> bool:

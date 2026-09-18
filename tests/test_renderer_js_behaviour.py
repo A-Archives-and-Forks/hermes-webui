@@ -1014,3 +1014,19 @@ class TestRendererGateRegressions7618:
         assert out.count("<tr>") == 3
         assert "OAuth<br>API keys<br>tokens" in out
         assert "LRU<br>60s TTL" in out
+
+    def test_row_with_trailing_text_after_closing_pipe_matches_master(self, driver_path):
+        """Pins parity with master for a malformed row that has text past the last pipe.
+
+        The downstream table regex lacks an end-of-line anchor, so it accepts a
+        prefix the physical-line guard rejects. Master does NOT render this as a
+        table either, so preserving prose here is parity, not a regression. Pinned
+        so a future table-guard change has to make a deliberate decision about it.
+        """
+        out = _render(driver_path, "| h<br>x | n |\n|---|---| trailing")
+        assert "<table>" not in out
+
+    def test_indented_and_padded_table_still_preserves_br(self, driver_path):
+        out = _render(driver_path, "  | a | b |\n  |---|---|\n  | x<br>y | z |")
+        assert "<table>" in out
+        assert "x<br>y" in out

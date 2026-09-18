@@ -982,3 +982,35 @@ class TestRendererGateRegressions7618:
         out = _render(driver_path, "2 * 3 * 4 = 24")
         assert "<em>" not in out
         assert "2 * 3 * 4 = 24" in out
+
+    def test_pipe_wrapped_prose_keeps_heading_rendering(self, driver_path):
+        """`| note<br># heading |` is NOT a table — it must keep heading rendering.
+
+        The table-row guard must use the same grammar as the downstream table
+        parser (a pipe-line run whose SECOND line is a separator). A naive
+        per-line "looks pipe-wrapped" test silently stripped heading/list
+        rendering from pipe-delimited prose.
+        """
+        out = _render(driver_path, "| prose<br># heading |")
+        assert "<h1>" in out
+
+    def test_pipe_wrapped_prose_keeps_list_rendering(self, driver_path):
+        out = _render(driver_path, "| prose<br>- item |")
+        assert "<ul>" in out and "<li>" in out
+
+    def test_pipe_rows_without_separator_are_not_treated_as_table(self, driver_path):
+        """Two pipe lines with no separator row are prose, so <br> still converts."""
+        out = _render(driver_path, "| a | b |\n| c | d |")
+        assert "<table>" not in out
+
+    def test_multi_row_table_preserves_br_in_every_data_row(self, driver_path):
+        src = (
+            "| Feature | Notes | Status |\n"
+            "|---|---|---|\n"
+            "| Auth | OAuth<br>API keys<br>tokens | shipped |\n"
+            "| Cache | LRU<br>60s TTL | in review |"
+        )
+        out = _render(driver_path, src)
+        assert out.count("<tr>") == 3
+        assert "OAuth<br>API keys<br>tokens" in out
+        assert "LRU<br>60s TTL" in out

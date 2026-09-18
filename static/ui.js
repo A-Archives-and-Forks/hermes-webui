@@ -7785,13 +7785,32 @@ function renderMd(raw){
   s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>_emphasis(t));
   s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>_emphasis(t));
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
-  // Convert <br> to a newline ONLY outside markdown table rows — inside a row a
-  // newline would split the row and destroy the table. No sentinel token is used
-  // here on purpose: any fixed placeholder is attacker-suppliable in message text
-  // and would be rewritten on the way out.
-  s=s.split('\n').map(line=>(
-    /^\s*\|.*\|\s*$/.test(line) ? line : line.replace(/<br\s*\/?>/gi,'\n')
-  )).join('\n');
+  // Convert <br> to a newline, EXCEPT inside genuine markdown table rows — there a
+  // newline would split the row and destroy the table. No sentinel token is used on
+  // purpose: any fixed placeholder is attacker-suppliable in message text and would be
+  // rewritten on the way out.
+  // The "is this a table row" test must match the DOWNSTREAM table parser's grammar
+  // exactly (a run of pipe-lines whose SECOND line is a separator). A looser per-line
+  // test would treat pipe-wrapped prose like `| note<br># heading |` as a table row and
+  // silently strip its heading/list rendering.
+  {
+    const _rowRe=/^ {0,3}\|.+\|[ \t]*$/;
+    const _sepRe=/^\|[\s|:-]+\|$/;
+    const _lines=s.split('\n');
+    const _isTableRow=new Array(_lines.length).fill(false);
+    for(let i=0;i<_lines.length;){
+      if(!_rowRe.test(_lines[i])){ i++; continue; }
+      let j=i;
+      while(j<_lines.length && _rowRe.test(_lines[j])) j++;
+      // A block qualifies only if the parser would accept it: >=2 rows and a separator
+      // in the second position.
+      if(j-i>=2 && _sepRe.test(_lines[i+1].trim())){
+        for(let k=i;k<j;k++) _isTableRow[k]=true;
+      }
+      i=j;
+    }
+    s=_lines.map((line,i)=>_isTableRow[i]?line:line.replace(/<br\s*\/?>/gi,'\n')).join('\n');
+  }
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:

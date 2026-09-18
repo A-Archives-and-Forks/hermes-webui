@@ -7057,17 +7057,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
-        // Bounded settle reload returns a tail window: keep the Load-earlier
-        // paging gate honest instead of leaving the previous (possibly full)
-        // transcript's truncation state stale (#7310/#7625).
-        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
-        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         if(S.session&&S.session.session_id){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
+        // Bounded settle reload returns a tail window: keep the Load-earlier
+        // paging gate honest (#7310/#7625).
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');

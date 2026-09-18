@@ -829,7 +829,10 @@ def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     assert fetch_idx < attach_idx < carry_idx < render_idx
 
     embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
-    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);")
+    # #7310/#7625: the HTTP fallback is a bounded tail now (full-transcript
+    # reloads were stacking on every cancel recovery); ordering contract below
+    # is unchanged.
+    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);")
     fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session);")
     assert embedded_idx < fallback_get_idx < fallback_apply_idx
 

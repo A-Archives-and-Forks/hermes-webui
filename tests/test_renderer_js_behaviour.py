@@ -926,3 +926,59 @@ class TestBulletListItalicCollision:
         assert "&lt;strong&gt;" not in out
         assert "<strong>Label:</strong>" in out
         assert "<em>italic</em>" in out
+
+
+class TestRendererGateRegressions7618:
+    """Regressions for the two defects the release gate found in the #7618 fix.
+
+    Both were SILENT: they produced wrong output with no error, and neither was
+    covered by the PR's own tests.
+    """
+
+    def test_literal_br_sentinel_in_prose_is_not_rewritten(self, driver_path):
+        """A user typing the sentinel must not have it turned into a <br>.
+
+        The first implementation stashed table-row <br> as a fixed \\x00BR\\x00
+        token and unconditionally rewrote that token back to <br> afterwards, so
+        attacker/user-supplied text containing the literal token was corrupted.
+        """
+        out = _render(driver_path, "literal \x00BR\x00 text")
+        assert "<br>" not in out
+        assert "\x00BR\x00" in out
+
+    def test_literal_br_sentinel_inside_link_does_not_corrupt_anchor(self, driver_path):
+        """The sentinel inside a URL must not break out of the href attribute."""
+        out = _render(driver_path, '[x](https://example.test/\x00BR\x00tail)')
+        # The anchor must stay well-formed: no attribute text leaking into the body.
+        assert 'target="_blank"</a>' not in out
+        assert '>tail" target=' not in out
+
+    def test_literal_br_sentinel_in_table_cell_stays_literal(self, driver_path):
+        src = "| a | b |\n|---|---|\n| \x00BR\x00 | c |"
+        out = _render(driver_path, src)
+        assert "<table>" in out
+        assert "<br>" not in out
+
+    def test_html_em_with_boundary_whitespace_still_italicises(self, driver_path):
+        """`<em> x </em>` must stay emphasis.
+
+        The stricter italic regex (which correctly stops `a * b * c` from
+        italicising) also rejected the `* x *` that the HTML pre-pass produced
+        for `<em> x </em>`, degrading supported emphasis into literal asterisks
+        — and into a bullet list when it started a line.
+        """
+        out = _render(driver_path, "<em> italic </em>")
+        assert "<em>italic</em>" in out
+        assert "<ul>" not in out
+        assert "<li>" not in out
+
+    def test_html_i_with_boundary_whitespace_still_italicises(self, driver_path):
+        out = _render(driver_path, "<i> spaced </i>")
+        assert "<em>spaced</em>" in out
+        assert "<ul>" not in out
+
+    def test_spaced_asterisks_still_not_italicised(self, driver_path):
+        """The original #7618 fix must survive the boundary-whitespace repair."""
+        out = _render(driver_path, "2 * 3 * 4 = 24")
+        assert "<em>" not in out
+        assert "2 * 3 * 4 = 24" in out

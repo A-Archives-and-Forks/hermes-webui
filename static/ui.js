@@ -7774,18 +7774,24 @@ function renderMd(raw){
   });
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
-  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
-  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
+  // Keep boundary whitespace OUTSIDE the generated *...* delimiters: the inline
+  // emphasis regex below deliberately rejects a leading/trailing space (so
+  // `a * b * c` is not italicised), and `<em> x </em>` would otherwise degrade
+  // into literal asterisks (or a bullet list at line start).
+  const _emphasis=(t)=>{
+    const m=String(t).match(/^(\s*)([\s\S]*?)(\s*)$/);
+    return (m && m[2]) ? m[1]+'*'+m[2]+'*'+m[3] : t;
+  };
+  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>_emphasis(t));
+  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>_emphasis(t));
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
-  // Protect <br> inside markdown table rows so converting <br> to \n does not destroy the table
-  s=s.split('\n').map(line=>{
-    if(/^\s*\|.*\|\s*$/.test(line)){
-      return line.replace(/<br\s*\/?>/gi,'\x00BR\x00');
-    }
-    return line;
-  }).join('\n');
-  s=s.replace(/<br\s*\/?>/gi,'\n');
-  s=s.replace(/\x00BR\x00/g,'<br>');
+  // Convert <br> to a newline ONLY outside markdown table rows — inside a row a
+  // newline would split the row and destroy the table. No sentinel token is used
+  // here on purpose: any fixed placeholder is attacker-suppliable in message text
+  // and would be rewritten on the way out.
+  s=s.split('\n').map(line=>(
+    /^\s*\|.*\|\s*$/.test(line) ? line : line.replace(/<br\s*\/?>/gi,'\n')
+  )).join('\n');
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:

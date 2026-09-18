@@ -19,6 +19,8 @@ import stat
 import subprocess
 import sys
 import concurrent.futures
+import contextlib
+import contextvars
 import threading
 import time
 from collections.abc import Callable
@@ -207,7 +209,7 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     return backend not in ('', 'local')
 
 
-# Per-profile-argument cache for `_resolve_profile_home_param`'s filesystem
+# Call-scoped cache for `_resolve_profile_home_param`'s filesystem
 # `.resolve()` call. The webui's session list builds one `Session` per CLI
 # session row (`_load_cli_sessions_uncached`), and `Session.__init__` calls
 # `_resolve_profile_home_param(profile)` once per row -- with only one
@@ -217,23 +219,67 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
 # host load (confirmed via repeated "Slow WebUI request still running"
 # warnings pinned to this call site).
 #
-# Caching is safe for the life of the process: the mapping from a profile
-# argument to its home path is a pure function of process-startup constants
-# (`api.profiles._DEFAULT_HERMES_HOME`, `_INITIAL_HERMES_HOME`) that are
-# resolved once at import time and never mutated afterwards. Profile
-# *creation* only creates the directory at that already-deterministic path
-# -- it does not change what path a given profile argument resolves to --
-# so there is no runtime path that needs to invalidate an entry here.
-_PROFILE_HOME_RESOLVE_CACHE: dict[Path, Path] = {}
+# IMPORTANT: this is deliberately NOT a process-lifetime cache. An earlier
+# revision of this fix cached forever, on the premise that a profile
+# argument always resolves to the same path for the life of the process --
+# but `Path.resolve()` is a filesystem call, not a pure function of
+# startup constants: a profile-home symlink can be retargeted while the
+# webui process keeps running for days/weeks, and `_safe_resolve()` below
+# deliberately falls back to returning the UNRESOLVED input after a
+# transient `OSError`/`RuntimeError`/`ValueError`, which a process-lifetime
+# cache would then serve forever. Both are real correctness bugs (caught in
+# PR #7636 review), not style nitpicks.
+#
+# Instead the cache is scoped to exactly ONE invocation of the hot loop
+# (`_load_cli_sessions_uncached`, wrapped below in `profile_home_resolve_cache_scope`)
+# via a `ContextVar` that holds a fresh dict only while that single
+# sidebar-list build is running, and is `None` everywhere else. Every other
+# call site -- and every request that isn't actively inside that one
+# build -- resolves fresh every time, exactly like pre-PR behavior, so a
+# symlink retarget or a transient resolve error is never masked past the
+# single call that would have paid for the redundant resolves anyway.
+_PROFILE_HOME_RESOLVE_SCOPE: "contextvars.ContextVar[dict[Path, Path] | None]" = (
+    contextvars.ContextVar("_PROFILE_HOME_RESOLVE_SCOPE", default=None)
+)
+
+
+@contextlib.contextmanager
+def profile_home_resolve_cache_scope():
+    """Enable memoization of `_resolve_profile_home_param` for one call.
+
+    Use as a decorator (or a `with` block) around the single hot-path
+    operation that resolves the SAME profile argument hundreds of times in a
+    tight loop -- currently `_load_cli_sessions_uncached` building the
+    CLI/cron session list. While active, repeated resolves of the same
+    profile argument are served from a dict that lives ONLY for the
+    duration of the call. Outside of it -- including before/after, and any
+    call site other than the one wrapped -- `_resolve_profile_home_param`
+    resolves fresh every time, with no caching, matching pre-PR behavior
+    exactly. Nested/reentrant use restores the previous (outer) value on
+    exit rather than clobbering it, so this is safe to nest.
+    """
+    token = _PROFILE_HOME_RESOLVE_SCOPE.set({})
+    try:
+        yield
+    finally:
+        _PROFILE_HOME_RESOLVE_SCOPE.reset(token)
 
 
 def _cached_safe_resolve_profile_home(pre_resolve: Path) -> Path:
-    """Memoized `_safe_resolve()` for profile-home paths (see cache doc above)."""
-    cached = _PROFILE_HOME_RESOLVE_CACHE.get(pre_resolve)
+    """`_safe_resolve()` for profile-home paths.
+
+    Memoized only while a `profile_home_resolve_cache_scope()` is active
+    (see module doc above); otherwise resolves fresh every call, matching
+    pre-PR behavior.
+    """
+    cache = _PROFILE_HOME_RESOLVE_SCOPE.get()
+    if cache is None:
+        return _safe_resolve(pre_resolve)
+    cached = cache.get(pre_resolve)
     if cached is not None:
         return cached
     resolved = _safe_resolve(pre_resolve)
-    _PROFILE_HOME_RESOLVE_CACHE[pre_resolve] = resolved
+    cache[pre_resolve] = resolved
     return resolved
 
 

@@ -53,7 +53,7 @@ def test_gateway_thread_start_failure_releases_writeback_owner_and_stream_state(
 
     monkeypatch.setattr(routes.threading, "Thread", FailingThread)
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
-    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace, **_kw: None)
     monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
     monkeypatch.setattr(
         routes,

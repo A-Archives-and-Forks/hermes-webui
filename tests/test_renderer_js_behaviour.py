@@ -926,4 +926,3 @@ class TestBulletListItalicCollision:
         assert "&lt;strong&gt;" not in out
         assert "<strong>Label:</strong>" in out
         assert "<em>italic</em>" in out
-

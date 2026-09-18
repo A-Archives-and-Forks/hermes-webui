@@ -898,3 +898,32 @@ class TestBareFileUrlMediaRendering:
         # Labeled anchors keep the normal link path (routed to /api/media as a link,
         # not auto-loaded as an <img>).
         assert "<img" not in out
+
+
+class TestMarkdownTableCellLineBreaks:
+    """<br> inside markdown table cells must be preserved and not split cells across lines."""
+
+    def test_table_cell_with_br_renders_intact(self, driver_path):
+        src = (
+            "| Feature | Description |\n"
+            "| :--- | :--- |\n"
+            "| Item 1 | Line one<br>Line two |\n"
+            "| Item 2 | Another row |"
+        )
+        out = _render(driver_path, src)
+        assert "<table>" in out
+        assert "Line one<br>Line two" in out or "Line one<br/>Line two" in out
+        assert "Item 2" in out
+        assert out.count("<tr>") == 3  # 1 header + 2 data rows
+
+
+class TestBulletListItalicCollision:
+    """Asterisk bullet lists followed by italic words must not collide or escape tags."""
+
+    def test_bullet_list_with_italic_does_not_swallow_tags(self, driver_path):
+        src = "* **Label:** Normal text with *italic* words."
+        out = _render(driver_path, src)
+        assert "&lt;strong&gt;" not in out
+        assert "<strong>Label:</strong>" in out
+        assert "<em>italic</em>" in out
+

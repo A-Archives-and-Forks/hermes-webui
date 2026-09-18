@@ -32,3 +32,30 @@ def test_resolve_profile_home_param_caches_repeated_path_argument(tmp_path):
         "expected the filesystem resolve() to run once and be served from "
         f"cache thereafter, but it ran {spy.call_count} times"
     )
+
+
+def test_resolve_profile_home_param_caches_repeated_profile_name_argument(tmp_path):
+    """Same fix, second branch: a logical profile-NAME STRING (not a Path)
+
+    resolves through `get_hermes_home_for_profile()` before hitting the same
+    `_cached_safe_resolve_profile_home()` memoization. This mirrors the
+    Path-argument test above but drives the string branch (workspace.py's
+    ``isinstance(profile, Path)`` check is False), confirming the cache is
+    genuinely hit -- not just for explicit Path callers -- and that the
+    resolved home is correct.
+    """
+    ws._PROFILE_HOME_RESOLVE_CACHE.clear()
+    home_dir = tmp_path / "named_profile_home"
+    home_dir.mkdir()
+
+    with patch("api.profiles.get_hermes_home_for_profile", return_value=home_dir), \
+            patch.object(ws, "_safe_resolve", wraps=ws._safe_resolve) as spy:
+        first = ws._resolve_profile_home_param("myprofile")
+        second = ws._resolve_profile_home_param("myprofile")
+        third = ws._resolve_profile_home_param("myprofile")
+
+    assert first == second == third == home_dir.resolve()
+    assert spy.call_count == 1, (
+        "expected the filesystem resolve() to run once and be served from "
+        f"cache thereafter, but it ran {spy.call_count} times"
+    )

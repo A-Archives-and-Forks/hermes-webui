@@ -43,6 +43,7 @@ def test_gateway_thread_start_failure_releases_writeback_owner_and_stream_state(
             raise RuntimeError("thread launch failed")
 
     canonical_by_id = {}
+    registered_stream_ids = []
 
     def fake_prepare(session, *, stream_id, **kwargs):
         session.active_stream_id = stream_id
@@ -50,6 +51,7 @@ def test_gateway_thread_start_failure_releases_writeback_owner_and_stream_state(
         session.pending_started_at = 1.0
         _register_failed_stream(session.session_id, stream_id)
         canonical_by_id[session.session_id] = session
+        registered_stream_ids.append(stream_id)
 
     monkeypatch.setattr(routes.threading, "Thread", FailingThread)
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
@@ -85,9 +87,15 @@ def test_gateway_thread_start_failure_releases_writeback_owner_and_stream_state(
         assert session.pending_user_message is None
         assert session.pending_started_at is None
 
-    assert config.SESSION_WRITEBACK_OWNERS == {}
-    assert config.STREAM_SESSION_OWNERS == {}
-    assert config.STREAMS == {}
+    # Scope these to the streams this test registered. scripts/test.sh runs the
+    # whole selection in one process, so asserting the global registries are
+    # empty makes this test fail on unrelated files that leave entries behind.
+    assert registered_stream_ids, "the launch path must register state before failing"
+    for stream_id in registered_stream_ids:
+        assert stream_id not in config.STREAM_SESSION_OWNERS
+        assert stream_id not in config.STREAMS
+    for session_id in canonical_by_id:
+        assert config.session_writeback_owner(session_id) is None
 
 
 def test_gateway_launch_failure_cleanup_does_not_clear_successor_owner(monkeypatch):

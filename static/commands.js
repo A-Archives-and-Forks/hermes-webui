@@ -2142,6 +2142,7 @@ async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
   const gen=_slashSkillCacheGen;
+  let _committed=false;
   _skillCommandLoadPromise=(async()=>{
     try{
       const data=await api('/api/skills');
@@ -2151,11 +2152,20 @@ async function loadSkillCommands(force=false){
       // (and not "ready") so the composer's next pass loads the new profile (#7509).
       if(gen!==_slashSkillCacheGen) return _skillCommandCache;
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
+      _committed=true;
     }catch(_){
       if(gen===_slashSkillCacheGen)_skillCommandCache=[];
     }
     finally{
-      if(gen===_slashSkillCacheGen){_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+      // Only publish the cache as "ready" after a SUCCESSFUL current-generation
+      // commit. Marking it ready in the failure path (what master does
+      // unconditionally) permanently wedges the picker: a single transient
+      // /api/skills rejection leaves ready=true + cache=[], and
+      // ensureSkillCommandsLoadedForAutocomplete() only retries when
+      // !ready && !promise — so skill commands stay missing until a page
+      // reload even after the API recovers. Clear the promise either way so the
+      // next picker pass can retry.
+      if(gen===_slashSkillCacheGen){_skillCommandCacheReady=_committed;_skillCommandLoadPromise=null;}
     }
     return _skillCommandCache;
   })();

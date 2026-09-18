@@ -52,6 +52,7 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
         // __releaseHeldSkills(), so a test can land a profile switch mid-request.
         let skillRequestCount = 0;
         let holdSkills = false;
+        let failSkillsOnce = false;
         const heldSkills = [];
         const ctx = {{
           console,
@@ -66,6 +67,10 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
               if (holdSkills) {{
                 await new Promise((resolve) => {{ heldSkills.push(resolve); }});
               }}
+              // Transient-failure injection: __failSkillsOnce() makes exactly the
+              // next /api/skills reject, so a test can prove the loader recovers
+              // instead of latching an empty cache as "ready".
+              if (failSkillsOnce) {{ failSkillsOnce = false; throw new Error('simulated /api/skills failure'); }}
               return {{ skills: snapshot }};
             }}
             if (path === '/api/commands') return {{ commands: [] }};
@@ -77,6 +82,7 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
           __setSkills: (next) => {{ skillsPayload = next; }},
           __holdSkills: (on) => {{ holdSkills = !!on; }},
           __releaseHeldSkills: () => {{ heldSkills.splice(0).forEach((resolve) => resolve()); }},
+          __failSkillsOnce: () => {{ failSkillsOnce = true; }},
           __skillRequests: () => skillRequestCount
         }};
         vm.createContext(ctx);
@@ -319,3 +325,47 @@ def test_both_profile_switch_paths_drop_the_slash_skill_caches():
             "previous profile's /api/skills payload keeps hiding the new profile's skills"
         )
         assert invalidate_call > switch_call, f"{label}: caches dropped before the switch request"
+
+
+def test_transient_skills_failure_does_not_wedge_the_picker():
+    """A failed /api/skills must not latch an empty cache as authoritative.
+
+    ``loadSkillCommands()`` publishes its result by setting
+    ``_skillCommandCacheReady``, and ``ensureSkillCommandsLoadedForAutocomplete()``
+    only re-loads while ``!_skillCommandCacheReady && !_skillCommandLoadPromise``.
+    So marking the cache "ready" on the failure path permanently wedges the
+    picker: one transient rejection leaves ready=true with an empty cache, and no
+    later picker pass ever retries -- skill commands stay missing until a page
+    reload even after the API recovers.
+
+    Readiness must therefore be set only after a successful current-generation
+    commit. This regression pins the recovery; reverting the fix (marking ready
+    unconditionally in ``finally``) turns the second assertion red.
+    """
+    result = _run_commands_js(
+        """
+        // Bundle commands are a separate cache that getSlashAutocompleteMatches()
+        // also awaits; load it up front so this test isolates the skill path.
+        await loadBundleCommands(true);
+        __failSkillsOnce();
+        // First pass rejects. Model the composer's own entry point: it only
+        // re-loads while the cache is neither ready nor in flight.
+        await loadSkillCommands();
+        const afterFailure = skillsOffered(await getSlashAutocompleteMatches('/gam'));
+        // API is healthy again. A NON-forced load is what the picker actually
+        // issues, so the retry has to happen without force=true.
+        await loadSkillCommands();
+        const afterRecovery = skillsOffered(await getSlashAutocompleteMatches('/gam'));
+        return {afterFailure, afterRecovery, requests: __skillRequests()};
+        """,
+        MIXED_SKILLS,
+    )
+    assert result["afterFailure"] == [], (
+        "a rejected /api/skills should leave no skill commands offered"
+    )
+    assert result["afterRecovery"] == ["gamma-live"], (
+        "the picker must recover once /api/skills succeeds again; got "
+        f"{result['afterRecovery']!r} -- an empty list means the failure path "
+        "latched _skillCommandCacheReady and no retry ever happens"
+    )
+    assert result["requests"] >= 2, "the loader must actually re-issue /api/skills"

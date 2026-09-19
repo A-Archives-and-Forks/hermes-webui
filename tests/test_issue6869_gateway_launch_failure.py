@@ -183,3 +183,35 @@ def test_gateway_launch_failure_cleanup_does_not_resurrect_deleted_session(monke
     assert stale.active_stream_id == "old-stream"
     assert stale.pending_user_message == "pending prompt"
     assert saved == [], "cleanup must not save a deleted session"
+
+
+def test_gateway_launch_failure_cleanup_never_masks_the_launch_error(monkeypatch):
+    """A resolution failure during cleanup must not replace the launch error.
+
+    Cleanup runs inside the launch-failure handler, so an error it fails to
+    contain is reported instead of the real launch failure. Resolution can fail
+    with something other than KeyError when the session store is unreadable or
+    cannot be deserialized.
+    """
+    saved = []
+
+    def failing_resolver(sid, metadata_only=False):
+        raise OSError("session store unreadable")
+
+    monkeypatch.setattr(routes, "get_session", failing_resolver)
+    stale = _make_session(
+        "session-launch-resolution-error",
+        active_stream_id="old-stream",
+        pending_user_message="pending prompt",
+        save=lambda: saved.append("stale"),
+    )
+    _register_failed_stream(stale.session_id, "old-stream")
+
+    # Must not raise: the caller is already handling the launch failure.
+    routes._cleanup_chat_start_launch_failure(stale, "old-stream")
+
+    # The registry half still completed, and nothing was saved.
+    assert config.session_writeback_owner(stale.session_id) is None
+    assert "old-stream" not in config.STREAM_SESSION_OWNERS
+    assert "old-stream" not in config.STREAMS
+    assert saved == []

@@ -873,6 +873,12 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       clearLiveToolCards();
       try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
       if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+      // Restore paging signals from the (possibly full) transcript response.
+      // A successful /compress returns the full transcript, so the bounded
+      // preflight's _messagesTruncated/_oldestIdx must be reset before render
+      // (#7628). Same restore-before-render ordering as the settle/cancel paths.
+      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!data.session._messages_truncated;
+      if(typeof _oldestIdx!=='undefined') _oldestIdx=data.session._messages_offset||0;
       syncTopbar();
       renderMessages();
       await renderSessionList();

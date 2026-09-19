@@ -149,7 +149,19 @@ def test_settle_preserves_terminal_marker_against_bounded_suffix():
     """Long-session bounded tails are suffixes of S.messages, not prefixes (#7628)."""
     restore = _restore_settled_session_body()
     assert "_stagedMatchesCurrentSuffix" in restore
-    assert "_preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&(_stagedMatchesCurrentPrefix||_stagedMatchesCurrentSuffix)" in restore
+    assert "(_truncatedRecovery?_stagedMatchesCurrentSuffix:_stagedMatchesCurrentPrefix)" in restore
+
+
+def test_settle_truncation_signal_decides_match_strategy():
+    """The server's truncation signal must decide prefix-vs-suffix, never an `||`:
+    bounded settles get suffix-exclusive matching (identical repeated turns make
+    BOTH comparisons succeed; the prefix branch then splices at the wrong offset
+    and silently drops/duplicates rows) (#7628)."""
+    restore = _restore_settled_session_body()
+    assert "_truncatedRecovery=!!_messagesTruncated||!!(_oldestIdx>0)" in restore
+    # The splice offset must follow the SAME truncation decision as the match
+    # strategy — no fallthrough to prefix when both match.
+    assert "_truncatedRecovery?_stagedSuffixStart+_stagedMessages.length:_stagedMessages.length" in restore
 
 
 def test_apperror_embedded_session_refreshes_paging_before_anchor_persist():

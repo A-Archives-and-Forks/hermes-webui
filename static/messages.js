@@ -7085,9 +7085,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return !!stagedKey && stagedKey===currentKey;
           })
         );
-        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&(_stagedMatchesCurrentPrefix||_stagedMatchesCurrentSuffix);
+        // The server's truncation signal decides the strategy, not an `||`:
+        // a bounded settle returns a SUFFIX of the durable transcript, so
+        // suffix matching is the only correct strategy when truncated. Prefix
+        // preservation is reserved for untruncated snapshots. When repeated
+        // identical turns make BOTH comparisons succeed, preferring the prefix
+        // splices at the wrong offset and silently drops/duplicates rows
+        // (#7628). Never prefer prefix when truncation is active.
+        const _truncatedRecovery=!!_messagesTruncated||!!(_oldestIdx>0);
+        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&(_truncatedRecovery?_stagedMatchesCurrentSuffix:_stagedMatchesCurrentPrefix);
         const _resolvedMessages=_preserveCurrentTranscript
-          ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMatchesCurrentPrefix?_stagedMessages.length:_stagedSuffixStart+_stagedMessages.length)]
+          ? [..._stagedMessages,..._currentVisibleMessages.slice(_truncatedRecovery?_stagedSuffixStart+_stagedMessages.length:_stagedMessages.length)]
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
         _attachProjectedAnchorSceneToLastAssistant(S.messages);

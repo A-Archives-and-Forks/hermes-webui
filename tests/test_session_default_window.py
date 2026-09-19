@@ -158,7 +158,7 @@ def test_settle_truncation_signal_decides_match_strategy():
     BOTH comparisons succeed; the prefix branch then splices at the wrong offset
     and silently drops/duplicates rows) (#7628)."""
     restore = _restore_settled_session_body()
-    assert "_truncatedRecovery=!!_messagesTruncated||!!(_oldestIdx>0)" in restore
+    assert "_truncatedRecovery=(typeof _messagesTruncated!=='undefined'&&!!_messagesTruncated)||(typeof _oldestIdx!=='undefined'&&!!(_oldestIdx>0))" in restore
     # The splice offset must follow the SAME truncation decision as the match
     # strategy — no fallthrough to prefix when both match.
     assert "_truncatedRecovery?_stagedSuffixStart+_stagedMessages.length:_stagedMessages.length" in restore

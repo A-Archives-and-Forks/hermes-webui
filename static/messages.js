@@ -7092,7 +7092,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // identical turns make BOTH comparisons succeed, preferring the prefix
         // splices at the wrong offset and silently drops/duplicates rows
         // (#7628). Never prefer prefix when truncation is active.
-        const _truncatedRecovery=!!_messagesTruncated||!!(_oldestIdx>0);
+        const _truncatedRecovery=(typeof _messagesTruncated!=='undefined'&&!!_messagesTruncated)||(typeof _oldestIdx!=='undefined'&&!!(_oldestIdx>0));
         const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&(_truncatedRecovery?_stagedMatchesCurrentSuffix:_stagedMatchesCurrentPrefix);
         const _resolvedMessages=_preserveCurrentTranscript
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_truncatedRecovery?_stagedSuffixStart+_stagedMessages.length:_stagedMessages.length)]

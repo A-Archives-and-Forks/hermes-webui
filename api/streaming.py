@@ -10987,20 +10987,24 @@ def _run_agent_streaming(
                         logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
 
-            # Store agent instance for cancel/interrupt propagation
+            # Stop may already have detached CANCEL_FLAGS while initialization
+            # was in flight. The worker-owned event and stream membership, not
+            # the removable registry entry, fence registration with cancellation.
             with STREAMS_LOCK:
-                AGENT_INSTANCES[stream_id] = agent
-                # Check if cancel was requested during agent initialization
-                if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
-                    # Cancel arrived during agent creation - interrupt immediately
-                    try:
-                        agent.interrupt("Cancelled before start")
-                    except Exception:
-                        logger.debug("Failed to interrupt agent before start")
-                    with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
-                    return
+                _cancelled_before_start = cancel_event.is_set() or stream_id not in STREAMS
+                if not _cancelled_before_start:
+                    AGENT_INSTANCES[stream_id] = agent
+            if _cancelled_before_start:
+                # Interrupt, persistence and event writes must not hold the
+                # registry lock (the session lock can be held by another caller).
+                try:
+                    agent.interrupt("Cancelled before start")
+                except Exception:
+                    logger.debug("Failed to interrupt agent before start")
+                with _agent_lock:
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                put('cancel', _cancel_event_payload('Cancelled by user'))
+                return
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
@@ -12750,6 +12754,13 @@ def _run_agent_streaming(
             # it now and emit a pending_steer_leftover SSE event so the
             # frontend can queue it for the next turn — same fallback
             # path as the CLI in cli.py:8788-8794.
+            # Close Steer admission before its last consumer runs. Enqueues
+            # share this lock: earlier guidance is drained below; later requests
+            # fail closed instead of reporting success on an undeliverable input.
+            # Stop may have claimed first; never overwrite its cancelling phase.
+            with STREAMS_LOCK:
+                if stream_id in STREAMS:
+                    update_active_run(stream_id, phase="finalizing")
             try:
                 _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
                 _leftover = _drain_pending_steer() if _drain_pending_steer else None
@@ -13538,6 +13549,11 @@ def _run_agent_streaming(
 # ============================================================
 
 
+# Local lifecycle phases with a pending-steer consumer still ahead of them.
+# Gateway uses its own phase vocabulary and never falls through to local delivery.
+_LOCAL_STEERABLE_PHASES = frozenset({"starting", "running"})
+
+
 def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
     """Deliver to a verified live worker; None retains cache-only compatibility.
 
@@ -13561,13 +13577,13 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
         if agent is None:
             if ((owner and owner != sid)
                     or (run.get("session_id") and run["session_id"] != sid)
-                    or run.get("phase") == "cancelling"):
+                    or (run and run.get("phase") not in _LOCAL_STEERABLE_PHASES)):
                 return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
             return None
         # A cache hit cannot override missing or conflicting worker ownership.
         if (stream_id not in cfg.STREAMS
                 or owner != sid or run.get("session_id") != sid
-                or run.get("phase") == "cancelling"
+                or run.get("phase") not in _LOCAL_STEERABLE_PHASES
                 or run.get("backend") == "gateway"):
             return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
         if not callable(getattr(agent, "steer", None)):
@@ -13712,7 +13728,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                     # Gateway owns transport; a local cache object is never steered.
                     result = {"accepted": False, "fallback": "gateway_steer_queued",
                               "stream_id": active_stream_id}
-                elif backend == WEBUI_LOCAL_CHAT_BACKEND:
+                elif (backend == WEBUI_LOCAL_CHAT_BACKEND
+                      and run.get("phase") in _LOCAL_STEERABLE_PHASES):
                     try:
                         accepted = bool(agent.steer(text))
                     except Exception as exc:

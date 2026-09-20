@@ -80,7 +80,13 @@ Follow that checklist's safety rules:
   agent.steer() under that same lock edge, so a Stop that claims cancellation
   never strands guidance an earlier Steer response reported as accepted. Test
   both Stop/Steer orderings — registered and cache-only — with deterministic
-  barriers.
+  barriers. Worker registration must also check its retained cancel event and
+  live stream membership: Stop can remove CANCEL_FLAGS during initialization.
+  Do not re-register a cancelled worker; finalize outside the stream lock.
+  Local Steer accepts only explicit starting/running phases. Close admission
+  by publishing finalizing under STREAMS_LOCK before the last pending-steer
+  drain; earlier accepted guidance is drained, later guidance is rejected.
+  Test both drain/Steer orderings, including compression-rotated identities.
 - For Docker build changes in `docker_init.bash`, mirror directory exclusions
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).

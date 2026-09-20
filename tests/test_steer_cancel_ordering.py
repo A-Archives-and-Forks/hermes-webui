@@ -245,3 +245,25 @@ def test_cache_only_steer_is_atomic_with_stop(scene, monkeypatch, gap):
         assert order == ["cancel"]
         assert result == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
         agent.steer.assert_not_called()
+
+
+def test_cache_only_selection_revalidates_phase_before_enqueue(scene, monkeypatch):
+    """Finalization can win after initial resolution but before cache enqueue."""
+    lock, agent = scene
+    config.AGENT_INSTANCES.clear()
+    matches = streaming._cached_agent_matches_session
+    selected = []
+
+    def select_then_finalize(candidate, sid):
+        matched = matches(candidate, sid)
+        if matched:
+            selected.append(candidate)
+            assert lock.owner != threading.get_ident()
+            with config.STREAMS_LOCK:
+                streaming.update_active_run("run", phase="finalizing")
+        return matched
+
+    monkeypatch.setattr(streaming, "_cached_agent_matches_session", select_then_finalize)
+    assert steer() == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+    assert selected == [agent]
+    agent.steer.assert_not_called()

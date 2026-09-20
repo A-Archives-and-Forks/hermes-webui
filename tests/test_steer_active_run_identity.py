@@ -226,3 +226,21 @@ def test_live_worker_reports_real_acceptance(scene, behavior):
         agent.steer = None
     assert steer()["accepted"] is False
     agent.interrupt.assert_not_called()
+
+
+@pytest.mark.parametrize("registered", [True, False])
+@pytest.mark.parametrize("phase", ["starting", "running", "finalizing", "cancelling", "done", "unknown", "", None])
+def test_local_steer_requires_an_explicit_consuming_phase(scene, registered, phase):
+    agent, _, _ = scene
+    agent.session_id = "original"
+    if not registered:
+        config.AGENT_INSTANCES.pop("run")
+    if phase is None:
+        config.ACTIVE_RUNS["run"].pop("phase")
+    else:
+        config.ACTIVE_RUNS["run"]["phase"] = phase
+    result = steer()
+    assert result["accepted"] is (phase in {"starting", "running"})
+    assert agent.steer.call_count == (1 if result["accepted"] else 0)
+    if not result["accepted"]:
+        assert result["fallback"] == "stream_dead"

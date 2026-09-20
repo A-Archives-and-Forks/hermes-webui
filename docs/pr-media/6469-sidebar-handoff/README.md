@@ -59,13 +59,16 @@ the existing stale recovery path.
 
 The OPEN-only guard at `85f1c2d34b62b0ade85f51ed2cf8c1cf56f5ab9e` could wait
 forever when the terminal frame never arrived. The follow-up keeps the live
-handoff for 1.5 seconds, then uses the existing canonical session restore with
-an eight-second request timeout and no retries. Repeated sidebar hints cannot
-restart the deadline or create concurrent requests. An active server snapshot
-preserves the run; a failed or timed-out request uses existing interrupted-stream
-recovery rather than claiming success. Normal terminal delivery, transport
-replacement/close, navigation, and a newer optimistic turn invalidate the old
-request. Already-running stream-end recovery remains the sole recovery owner.
+handoff for 1.5 seconds, then probes the exact stream through
+`/api/chat/stream/status` with an eight-second timeout and no retries.
+Repeated sidebar hints cannot restart the deadline or create concurrent
+requests. `active:true` keeps the OPEN owner intact even when the persisted
+session fields already look idle; only explicit runtime inactivity permits the
+canonical session restore. A failed or malformed runtime probe uses the
+existing interrupted-stream path rather than claiming successful settlement.
+Normal terminal delivery, transport replacement/close, navigation, and a newer
+optimistic turn invalidate the old request. Already-running stream-end recovery
+remains the sole recovery owner.
 
 ```sh
 LIFECYCLE_SCENARIO=normal LIFECYCLE_TEST_BITE=sidebar-idle-missing-terminal \
@@ -80,3 +83,9 @@ The patched implementation restores the final answer and passes the unchanged
 painted-frame, semantic activity, persistence and hard-reload checks before the
 barrier is released. The cloud workflow runs both delayed- and missing-terminal
 rows. No live provider or production state is used.
+
+A production Gateway regression also blocks post-turn goal evaluation after
+the success transcript has already cleared `active_stream_id` and pending
+fields. During that interval the worker and exact entry in `STREAMS` remain
+live and no `done` event has been emitted, proving why persisted session flags
+cannot authorize sidebar settlement on their own.

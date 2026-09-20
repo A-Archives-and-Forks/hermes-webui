@@ -38,12 +38,17 @@ let _terminalStateReached=false,_streamFinalized=false;
 let _pendingStreamEndRecovery=CASE==='stream-end-pending';
 const S={session:{session_id:activeSid},busy:true,activeStreamId:streamId};
 const INFLIGHT={current:{streamId}},original=INFLIGHT.current;
-const timers=[],listeners={},calls=[],failures=[];
+const timers=[],listeners={},calls=[],statusCalls=[],failures=[];
 function setTimeout(fn,delay){const t={fn,delay,cancelled:false};timers.push(t);return t;}
 function clearTimeout(t){if(t)t.cancelled=true;}
 const source={readyState:1,addEventListener(name,fn){(listeners[name]??=[]).push(fn);}};
 const live={streamId,source},LIVE_STREAMS={current:live};
 let resolveSnapshot;
+async function api(path,options){
+  statusCalls.push({path,options});
+  if(CASE==='probe-error') throw new Error('status unavailable');
+  return {active:CASE==='runtime-active'};
+}
 async function _restoreSettledSession(source,options){
   calls.push({source,options});
   return new Promise(resolve=>{resolveSnapshot=resolve;});
@@ -67,6 +72,7 @@ const idle=[{session_id:activeSid,is_streaming:false,active_stream_id:null}];
     await timers[0].fn();
     assert.strictEqual(timers[1].cancelled,false,'a queued old callback cannot cancel a replacement ticket');
     const replacement=timers[1].fn();
+    await Promise.resolve();
     assert.strictEqual(calls.length,1);
     resolveSnapshot('active');await replacement;
     console.log('ok');return;
@@ -80,6 +86,24 @@ const idle=[{session_id:activeSid,is_streaming:false,active_stream_id:null}];
   const running=timers[0].fn();
   if(mode==='replace-before'){
     await running;assert.strictEqual(calls.length,0);console.log('ok');return;
+  }
+  await Promise.resolve();
+  assert.strictEqual(statusCalls.length,1);
+  assert.ok(statusCalls[0].path.includes('/api/chat/stream/status?stream_id=turn-1'));
+  assert.deepStrictEqual(statusCalls[0].options,{timeoutMs:8000,retries:0,timeoutToast:false});
+  if(mode==='runtime-active'){
+    await running;
+    assert.strictEqual(calls.length,0,'active runtime must not fall through to session restore');
+    assert.strictEqual(failures.length,0);
+    assert.strictEqual(S.busy,true);
+    assert.strictEqual(INFLIGHT.current,original);
+    console.log('ok');return;
+  }
+  if(mode==='probe-error'){
+    await running;
+    assert.strictEqual(calls.length,0,'failed runtime probe must not trust idle session flags');
+    assert.strictEqual(failures.length,1);
+    console.log('ok');return;
   }
   assert.strictEqual(calls.length,1);
   _reconcileActiveSessionIdleStateFromList(idle);
@@ -113,7 +137,7 @@ const idle=[{session_id:activeSid,is_streaming:false,active_stream_id:null}];
 
 
 @pytest.mark.parametrize("case", [
-    "error", "active", "restored", "cancel-before", "replace-before",
+    "error", "active", "restored", "runtime-active", "probe-error", "cancel-before", "replace-before",
     "replace-during", "new-turn", "navigate", "done", "stream-end-pending", "cancel-rearm",
 ])
 def test_sidebar_idle_open_stream_has_bounded_owner_safe_recovery(case):

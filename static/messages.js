@@ -5771,6 +5771,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return;
         }
         try{
+          let runtimeStatus=null;
+          try{
+            runtimeStatus=await api(
+              `/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`,
+              {timeoutMs:8000,retries:0,timeoutToast:false}
+            );
+          }catch(_){
+            // Runtime ownership is authoritative here.  If the probe itself
+            // fails, do not infer completion from already-cleared session
+            // fields; surface the existing interrupted-stream path instead.
+            if(isCurrent()) _handleStreamError(live.source);
+            return;
+          }
+          if(!isCurrent()) return;
+          if(!runtimeStatus||typeof runtimeStatus.active!=='boolean'){
+            _handleStreamError(live.source);
+            return;
+          }
+          // Gateway success writeback clears persisted active/pending fields
+          // before post-turn goal evaluation and terminal event emission.
+          // STREAMS-backed status therefore owns this decision: an exact active
+          // runtime must keep its OPEN browser handoff even if the sidebar row
+          // already looks idle.
+          if(runtimeStatus.active) return;
           const status=await _restoreSettledSession(live.source,{
             status:true,
             isCurrent,

@@ -109,6 +109,43 @@ def test_noncompressed_parent_and_absent_database_keep_legacy_behavior(lineage, 
     assert not (tmp_path / 'missing').exists()
 
 
+@pytest.mark.parametrize('method', ['get_session', 'get_compression_tip'])
+@pytest.mark.parametrize('kind', ['missing', 'noncallable', 'signature'])
+def test_older_agent_keeps_sidecar_recovery(tmp_path, monkeypatch, method, kind):
+    import sys
+    from api.compression_continuation import durable_compression_continuation
+
+    class OldDB:
+        closed = False
+        def __init__(self, *args, **kwargs):
+            pass
+        def get_session(self, sid):
+            return {'end_reason': 'compression'}
+        def get_compression_tip(self, sid):
+            return 'legacychild'
+        def close(self):
+            OldDB.closed = True
+
+    if kind == 'missing':
+        delattr(OldDB, method)
+    elif kind == 'noncallable':
+        setattr(OldDB, method, None)
+    else:
+        setattr(OldDB, method, lambda self, sid, required: None)
+    monkeypatch.setitem(sys.modules, 'hermes_state', SimpleNamespace(SessionDB=OldDB))
+    (tmp_path / 'state.db').touch()
+    monkeypatch.setattr(profiles, '_resolve_profile_home_for_name', lambda _: str(tmp_path))
+    session = SimpleNamespace(session_id='legacyparent', profile='default', pre_compression_snapshot=True)
+    child = SimpleNamespace(session_id='legacychild', profile='default',
+                            parent_session_id='legacyparent', pre_compression_snapshot=False,
+                            updated_at=2, created_at=1)
+    monkeypatch.setattr(routes, 'SESSIONS', {'legacychild': child})
+    monkeypatch.setattr(routes, 'SESSION_DIR', tmp_path)
+    assert durable_compression_continuation(session) == (False, None)
+    assert OldDB.closed
+    assert routes._pre_compression_continuation_session_id(session) == 'legacychild'
+
+
 def test_browser_rotation_restores_draft_without_reposting():
     source = (Path(__file__).parents[1] / 'static/messages.js').read_text()
     helper = source[source.index('async function _recoverCompressedSend('):source.index('function _restoreComposerDraftAfterFailedSend(')]

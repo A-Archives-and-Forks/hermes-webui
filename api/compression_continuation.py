@@ -3,6 +3,7 @@
 SQLite owns compression lineage; sidecar snapshot flags may predate a
 Desktop/CLI rotation. Never reopen a sealed parent or mutate Agent state here.
 """
+import inspect
 import logging
 from pathlib import Path
 
@@ -30,6 +31,16 @@ def durable_compression_continuation(session):
         if not path.is_file():
             return False, None
         db = SessionDB(path, read_only=True)
+        # Establish the complete read API before accepting SQLite authority.
+        # Old Agents must retain legacy sidecar recovery, not a sealed null tip.
+        for name in ('get_session', 'get_compression_tip'):
+            method = getattr(db, name, None)
+            if not callable(method):
+                return False, None
+            try:
+                inspect.signature(method).bind(sid)
+            except (TypeError, ValueError):
+                return False, None
         parent = db.get_session(sid)
         if not parent or parent.get("end_reason") != "compression":
             return False, None

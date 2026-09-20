@@ -107,6 +107,67 @@ def worker_scene(tmp_path, monkeypatch):
     return scene
 
 
+def test_stop_between_stream_lookup_and_run_registration(worker_scene, monkeypatch):
+    scene = worker_scene
+    looked_up, release = threading.Event(), threading.Event()
+    peek, register = streaming.peek_stream, streaming.register_active_run
+    registrations = []
+
+    def paused_peek(stream_id):
+        q = peek(stream_id)
+        looked_up.set()
+        assert release.wait(5), "stream lookup was not released"
+        return q
+
+    def observed_register(*args, **kwargs):
+        registrations.append(kwargs)
+        return register(*args, **kwargs)
+
+    monkeypatch.setattr(streaming, "peek_stream", paused_peek)
+    monkeypatch.setattr(streaming, "register_active_run", observed_register)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(scene.run)
+        try:
+            assert looked_up.wait(5)
+            assert streaming.cancel_stream("run")
+        finally:
+            release.set()
+        future.result(timeout=10)
+    assert registrations == [], "cancelled worker republished active-run state"
+    assert scene.agent is None
+    assert "run" not in config.ACTIVE_RUNS
+    assert "run" not in config.CANCEL_FLAGS
+
+
+def test_initial_run_registration_is_fenced_with_cancel_flag(worker_scene, monkeypatch):
+    scene = worker_scene
+    register = streaming.register_active_run
+    registrations = []
+
+    def observed_register(stream_id, **metadata):
+        assert scene.lock.owner == threading.get_ident()
+        assert stream_id in config.STREAMS
+        flag = config.CANCEL_FLAGS[stream_id]
+        assert not flag.is_set()
+        registrations.append(flag)
+        return register(stream_id, **metadata)
+
+    monkeypatch.setattr(streaming, "register_active_run", observed_register)
+    # Stop just after registration, before journal setup used to recreate flags.
+    def cancel_at_journal(*args, **kwargs):
+        assert scene.lock.owner != threading.get_ident()
+        assert streaming.cancel_stream("run")
+        return None
+
+    monkeypatch.setattr(streaming, "RunJournalWriter", cancel_at_journal)
+    scene.run()
+    assert len(registrations) == 1
+    assert registrations[0].is_set()
+    assert scene.agent is None, "cancel event was replaced before preflight"
+    assert "run" not in config.CANCEL_FLAGS
+    assert "run" not in config.ACTIVE_RUNS
+
+
 @pytest.mark.parametrize("cancellation", ["stop", "event-only", "detached-only"])
 def test_stop_during_agent_creation_prevents_provider_run(worker_scene, monkeypatch, cancellation):
     scene = worker_scene

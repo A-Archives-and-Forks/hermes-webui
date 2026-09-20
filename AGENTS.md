@@ -80,8 +80,10 @@ Follow that checklist's safety rules:
   agent.steer() under that same lock edge, so a Stop that claims cancellation
   never strands guidance an earlier Steer response reported as accepted. Test
   both Stop/Steer orderings — registered and cache-only — with deterministic
-  barriers. Worker registration must also check its retained cancel event and
-  live stream membership: Stop can remove CANCEL_FLAGS during initialization.
+  barriers. Initial active-run publication and its cancel flag must share that
+  lock edge with Stop; do not recreate the flag after journal setup. Worker
+  registration must also check its retained cancel event and live stream
+  membership: Stop can remove CANCEL_FLAGS during initialization.
   Do not re-register a cancelled worker; finalize outside the stream lock.
   Local Steer accepts only explicit starting/running phases. Close admission
   by publishing finalizing under STREAMS_LOCK before the last pending-steer

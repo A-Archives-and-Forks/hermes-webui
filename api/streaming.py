@@ -9170,7 +9170,32 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
+    cancel_event = threading.Event()
     q = peek_stream(stream_id)
+    if q is not None:
+        # Snapshot lookup is not admission: Stop can detach the stream before
+        # we publish the initial run. Register ownership and its retained cancel
+        # signal on the same STREAMS_LOCK edge used by cancellation.
+        with STREAMS_LOCK:
+            cancel_event = CANCEL_FLAGS.get(stream_id, cancel_event)
+            if stream_id not in STREAMS or cancel_event.is_set():
+                q = None
+            else:
+                CANCEL_FLAGS[stream_id] = cancel_event
+                STREAM_PARTIAL_TEXT[stream_id] = ''
+                STREAM_REASONING_TEXT[stream_id] = ''
+                STREAM_LIVE_TOOL_CALLS[stream_id] = []
+                register_active_run(
+                    stream_id,
+                    session_id=session_id,
+                    started_at=time.time(),
+                    phase="starting",
+                    workspace=str(workspace),
+                    model=model,
+                    provider=model_provider,
+                    ephemeral=bool(ephemeral),
+                    backend=WEBUI_LOCAL_CHAT_BACKEND,
+                )
     if q is None:
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
@@ -9184,17 +9209,6 @@ def _run_agent_streaming(
                 exc_info=True,
             )
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        ephemeral=bool(ephemeral),
-        backend=WEBUI_LOCAL_CHAT_BACKEND,
-    )
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
@@ -9225,14 +9239,6 @@ def _run_agent_streaming(
     # (was here at v0.51.30) — the previous placement always read the default
     # profile's mcp_servers because os.environ['HERMES_HOME'] hadn't been
     # rewritten yet.  See https://github.com/nesquena/hermes-webui/issues/1968.
-
-    # Sprint 10: create a cancel event for this stream
-    cancel_event = threading.Event()
-    with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
-        STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
     agent = None
     _live_prompt_estimate_tokens = [0]

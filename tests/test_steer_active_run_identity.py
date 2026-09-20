@@ -192,7 +192,11 @@ def test_local_worker_registers_the_backend_cache_only_steer_requires(monkeypatc
         captured[stream_id] = metadata
         raise _Registered()
 
-    monkeypatch.setattr(streaming, "peek_stream", lambda stream_id: queue.Queue())
+    for name in ("STREAMS", "CANCEL_FLAGS", "STREAM_PARTIAL_TEXT",
+                 "STREAM_REASONING_TEXT", "STREAM_LIVE_TOOL_CALLS"):
+        isolated = {"run": queue.Queue()} if name == "STREAMS" else {}
+        monkeypatch.setattr(config, name, isolated)
+        monkeypatch.setattr(streaming, name, isolated)
     monkeypatch.setattr(streaming, "register_active_run", register)
     with pytest.raises(_Registered):
         streaming._run_agent_streaming("original", "hi", "m", "/tmp", "run")

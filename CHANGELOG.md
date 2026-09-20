@@ -5,6 +5,20 @@
 
 ### Fixed
 
+- **Steering a conversation works again after the context is compressed.** When compression
+  rotated `agent.session_id`, a steer could no longer find the active worker: it was either
+  silently dropped or accepted and never delivered. Steers now resolve the owning worker
+  directly rather than relying on a cache lookup that compression invalidates, and every
+  terminal exit — normal completion, returned error, raised exception and self-heal — passes
+  through one idempotent settle boundary, so guidance can no longer be stranded between the
+  final drain and teardown. Two related defects are fixed alongside it: **Stop now actually
+  stops** a run that had already passed preflight (previously the worker could consult a
+  removed registry entry, miss the cancellation, and continue to completion), and a live
+  `finalizing` run is no longer reported as `stream_dead`, which had caused the client to tear
+  down its state while the stream was still alive. Compressed sessions from the CLI, TUI,
+  Desktop and ACP now resume correctly, and installations running an older Agent keep their
+  existing sidecar recovery instead of being left unresumable. Thanks @ruizanthony. (#7546)
+
 - **Slash-command autocomplete stops offering commands the WebUI cannot run.** The composer's
   `/` menu announced all 51 registered commands, but many are CLI-only — picking one produced
   a command that went nowhere. The menu now announces only the WebUI-dispatchable subset (16),

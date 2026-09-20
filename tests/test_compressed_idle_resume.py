@@ -49,8 +49,7 @@ class Handler:
         pass
 
 
-def test_stale_post_rejected_before_workspace_or_worker_mutation(lineage, monkeypatch):
-    _, session = lineage
+def _assert_stale_post_rotation(session, monkeypatch, expected_continuation):
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **kw: None)
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *a, **kw: session)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
@@ -61,7 +60,41 @@ def test_stale_post_rejected_before_workspace_or_worker_mutation(lineage, monkey
     assert h.status == 409
     payload = json.loads(h.wfile.getvalue())
     assert payload["code"] == "session_rotated"
-    assert payload["continuation_session_id"] == "idlechild"
+    assert payload["continuation_session_id"] == expected_continuation
+
+
+def test_stale_post_rejected_before_workspace_or_worker_mutation(lineage, monkeypatch):
+    _, session = lineage
+    _assert_stale_post_rotation(session, monkeypatch, "idlechild")
+
+
+@pytest.mark.parametrize("source", ["desktop", "acp"])
+def test_same_source_local_interactive_lineage_resumes(lineage, monkeypatch, source):
+    db, session = lineage
+    db._conn.execute(
+        "UPDATE sessions SET source=? WHERE id IN ('sealedparent', 'idlechild')",
+        (source,),
+    )
+    db._conn.commit()
+
+    assert routes._pre_compression_continuation_session_id(session) == "idlechild"
+    _assert_stale_post_rotation(session, monkeypatch, "idlechild")
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["cron", "webhook", "kanban", "tool", "subagent", "unknown-source"],
+)
+def test_noninteractive_lineage_is_not_resumable(lineage, monkeypatch, source):
+    db, session = lineage
+    db._conn.execute(
+        "UPDATE sessions SET source=? WHERE id IN ('sealedparent', 'idlechild')",
+        (source,),
+    )
+    db._conn.commit()
+
+    assert routes._pre_compression_continuation_session_id(session) is None
+    _assert_stale_post_rotation(session, monkeypatch, None)
 
 
 def test_idle_tip_accepts_normal_persistence_without_reopening_parent(lineage):

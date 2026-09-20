@@ -10,6 +10,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _is_local_interactive_persisted_source(source):
+    return isinstance(source, str) and source in {
+        "webui", "tui", "cli", "desktop", "acp",
+    }
+
+
 def durable_compression_continuation(session):
     """Return (sealed, resumable tip), without making a recovery write.
 
@@ -49,7 +55,7 @@ def durable_compression_continuation(session):
         if not tip or tip == sid:
             return True, None
         child = db.get_session(tip)
-        if not child or child.get("source") not in {"webui", "tui", "cli"}:
+        if not child or not _is_local_interactive_persisted_source(child.get("source")):
             return True, None
         for row in (parent, child):
             if row.get("profile_name") not in (None, "", profile):

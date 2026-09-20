@@ -238,3 +238,97 @@ def test_cron_update_valid_schedule_still_succeeds(monkeypatch):
     assert handler.status == 200
     assert calls and calls[0][0] == "test-job"
     assert calls[0][1]["schedule"] == "2026-08-28T16:05:00-05:00"
+
+
+# ---------------------------------------------------------------------------
+# Behavioral round-trip coverage (gate follow-up).
+#
+# The assertions above pin the SOURCE TEXT of `_cronScheduleForEdit`. That is
+# not enough: the first implementation satisfied every one of them while still
+# rewriting a natural-language recurring schedule. `every monday 9am` has a
+# canonical `sched.expr` of `0 9 * * 1`, and because `expr` was consulted
+# before `schedule_display`, opening such a job for edit (or duplicating it)
+# replaced the user's wording with raw cron. The Agent rebuilds
+# `schedule_display` from whatever the WebUI submits, so the rewrite sticks and
+# the user silently loses the phrasing they typed.
+#
+# These tests EXECUTE the real helper out of panels.js instead of reading it.
+# ---------------------------------------------------------------------------
+
+import subprocess
+
+
+def _cron_schedule_for_edit_source() -> str:
+    """Slice the complete `_cronScheduleForEdit` declaration out of panels.js."""
+    marker = "function _cronScheduleForEdit("
+    start = PANELS_JS.find(marker)
+    assert start != -1, "_cronScheduleForEdit not found in panels.js"
+    paren = PANELS_JS.find("(", start)
+    depth = 0
+    brace = -1
+    for idx in range(paren, len(PANELS_JS)):
+        ch = PANELS_JS[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                brace = PANELS_JS.find("{", idx)
+                break
+    assert brace != -1, "_cronScheduleForEdit body not found"
+    depth = 0
+    for idx in range(brace, len(PANELS_JS)):
+        ch = PANELS_JS[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return PANELS_JS[start:idx + 1]
+    raise AssertionError("_cronScheduleForEdit body did not terminate")
+
+
+def _run_cron_schedule_for_edit(job: dict) -> str:
+    """Execute the real `_cronScheduleForEdit` from panels.js against `job`."""
+    script = (
+        f"{_cron_schedule_for_edit_source()}\n"
+        f"const job = {json.dumps(job)};\n"
+        "process.stdout.write(String(_cronScheduleForEdit(job)));\n"
+    )
+    result = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
+    return result.stdout
+
+
+def test_natural_language_recurring_schedule_survives_edit_unchanged():
+    """`every monday 9am` must round-trip as typed, not as `0 9 * * 1`.
+
+    Red before the fix: `sched.expr` was preferred over `schedule_display`.
+    """
+    job = {
+        "schedule_display": "every monday 9am",
+        "schedule": {"kind": "cron", "expr": "0 9 * * 1"},
+    }
+    assert _run_cron_schedule_for_edit(job) == "every monday 9am"
+
+
+def test_one_shot_still_uses_canonical_run_at_not_the_display_label():
+    """The original #7352 fix must not regress: `once at ...` is unparseable."""
+    job = {
+        "schedule_display": "once at 2026-08-28 16:00",
+        "schedule": {"kind": "once", "run_at": "2026-08-28T16:00:00"},
+    }
+    assert _run_cron_schedule_for_edit(job) == "2026-08-28T16:00:00"
+
+
+def test_raw_cron_expression_without_display_falls_back_to_expr():
+    """A job carrying only `expr` still yields the canonical expression."""
+    job = {"schedule": {"kind": "cron", "expr": "*/15 * * * *"}}
+    assert _run_cron_schedule_for_edit(job) == "*/15 * * * *"
+
+
+def test_legacy_expression_field_still_accepted():
+    """Back-compat: older payloads expose `expression` rather than `expr`."""
+    job = {"schedule": {"kind": "cron", "expression": "0 0 * * *"}}
+    assert _run_cron_schedule_for_edit(job) == "0 0 * * *"

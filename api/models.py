@@ -2438,6 +2438,78 @@ def _latest_user_matches_pending_text(messages, pending_text):
     return False
 
 
+def _transcript_already_advanced_past_pending(session) -> bool:
+    """#6366: a stale pending user message whose content already appears
+    in the durable transcript as a user row, followed by a newer settled
+    assistant row, means the transcript has already advanced past this
+    pending turn. Returning True here lets the recovery path skip the
+    recovered user / ``_partial`` clone / journal replay / generic
+    no-response error that would otherwise append after the valid
+    final answer. The tail-only check at line ~3485 (``session.messages[-1]``)
+    misses this case: when the pending turn's user row is older than
+    the transcript tail, the tail is a *newer* assistant row that
+    can never match the pending **user** checkpoint, and the recovery
+    path falls through into the append branch.
+
+    Strict match: uses ``_message_matches_pending_checkpoint`` (content
+    + timestamp + source + attachments) rather than the looser text-
+    only matcher, so a *new* user turn that happens to repeat the
+    same prompt text (e.g. user re-sends the same question) is NOT
+    misclassified as a stale advance. That distinction is the
+    regression guard for the repeated-prompt identity cases covered
+    by ``test_repeated_pending_prompt_uses_current_checkpoint_identity``.
+
+    Idempotent: this is a pure read that does not mutate the session.
+    Running recovery twice therefore produces the same outcome.
+    """
+    pending_text = getattr(session, 'pending_user_message', None)
+    if not pending_text:
+        return False
+    pending_started_at = getattr(session, 'pending_started_at', None)
+    pending_source = getattr(session, 'pending_user_source', None)
+    pending_attachments = getattr(session, 'pending_attachments', None)
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list):
+        return False
+    for idx, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if not _message_matches_pending_checkpoint(
+            message,
+            pending_text,
+            pending_started_at,
+            pending_source,
+            pending_attachments,
+        ):
+            continue
+        # Found a strictly-matching user row at ``idx``. Walk
+        # forward and look for a settled assistant row (not
+        # ``_partial``, not ``_error``, not the recovery marker).
+        # Any such row means the transcript has already advanced
+        # past this pending turn into a newer settled
+        # user/assistant boundary, and recovery must not append
+        # duplicate rows after it.
+        for later in messages[idx + 1:]:
+            if not isinstance(later, dict):
+                continue
+            if later.get('role') != 'assistant':
+                continue
+            if later.get('_partial') or later.get('_error'):
+                continue
+            if later.get('_recovered'):
+                # A previously-recovered assistant row (from an
+                # earlier recovery pass that may have appended the
+                # very row we are trying to avoid) is not a
+                # settled answer either. Skip and keep looking.
+                continue
+            return True
+        # Matched user row but no later settled assistant row →
+        # the transcript has not advanced past this pending turn.
+        # Recovery is the legitimate path.
+        return False
+    return False
+
+
 def _partial_message_signature(message: dict) -> tuple:
     """Return a stable identity for partial assistant markers recovered on load."""
     if not isinstance(message, dict):
@@ -3515,6 +3587,29 @@ def _apply_core_sync_or_error_marker(
             )
             return True
         if not _tail_user_already_checkpointed:
+            # #6366 re-gate: when the durable transcript has already
+            # advanced past this pending turn into a newer settled
+            # user/assistant boundary, the recovery path must NOT
+            # append a recovered user row + ``_partial`` clone +
+            # journal replay + generic no-response error after the
+            # valid final answer. The tail-only check above misses
+            # that case (the tail is a newer assistant row that can
+            # never match the pending user checkpoint). Clear only
+            # the stale pending fields and return; the transcript is
+            # already correct and durable.
+            if _transcript_already_advanced_past_pending(session):
+                session.active_stream_id = None
+                session.pending_user_message = None
+                session.pending_attachments = []
+                session.pending_started_at = None
+                session.pending_user_source = None
+                session.save(touch_updated_at=touch_updated_at)
+                logger.info(
+                    "Session %s: cleared stale pending state for stream %s — transcript already advanced past this turn",
+                    sid,
+                    _stream_id,
+                )
+                return True
             _append_recovered_pending_turn(session, timestamp=_recovered_ts)
         else:
             recovered = {

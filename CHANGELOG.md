@@ -5,6 +5,14 @@
 
 ### Fixed
 
+- **Slash-command autocomplete stops offering commands the WebUI cannot run.** The composer's
+  `/` menu announced all 51 registered commands, but many are CLI-only — picking one produced
+  a command that went nowhere. The menu now announces only the WebUI-dispatchable subset (16),
+  so the difference shows up where it matters: typing a prefix like `/a` or `/re` no longer
+  fills the list with dead options. Filtering is confined to the suggestion list — manually
+  typing a CLI-only command behaves exactly as before, and plugin commands plus the native
+  `/moa`, `/sessions`, `/resume` and `/pet` remain available. Thanks @webtecnica.
+
 - **Concurrent background completions stop burning the async-delegation delivery budget.**
   When several delegated runs finished at once and idle-woke the same session together, each
   wakeup consumed a delivery attempt before discovering the others, so the budget could be

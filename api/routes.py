@@ -3513,6 +3513,10 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     # most once per interim segment.
     reasoning_parts: list[str] = []
     reasoning_dirty = False
+    # Incremental folded index over the reasoning transcript: the per-interim
+    # echo probe consults this instead of re-walking the raw text (see
+    # ``_CompactEchoIndex``).
+    reasoning_index = _CompactEchoIndex()
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
@@ -3592,30 +3596,32 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         tool_calls.append(call)
 
     def reasoning_echo_tail_matches(text: str) -> bool:
-        full = _materialize_reasoning_text()
-        if not full:
-            return False
-        # Backward compact-suffix walk (no fixed window): linear in the echo
-        # length, allocation-free, and it cannot miss a compact-equivalent
-        # suffix whose raw span is stretched by interior whitespace. The
-        # previous bounded-tail probe folded up to len(text)*3 raw characters
-        # per interim segment - and when its window fell short it dropped the
-        # echo strip, duplicating the interim text in the restored transcript.
-        return _find_compact_echo_suffix_start(full, text) is not None
+        # Indexed tail match (no raw-text walk): the incremental index folds
+        # each reasoning chunk once as it is appended, so this probe costs
+        # O(len(text)) regardless of how much interior whitespace stretches
+        # the raw span. The previous raw backward walk re-walked that span
+        # once per interim event, which turned the replay quadratic on a
+        # whitespace-heavy transcript (#7569 review, ~55x slower than master
+        # on a production-shaped journal).
+        return reasoning_index.matches_tail(text)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
         nonlocal reasoning_text, reasoning_dirty, reasoning_first_tool_count
-        next_reasoning, did_remove = _strip_compact_echo_suffix(
-            _materialize_reasoning_text(), text
-        )
-        if did_remove:
-            reasoning_text = next_reasoning
-            reasoning_parts.clear()
-            reasoning_parts.append(next_reasoning)
-            reasoning_dirty = False
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
-        return did_remove
+        cut = reasoning_index.cut_to(text)
+        if cut is None:
+            return False
+        next_reasoning = _materialize_reasoning_text()[:cut].rstrip()
+        reasoning_text = next_reasoning
+        reasoning_parts.clear()
+        reasoning_parts.append(next_reasoning)
+        reasoning_dirty = False
+        # Re-index the truncated transcript so later probes match against it
+        # instead of the pre-strip tail (the index is the match authority).
+        reasoning_index.reset()
+        reasoning_index.append(next_reasoning)
+        if not _compact_for_echo_compare(reasoning_text):
+            reasoning_first_tool_count = None
+        return True
 
     for event in events:
         event_name = str(event.get("event") or event.get("type") or "")
@@ -3640,6 +3646,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 if reasoning_first_tool_count is None:
                     reasoning_first_tool_count = len(tool_calls)
                 reasoning_parts.append(text)
+                reasoning_index.append(text)
                 reasoning_dirty = True
             continue
         if event_name == "interim_assistant":
@@ -10755,6 +10762,7 @@ from api.streaming import (
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
     _compact_for_echo_compare,
+    _CompactEchoIndex,
     _find_compact_echo_suffix_start,
     _strip_compact_echo_suffix,
 )

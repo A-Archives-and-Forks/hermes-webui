@@ -475,6 +475,10 @@ Expected behavior:
   transport, list reconciliation and cache purging must preserve that handoff.
   Missing, connecting, closed, or mismatched transports keep the normal stale
   state recovery path; a cached stream ID or busy flag is insufficient.
+  OPEN is not proof that a terminal frame will arrive: an idle hint must also
+  schedule bounded canonical snapshot recovery without erasing the live scene.
+  A newer turn, replacement source, or received terminal event invalidates that
+  request; a still-active server snapshot is not permission to terminate work.
 - Background completion, cancellation, or failure should be represented without
   stealing the visible pane from the user.
 - Session switching should not erase pending live context, in-flight snapshots,

@@ -39,6 +39,7 @@ SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+_FRAME_PROOF_BITES = {"settle-worklog-frame-proof", "sidebar-idle-missing-terminal"}
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
@@ -335,7 +336,8 @@ def _exercise_sidebar_terminal_handoff(page, barrier_dir: Path, artifact_dir: Pa
             "observation": observation,
         }
     assert observation["liveRows"] > 0, observation
-    (barrier_dir / "release").touch()
+    if TEST_BITE != "sidebar-idle-missing-terminal":
+        (barrier_dir / "release").touch()
 
 
 class DeterministicGateway:
@@ -785,11 +787,12 @@ def main() -> int:
         "drop-anchor-persistence",
         "drop-terminal-anchor-row",
         "settle-worklog-frame-proof",
+        "sidebar-idle-missing-terminal",
     }:
         raise ValueError(
             f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
             "expected one of '', 'drop-anchor-persistence', "
-            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof'"
+            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof', 'sidebar-idle-missing-terminal'"
         )
     if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
         raise ValueError(
@@ -836,7 +839,7 @@ def main() -> int:
     })
     env.pop("HERMES_TEST_TERMINAL_BARRIER_DIR", None)
     terminal_barrier_dir = None
-    if TEST_BITE == "settle-worklog-frame-proof" and scenario == "normal":
+    if TEST_BITE in _FRAME_PROOF_BITES and scenario == "normal":
         terminal_barrier_dir = state_dir / "terminal-barrier"
         terminal_barrier_dir.mkdir()
         env["HERMES_TEST_TERMINAL_BARRIER_DIR"] = str(terminal_barrier_dir)
@@ -931,7 +934,7 @@ def main() -> int:
         # must never expose an expanded empty Worklog shell or an activity-less
         # gap.  Sample after rAF callbacks for a frame have drained; DOM mutations
         # within one task or earlier rAF callbacks are not user-visible frames.
-        if TEST_BITE == "settle-worklog-frame-proof":
+        if TEST_BITE in _FRAME_PROOF_BITES:
             page.evaluate(
                 """() => {
                   const samples = [];
@@ -1005,8 +1008,11 @@ def main() -> int:
                 """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
                   ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)""",
                 arg=FINAL_TEXT,
-                timeout=15000,
+                timeout=11000 if TEST_BITE == "sidebar-idle-missing-terminal" else 15000,
             )
+            if TEST_BITE == "sidebar-idle-missing-terminal":
+                assert not (terminal_barrier_dir / "release").exists(), "terminal frame was unexpectedly released"
+                print("OK  missing terminal: canonical snapshot settled the still-OPEN transport before terminal delivery")
         else:
             gateway.release_terminal.set()
             page.wait_for_function(
@@ -1018,7 +1024,7 @@ def main() -> int:
             )
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
-        if TEST_BITE == "settle-worklog-frame-proof":
+        if TEST_BITE in _FRAME_PROOF_BITES:
             page.wait_for_timeout(100)
             settle_proof = page.evaluate(
                 "window.__lifecycleSettleFrameProof && window.__lifecycleSettleFrameProof.stop()"

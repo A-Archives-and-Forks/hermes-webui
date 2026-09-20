@@ -2089,6 +2089,7 @@ function closeLiveStream(sessionId, streamId, source){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  if(typeof live.cancelIdleRecovery==='function') live.cancelIdleRecovery();
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
   // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
   // SSE events, so switching away during a quiet window (mid tool-exec, silent
@@ -5745,12 +5746,58 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
 
+  function _bindSidebarIdleRecovery(live){
+    let pending=null;
+    live.cancelIdleRecovery=()=>{
+      if(pending&&pending.timer) clearTimeout(pending.timer);
+      pending=null;
+    };
+    live.recoverFromSidebarIdle=()=>{
+      if(pending||_streamFinalized||_terminalStateReached||_pendingStreamEndRecovery) return;
+      const request={inflight:INFLIGHT[activeSid],timer:null};
+      const isCurrent=()=>pending===request&&!_streamFinalized&&!_terminalStateReached&&
+        LIVE_STREAMS[activeSid]===live&&live.source.readyState===1&&
+        S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&
+        INFLIGHT[activeSid]===request.inflight&&
+        !(typeof _sendInProgress!=='undefined'&&_sendInProgress&&activeSid===_sendInProgressSid);
+      pending=request;
+      // Give the independently delivered terminal frame a short handoff window,
+      // then use canonical session recovery even if the transport stays OPEN.
+      // One ticket spans both timer and request; list refreshes cannot extend it.
+      request.timer=setTimeout(async()=>{
+        request.timer=null;
+        if(!isCurrent()){
+          if(pending===request) live.cancelIdleRecovery();
+          return;
+        }
+        try{
+          const status=await _restoreSettledSession(live.source,{
+            status:true,
+            isCurrent,
+            requestOptions:{timeoutMs:8000,retries:0,timeoutToast:false},
+            preserveVisibleOnShorterTerminalSnapshot:true,
+          });
+          // A stale sidebar response is not permission to terminate a worker
+          // which the authoritative session snapshot still reports as active.
+          if(isCurrent()&&status!=='restored'&&status!=='active') _handleStreamError(live.source);
+        }finally{
+          if(pending===request) live.cancelIdleRecovery();
+        }
+      },1500);
+    };
+    for(const event of ['done','cancel','apperror','stream_end','error']){
+      live.source.addEventListener(event,live.cancelIdleRecovery);
+    }
+  }
+
   function _wireSSE(source){
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
+      if(typeof existingLive.cancelIdleRecovery==='function') existingLive.cancelIdleRecovery();
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
+    _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -7024,13 +7071,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
+    const isCurrent=options&&typeof options.isCurrent==='function'?options.isCurrent:null;
+    if(isCurrent&&!isCurrent()) return returnStatus?'stale':false;
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`,options&&options.requestOptions||{});
+      if(isCurrent&&!isCurrent()) return returnStatus?'stale':false;
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;

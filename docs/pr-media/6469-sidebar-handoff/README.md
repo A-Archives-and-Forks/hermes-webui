@@ -53,6 +53,30 @@ paths or credentials.
 
 The fix only defers these sidebar cleanups for the current pane's exact OPEN
 chat transport. Missing, CONNECTING, CLOSED and mismatched sources still take
-the existing stale recovery path. It does not add a separate recovery timer or
-claim to redesign transport liveness; prolonged network failure remains the
-responsibility of the existing stream error/recovery machinery.
+the existing stale recovery path.
+
+## Missing terminal frame: bounded recovery
+
+The OPEN-only guard at `85f1c2d34b62b0ade85f51ed2cf8c1cf56f5ab9e` could wait
+forever when the terminal frame never arrived. The follow-up keeps the live
+handoff for 1.5 seconds, then uses the existing canonical session restore with
+an eight-second request timeout and no retries. Repeated sidebar hints cannot
+restart the deadline or create concurrent requests. An active server snapshot
+preserves the run; a failed or timed-out request uses existing interrupted-stream
+recovery rather than claiming success. Normal terminal delivery, transport
+replacement/close, navigation, and a newer optimistic turn invalidate the old
+request. Already-running stream-end recovery remains the sole recovery owner.
+
+```sh
+LIFECYCLE_SCENARIO=normal LIFECYCLE_TEST_BITE=sidebar-idle-missing-terminal \
+  .venv/bin/python tests/browser_conversation_lifecycle.py
+./scripts/test.sh tests/test_sidebar_idle_stream_recovery.py -q
+```
+
+The new browser row keeps the real terminal HTTP barrier closed until cleanup;
+the client must recover without receiving `done` or `stream_end`. Published
+`85f1c2d34b` fails the 11-second completion bound with `S.busy` still true.
+The patched implementation restores the final answer and passes the unchanged
+painted-frame, semantic activity, persistence and hard-reload checks before the
+barrier is released. The cloud workflow runs both delayed- and missing-terminal
+rows. No live provider or production state is used.

@@ -855,7 +855,11 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   // Sidebar idle metadata can beat the terminal frame on the independent chat
   // SSE. Let its exact OPEN transport finish the Anchor handoff; orphaned or
   // disconnected streams still use the existing idle recovery below.
-  if (_hasOwnedOpenLiveStream(sid)) return false;
+  if (_hasOwnedOpenLiveStream(sid)) {
+    const live=LIVE_STREAMS[sid];
+    if(typeof live.recoverFromSidebarIdle==='function') live.recoverFromSidebarIdle();
+    return false;
+  }
   let changed=false;
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }

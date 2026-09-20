@@ -10763,8 +10763,6 @@ from api.streaming import (
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _CompactEchoIndex,
-    _find_compact_echo_suffix_start,
-    _strip_compact_echo_suffix,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (

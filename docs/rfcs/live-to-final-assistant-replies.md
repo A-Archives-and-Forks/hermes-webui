@@ -470,6 +470,11 @@ Expected behavior:
 
 - A session row's running indicator should reflect a real active run or a
   clearly restorable state, not stale persisted metadata alone.
+- An idle sidebar response does not prove that the browser has consumed the
+  terminal chat frame. While the current pane still owns its exact OPEN chat
+  transport, list reconciliation and cache purging must preserve that handoff.
+  Missing, connecting, closed, or mismatched transports keep the normal stale
+  state recovery path; a cached stream ID or busy flag is insufficient.
 - Background completion, cancellation, or failure should be represented without
   stealing the visible pane from the user.
 - Session switching should not erase pending live context, in-flight snapshots,

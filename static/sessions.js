@@ -852,6 +852,10 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
+  // Sidebar idle metadata can beat the terminal frame on the independent chat
+  // SSE. Let its exact OPEN transport finish the Anchor handoff; orphaned or
+  // disconnected streams still use the existing idle recovery below.
+  if (_hasOwnedOpenLiveStream(sid)) return false;
   let changed=false;
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
@@ -940,6 +944,8 @@ function _purgeStaleInflightEntries() {
     if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) {
       continue;
     }
+    // The sidebar render must not purge what the idle reconciler preserved.
+    if (_hasOwnedOpenLiveStream(sid)) continue;
     if (!sessionsById.has(sid)) {
       const knownSource = sourceById ? sourceById.get(sid) : null;
       if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) {
@@ -959,6 +965,14 @@ function _purgeStaleInflightEntries() {
     }
     // Sessions that exist and are still streaming are preserved.
   }
+}
+
+function _hasOwnedOpenLiveStream(sid) {
+  if (typeof S === 'undefined' || !S || !S.session || S.session.session_id !== sid || !S.activeStreamId) return false;
+  const live = typeof LIVE_STREAMS === 'object' && LIVE_STREAMS ? LIVE_STREAMS[sid] : null;
+  // readyState 1 is EventSource.OPEN. A cached stream ID or busy flag alone
+  // is not ownership and must never disable recovery for a stuck indicator.
+  return Boolean(live && live.streamId === S.activeStreamId && live.source && live.source.readyState === 1);
 }
 
 function _rememberSessionListSource(s, sid = null, allowScopeFallback = true) {
@@ -5278,7 +5292,8 @@ function _shouldKeepLocalOnlyOptimisticSessionRow(local){
 function _dropStaleOptimisticSessionRow(sid){
   if(!sid) return;
   if(typeof _rememberSessionListSource==='function') _rememberSessionListSource(null, sid, false);
-  if(INFLIGHT&&INFLIGHT[sid]){
+  // Retiring sidebar optimism must not retire the independent chat owner.
+  if(INFLIGHT&&INFLIGHT[sid]&&!_hasOwnedOpenLiveStream(sid)){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }

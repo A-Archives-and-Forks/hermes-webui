@@ -267,8 +267,17 @@ def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
         suffix = "" if attempts == 1 else f"-attempt-{attempt + 1}"
         log_path = artifact_dir / f"server{suffix}.log"
         log = log_path.open("w", encoding="utf-8")
+        command = [sys.executable, str(repo_root / "server.py")]
+        barrier_dir = env.get("HERMES_TEST_TERMINAL_BARRIER_DIR")
+        if barrier_dir:
+            command = [
+                sys.executable,
+                str(repo_root / "tests" / "sidebar_terminal_barrier_server.py"),
+                str(repo_root),
+                barrier_dir,
+            ]
         proc = subprocess.Popen(
-            [sys.executable, str(repo_root / "server.py")],
+            command,
             cwd=repo_root,
             env=run_env,
             stdout=log,
@@ -284,6 +293,49 @@ def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
     if last_tail:
         detail += f"; last server log tail:\n{last_tail}"
     raise RuntimeError(f"WebUI server did not become healthy{detail}")
+
+
+def _exercise_sidebar_terminal_handoff(page, barrier_dir: Path, artifact_dir: Path):
+    """Order the real idle-list response before the real terminal SSE write."""
+    deadline = time.monotonic() + 10
+    while not (barrier_dir / "ready").exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError("terminal HTTP barrier was not reached")
+        page.wait_for_timeout(10)
+    observation = page.evaluate(
+        """async () => {
+          const sid = S.session.session_id;
+          const stream = S.activeStreamId;
+          const inflight = INFLIGHT[sid];
+          const source = LIVE_STREAMS[sid] && LIVE_STREAMS[sid].source;
+          const registries = window._liveAnchorRegistries;
+          const registry = registries && registries.get(stream);
+          await renderSessionList();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const live = document.querySelector('#liveAssistantTurn');
+          return {
+            serverIdle: _allSessions.some(row => row.session_id === sid && _isServerIdleSessionRow(row)),
+            paneRetained: S.busy === true && S.activeStreamId === stream,
+            inflightRetained: !!inflight && INFLIGHT[sid] === inflight,
+            sourceRetained: !!source && source.readyState === EventSource.OPEN &&
+              LIVE_STREAMS[sid] && LIVE_STREAMS[sid].source === source,
+            registryRetained: !!registry && registries.get(stream) === registry,
+            liveRows: live ? live.querySelectorAll('[data-anchor-scene-row="1"]').length : 0,
+          };
+        }"""
+    )
+    (artifact_dir / "sidebar-before-terminal.json").write_text(
+        json.dumps(observation, indent=2), encoding="utf-8"
+    )
+    page.screenshot(path=str(artifact_dir / "sidebar-before-terminal.png"), full_page=True)
+    for invariant in ("serverIdle", "paneRetained", "inflightRetained", "sourceRetained", "registryRetained"):
+        assert observation[invariant] is True, {
+            "message": "idle sidebar response revoked the live terminal handoff",
+            "invariant": invariant,
+            "observation": observation,
+        }
+    assert observation["liveRows"] > 0, observation
+    (barrier_dir / "release").touch()
 
 
 class DeterministicGateway:
@@ -782,6 +834,12 @@ def main() -> int:
         "NO_PROXY": "127.0.0.1,localhost",
         "no_proxy": "127.0.0.1,localhost",
     })
+    env.pop("HERMES_TEST_TERMINAL_BARRIER_DIR", None)
+    terminal_barrier_dir = None
+    if TEST_BITE == "settle-worklog-frame-proof" and scenario == "normal":
+        terminal_barrier_dir = state_dir / "terminal-barrier"
+        terminal_barrier_dir.mkdir()
+        env["HERMES_TEST_TERMINAL_BARRIER_DIR"] = str(terminal_barrier_dir)
     proc = None
     log = None
     log_path = None
@@ -941,6 +999,8 @@ def main() -> int:
                 timeout=10000,
             )
             gateway.release_terminal.set()
+            if terminal_barrier_dir is not None:
+                _exercise_sidebar_terminal_handoff(page, terminal_barrier_dir, artifact_dir)
             page.wait_for_function(
                 """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
                   ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)""",
@@ -1176,6 +1236,8 @@ def main() -> int:
         exit_code = 1
         return 1
     finally:
+        if terminal_barrier_dir is not None:
+            (terminal_barrier_dir / "release").touch()
         gateway.close()
         if browser is not None:
             browser.close()

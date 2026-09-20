@@ -89,6 +89,12 @@ Follow that checklist's safety rules:
   by publishing finalizing under STREAMS_LOCK before the last pending-steer
   drain; earlier accepted guidance is drained, later guidance is rejected.
   Test both drain/Steer orderings, including compression-rotated identities.
+- Inactive-session recovery is separate from live Steer. Resolve durable
+  compression lineage in the session's profile database, read-only, even when
+  the WebUI sidecar has no snapshot flag. Never reopen a sealed parent. Reject
+  stale chat POSTs before workspace/model/pending-state mutation; the browser
+  loads the continuation and preserves the draft without automatic replay.
+  Explicit closures and unknown terminal reasons do not authorize a redirect.
 - For Docker build changes in `docker_init.bash`, mirror directory exclusions
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).

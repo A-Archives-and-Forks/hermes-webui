@@ -1296,6 +1296,31 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
+async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPromise){
+  let payload;
+  try{ payload=JSON.parse(error&&error.body||'{}'); }catch(_){ return false; }
+  const target=payload&&payload.continuation_session_id;
+  if(!error||error.status!==409||!payload||payload.code!=='session_rotated'||typeof target!=='string'||!target||target===sid) return false;
+  // A failed POST has not admitted a turn. Never resend automatically: the
+  // continuation may already be busy, and attachments must remain a draft.
+  if(!S.session||S.session.session_id!==sid) return false;
+  delete INFLIGHT[sid];
+  if(typeof clearInflightState==='function') clearInflightState(sid);
+  if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(sid);
+  stopApprovalPolling();stopClarifyPolling();removeThinking();setBusy(false);
+  try{
+    await loadSession(target);
+    if(!S.session||S.session.session_id===sid) return false;
+    // loadSession can lose its navigation race to another tab selection. Never
+    // place the rejected message into that unrelated session's composer.
+    _restoreComposerDraftAfterFailedSend(draftText,filesSnapshot,target,clearPromise);
+    if(S.session.session_id!==target) return true;
+    setComposerStatus('Session resumed. Your message is preserved; send it when ready.');
+    showToast('Session resumed after compression. Your draft is preserved.',4000);
+    return true;
+  }catch(_){ return false; }
+}
+
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
@@ -1850,6 +1875,7 @@ async function send(){
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
+    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise)) return;
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];

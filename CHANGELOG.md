@@ -5,6 +5,15 @@
 
 ### Fixed
 
+- **Concurrent background completions stop burning the async-delegation delivery budget.**
+  When several delegated runs finished at once and idle-woke the same session together, each
+  wakeup consumed a delivery attempt before discovering the others, so the budget could be
+  exhausted and later completions went undelivered. Admission is now an atomic per-origin
+  test-and-set: a second wakeup for an origin already in flight defers without claiming, so it
+  costs zero budget and stays eligible through durable restore. The reservation is released on
+  every exit — claim failure, formatting failure, dispatch failure, and turn completion — so a
+  failed wakeup cannot wedge an origin. Thanks @webtecnica.
+
 - **Images and files produced during Codex commentary are viewable again.** The Agent's OpenAI Codex Responses adapter persists user-visible assistant progress in `codex_message_items` with `phase: "commentary"` while the outer `content` field stays empty. WebUI's session MEDIA authorization and its snapshot capture both read only that outer field, so a `MEDIA:` token emitted during commentary was invisible to both — the artifact was never authorized for the session token and never snapshotted, leaving the user unable to open a file the assistant had just produced. Both consumers now inspect the commentary sidecars as well. The widening is confined to genuinely assistant-authored, correctly-phased items: role, type, phase and content checks all fail closed, so a user-authored message, a tool result or a malformed item cannot grant a path token. Every existing guard is unchanged — exact-path matching, MIME allow-listing, session ownership, profile visibility and the state/secret hard-deny all still run on anything discovered through the new route, and snapshot capture keeps its confinement without double-capturing an artifact already taken from outer content. Verified against the Agent's real producer shape plus an adversarial probe covering user/wrong-role/wrong-phase, denied-state, wrong-path, duplicate, malformed and 300k-item inputs. Thanks @happy5318. (#7654, #7565)
 
 - **Custom model names containing colons are no longer truncated in the picker.** A model id like `ollamacloud/qwen3.5:397b` was cut at its internal colon, so the picker showed a mangled label and two models that differed only after the colon could render identically. The colon is overloaded here — it separates a `@provider:model` routing lane, and it also appears inside perfectly ordinary model names — so the label builder now takes the catalog as the authority for `@custom` entries and leaves a plain-lane model id whole. Labels are display-only: the original option value survives selection and is dispatched unchanged, so no routing behaviour moves. Catalogued, cold, empty, stale, host:port, leading- and trailing-colon and multi-colon names were each checked to stay non-blank and exception-free. Thanks @webtecnica. (#7401, #7240)

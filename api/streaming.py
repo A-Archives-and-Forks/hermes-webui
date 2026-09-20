@@ -9541,8 +9541,42 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _steer_settled = False
+    _returned_pending_steer = []
+
+    def _remember_pending_steer_result(value):
+        text = value.get('pending_steer') if isinstance(value, dict) else None
+        if isinstance(text, str) and text:
+            _returned_pending_steer.append(text)
+
+    def _settle_pending_steer():
+        # Single terminal boundary for success, returned errors, exceptions and
+        # successful self-heal. Admission closes before the last slot consumer;
+        # registry locks never cover SSE writes or Agent drain callbacks.
+        nonlocal _steer_settled
+        with STREAMS_LOCK:
+            if _steer_settled:
+                return
+            _steer_settled = True
+            target = AGENT_INSTANCES.get(stream_id) or agent
+            if stream_id in STREAMS and not cancel_event.is_set():
+                update_active_run(stream_id, phase="finalizing")
+        leftovers = list(_returned_pending_steer)
+        try:
+            drain = getattr(target, '_drain_pending_steer', None)
+            text = drain() if callable(drain) else None
+            if text:
+                leftovers.append(str(text))
+        except Exception:
+            logger.debug("Failed to drain pending steer for session %s", session_id)
+        if leftovers:
+            put('pending_steer_leftover', {
+                'session_id': session_id, 'text': '\n'.join(leftovers),
+            })
 
     def put(event, data):
+        if event in ('done', 'apperror', 'stream_end'):
+            _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
@@ -11272,6 +11306,7 @@ def _run_agent_streaming(
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)
             result = agent.run_conversation(**_run_conversation_kwargs)
+            _remember_pending_steer_result(result)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -11807,6 +11842,7 @@ def _run_agent_streaming(
                                     _heal_context_messages
                                 )
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
+                                _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
                                     result=_heal_result,
@@ -12753,30 +12789,7 @@ def _run_agent_streaming(
                 else None
             )
             # (reasoning trace already attached + saved above, before s.save())
-            # Leftover-steer delivery: if a /steer was queued (via
-            # api/chat/steer) but the agent finished its turn before
-            # reaching a tool-result boundary that would consume it,
-            # the text is still stashed in agent._pending_steer. Drain
-            # it now and emit a pending_steer_leftover SSE event so the
-            # frontend can queue it for the next turn — same fallback
-            # path as the CLI in cli.py:8788-8794.
-            # Close Steer admission before its last consumer runs. Enqueues
-            # share this lock: earlier guidance is drained below; later requests
-            # fail closed instead of reporting success on an undeliverable input.
-            # Stop may have claimed first; never overwrite its cancelling phase.
-            with STREAMS_LOCK:
-                if stream_id in STREAMS:
-                    update_active_run(stream_id, phase="finalizing")
-            try:
-                _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
-                _leftover = _drain_pending_steer() if _drain_pending_steer else None
-                if _leftover:
-                    put('pending_steer_leftover', {
-                        'session_id': session_id,
-                        'text': str(_leftover),
-                    })
-            except Exception:
-                logger.debug("Failed to drain pending steer for session %s", session_id)
+            _settle_pending_steer()
             # /goal parity: after a successful assistant turn, run the Hermes
             # GoalManager judge before terminal done/stream_end events. The
             # frontend surfaces the status line and queues continuation_prompt as
@@ -13180,6 +13193,7 @@ def _run_agent_streaming(
                             _heal_context_messages
                         )
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
+                        _remember_pending_steer_result(_heal_result)
                         _active_turn_identity = _resolve_active_turn_authority(
                             _active_turn_identity,
                             result=_heal_result,
@@ -13433,6 +13447,7 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        _settle_pending_steer()
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a
         # _sessions[stream_id] entry that get_stats() pruning never reclaims (its
@@ -13460,7 +13475,6 @@ def _run_agent_streaming(
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
-            update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
@@ -13580,6 +13594,11 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
                     or run.get("phase") == "cancelling"):
                 return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
             return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
+        if (stream_id in cfg.STREAMS and owner == sid
+                and run.get("session_id") == sid
+                and run.get("backend") == WEBUI_LOCAL_CHAT_BACKEND
+                and run.get("phase") == "finalizing"):
+            return {"accepted": False, "fallback": "not_running", "stream_id": stream_id}
         if agent is None:
             if ((owner and owner != sid)
                     or (run.get("session_id") and run["session_id"] != sid)
@@ -13733,6 +13752,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                 if backend == "gateway":
                     # Gateway owns transport; a local cache object is never steered.
                     result = {"accepted": False, "fallback": "gateway_steer_queued",
+                              "stream_id": active_stream_id}
+                elif backend == WEBUI_LOCAL_CHAT_BACKEND and run.get("phase") == "finalizing":
+                    result = {"accepted": False, "fallback": "not_running",
                               "stream_id": active_stream_id}
                 elif (backend == WEBUI_LOCAL_CHAT_BACKEND
                       and run.get("phase") in _LOCAL_STEERABLE_PHASES):

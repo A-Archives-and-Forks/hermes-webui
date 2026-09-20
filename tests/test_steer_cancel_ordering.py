@@ -264,6 +264,6 @@ def test_cache_only_selection_revalidates_phase_before_enqueue(scene, monkeypatc
         return matched
 
     monkeypatch.setattr(streaming, "_cached_agent_matches_session", select_then_finalize)
-    assert steer() == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+    assert steer() == {"accepted": False, "fallback": "not_running", "stream_id": "run"}
     assert selected == [agent]
     agent.steer.assert_not_called()

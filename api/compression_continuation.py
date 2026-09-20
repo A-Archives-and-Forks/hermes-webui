@@ -45,7 +45,10 @@ def durable_compression_continuation(session):
                 return True, None
         # Only the observed automatic idle closure is resumable here. Explicit
         # resets/closures and unknown future reasons must not become redirects.
-        if child.get("ended_at") is not None and child.get("end_reason") != "idle_timeout":
+        reason = child.get("end_reason")
+        if reason not in (None, "", "idle_timeout"):
+            return True, None
+        if child.get("ended_at") is not None and reason != "idle_timeout":
             return True, None
         if db.get_compression_tip(sid) != tip:
             return True, None

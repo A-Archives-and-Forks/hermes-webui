@@ -87,7 +87,12 @@ Follow that checklist's safety rules:
   Do not re-register a cancelled worker; finalize outside the stream lock.
   Local Steer accepts only explicit starting/running phases. Close admission
   by publishing finalizing under STREAMS_LOCK before the last pending-steer
-  drain; earlier accepted guidance is drained, later guidance is rejected.
+  drain; earlier accepted guidance is drained, later guidance is rejected with
+  `not_running` while the owned stream is still live (not `stream_dead`). Use
+  one idempotent terminal settlement before done/error/end and final cleanup,
+  covering returned errors, exceptions and self-heal, not only the success path.
+  Merge Agent-returned `pending_steer` with the registered worker's final slot
+  drain and emit leftovers before terminal events, outside registry locks.
   Test both drain/Steer orderings, including compression-rotated identities.
 - Inactive-session recovery is separate from live Steer. Resolve durable
   compression lineage in the session's profile database, read-only, even when

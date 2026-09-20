@@ -12,7 +12,11 @@ from api import routes, profiles
 
 @pytest.fixture
 def lineage(tmp_path, monkeypatch):
-    SessionDB = pytest.importorskip("hermes_state").SessionDB
+    state = pytest.importorskip("hermes_state")
+    # Worker tests restore sys.path after loading Agent lazily. Scope its
+    # sibling-module lookup to this fixture, never the global test importer.
+    monkeypatch.syspath_prepend(str(Path(state.__file__).parent))
+    SessionDB = state.SessionDB
     db = SessionDB(tmp_path / "state.db")
     db.create_session("sealedparent", source="webui")
     db.create_session("idlechild", source="tui", parent_session_id="sealedparent")
@@ -69,9 +73,10 @@ def test_idle_tip_accepts_normal_persistence_without_reopening_parent(lineage):
 
 
 @pytest.mark.parametrize("reason", ["reset", "user_closed", "compression"])
-def test_unknown_or_sealed_terminal_tip_is_not_redirected(lineage, reason):
+@pytest.mark.parametrize("ended_at", [None, 1234.0])
+def test_unknown_or_sealed_terminal_tip_is_not_redirected(lineage, reason, ended_at):
     db, session = lineage
-    db._conn.execute("UPDATE sessions SET end_reason=? WHERE id='idlechild'", (reason,))
+    db._conn.execute("UPDATE sessions SET end_reason=?, ended_at=? WHERE id='idlechild'", (reason, ended_at))
     db._conn.commit()
     assert routes._pre_compression_continuation_session_id(session) is None
 
@@ -128,3 +133,22 @@ assert.equal(calls.length,2);
 })().catch(e=>{console.error(e);process.exit(1)});
 '''
     subprocess.run(['node', '-e', helper + script], check=True, timeout=15)
+
+
+def test_background_failed_draft_preserves_attachments_after_navigation_race():
+    source = (Path(__file__).parents[1] / 'static/messages.js').read_text()
+    helper = source[source.index('function _restoreComposerDraftAfterFailedSend('):source.index('async function send(){')]
+    script = r'''
+const assert=require('node:assert/strict');
+const S={session:{session_id:'unrelated'},pendingFiles:[]};
+const $=()=>{throw Error('unrelated visible composer must not be touched')};
+const calls=[];
+const _saveComposerDraftNow=(...args)=>calls.push(args);
+(async()=>{
+const files=[{name:'drawing.png',path:'/uploads/drawing.png'}];
+_restoreComposerDraftAfterFailedSend('retained',files,'continuation',Promise.resolve());
+await Promise.resolve();
+assert.deepEqual(calls,[['continuation','retained',files]]);
+})().catch(e=>{console.error(e);process.exit(1)});
+'''
+    subprocess.run(['node','-e',helper+script], check=True, timeout=15)

@@ -247,4 +247,4 @@ def test_local_steer_requires_an_explicit_consuming_phase(scene, registered, pha
     assert result["accepted"] is (phase in {"starting", "running"})
     assert agent.steer.call_count == (1 if result["accepted"] else 0)
     if not result["accepted"]:
-        assert result["fallback"] == "stream_dead"
+        assert result["fallback"] == ("not_running" if phase == "finalizing" else "stream_dead")

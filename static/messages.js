@@ -1368,7 +1368,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
+          _saveComposerDraftNow(sid, restore, files);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.

@@ -53,7 +53,7 @@ def worker_scene(tmp_path, monkeypatch):
     maps["STREAM_SESSION_OWNERS"]["run"] = "original"
     scene = SimpleNamespace(session=session, events=events, lock=lock, agent=None,
                             on_init=lambda: None, on_run=lambda: None,
-                            on_drain=lambda: None, calls=[], drained=[])
+                            on_drain=lambda: None, calls=[], drained=[], result=None)
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -71,6 +71,8 @@ def worker_scene(tmp_path, monkeypatch):
         def run_conversation(self, **kwargs):
             scene.calls.append("run")
             scene.on_run()
+            if scene.result is not None:
+                return scene.result
             return {"messages": [
                 {"role": "user", "content": "Do the task."},
                 {"role": "assistant", "content": "Finished."},
@@ -261,7 +263,7 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
             if first == "steer":
                 assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
             else:
-                assert result == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+                assert result == {"accepted": False, "fallback": "not_running", "stream_id": "run"}
                 assert scene.agent.pending == []
         finally:
             release.set()

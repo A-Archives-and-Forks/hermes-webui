@@ -1026,7 +1026,7 @@ class TestLeftoverDelivery:
         on the same turn."""
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
         # Find the drain invocation and the next put('done', ...) AFTER it
-        drain_idx = src.find("_drain_pending_steer()")
+        drain_idx = src.find("_settle_pending_steer()", src.index("    def put(event, data):", src.index("def _run_agent_streaming(")))
         assert drain_idx >= 0
         done_idx = src.find("put('done'", drain_idx)
         assert done_idx >= 0

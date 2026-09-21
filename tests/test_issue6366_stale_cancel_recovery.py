@@ -20,9 +20,6 @@ appending any rows. The helper is a pure read so recovery is
 idempotent: running it twice produces the same outcome.
 """
 
-import pytest
-
-import api.models as models
 from api.models import (
     _transcript_already_advanced_past_pending,
 )

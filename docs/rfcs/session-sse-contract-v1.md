@@ -59,6 +59,29 @@ proposes. It is routed in `api/routes.py` and implemented by
 is a global invalidation signal, not a per-session lifecycle stream. The proposed
 `GET /api/sessions/{session_id}/events` is per-session and path-distinct.
 
+### Hidden-tab observation and recovery (implemented client behavior)
+
+The browser closes its persistent per-session SSE while hidden and uses
+`_startHiddenActiveStreamPoll()` in `static/messages.js` to poll
+`GET /api/session/status?session_id=...` immediately and then every six seconds,
+subject to browser timer throttling. An active stream can be attached through
+the existing replay path; successful attachment stops the poll.
+
+HTTP `404` and `410` are terminal for the owning hidden-session poll. The
+response stops the interval and clears the matching hidden-resume session ID,
+so returning to the visible tab does not reopen SSE through that stale owner.
+A delayed response for session A must not stop session B's replacement poll or
+clear B's resume owner. This cleanup affects browser observation state only;
+it does not delete a session or cancel an agent run.
+
+Successful idle responses with no `active_stream_id`, network failures, and
+other non-success HTTP responses (including `401`, `403`, `429`, and `5xx`)
+remain retryable. Visibility return normally restores per-session SSE when a
+resume owner still exists; a terminal missing-session response removes that
+automatic recovery path. Explicit later session selection follows normal
+session loading. Behavior coverage lives in
+`tests/test_hidden_tab_server_initiated_turn.py`.
+
 ### Heartbeat
 
 `_SSE_HEARTBEAT_INTERVAL_SECONDS = 5` (defined in `api/routes.py`) is the current

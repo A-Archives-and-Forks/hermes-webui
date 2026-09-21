@@ -610,6 +610,8 @@ def test_session_route_replay_skips_metering_rows(monkeypatch):
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active")
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(config, "STREAMS", {"run_active": stream})
     # Both the pre-attach replay and the post-attach reconciliation draw from the
     # same journal; a metering row among them must never reach the SSE body.
     monkeypatch.setattr(

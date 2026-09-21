@@ -2438,26 +2438,136 @@ def _latest_user_matches_pending_text(messages, pending_text):
     return False
 
 
+def _pending_active_turn_token(session):
+    """Return the exact WebUI active-turn token for the pending turn.
+
+    The token is ``"<stream_id>:<pending_started_at>"`` — the same value the
+    eager user-message checkpoint and the agent-result merge stamp onto the
+    materialized user row (``stamp_message_source``). It is unforgeable
+    per-turn identity: two distinct streams that submit the same prompt
+    inside the same second produce different tokens.
+    """
+    from api.process_event_utils import build_active_turn_token
+
+    return build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_started_at', None),
+    )
+
+
+def _transcript_user_row_is_pending_turn(message, session, pending_token) -> bool:
+    """Return True only when a transcript user row provably IS the pending turn.
+
+    Identity is bound to the active-turn token, never to integer-second
+    timestamp equality: two different streams that send the same prompt
+    within one second truncate to the same ``int(timestamp)``, so the
+    checkpoint matcher alone would accept the *other* stream's row as the
+    pending turn. A token mismatch therefore always loses, and a row that
+    carries no token at all cannot be proven to be this turn — which means
+    the caller must recover, not suppress.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    row_token = message.get('_active_turn_token')
+    if pending_token:
+        if not row_token:
+            # Ambiguous legacy identity: the pending turn has a resolvable
+            # token but this row predates token stamping. We cannot prove it
+            # is the same turn, so recovery must run.
+            return False
+        return row_token == pending_token
+    if row_token:
+        # The row belongs to a different, token-bearing turn. Never let a
+        # same-second timestamp collision override that mismatch.
+        return False
+    # Neither side carries a token (legacy/dead-stream pending state): fall
+    # back to the strict content + timestamp + source + attachments
+    # checkpoint, which is the only identity signal available.
+    return _message_matches_pending_checkpoint(
+        message,
+        getattr(session, 'pending_user_message', None),
+        getattr(session, 'pending_started_at', None),
+        getattr(session, 'pending_user_source', None),
+        getattr(session, 'pending_attachments', None),
+    )
+
+
+def _pending_turn_has_final_assistant_answer(messages, start_idx: int) -> bool:
+    """Return True when the matched user turn ends in a genuine final answer.
+
+    Reuses the established final-answer semantics
+    (``_assistant_message_has_final_visible_text``) instead of "an assistant
+    row exists". An assistant row only settles the turn when it carries real
+    visible answer text: empty rows, tool-call-only rows, interim
+    ``_partial`` progress rows, rows recovered from the run journal and
+    compaction reference cards are all rejected, so a turn that was
+    interrupted mid-tool-execution is never mistaken for a completed one.
+
+    The scan stops at the next real user row — a final answer that belongs
+    to a *later* turn must not settle this pending turn.
+    """
+    from api.streaming import (
+        _assistant_message_has_final_visible_text,
+        _is_synthetic_control_message,
+    )
+
+    for later in messages[start_idx + 1:]:
+        if not isinstance(later, dict):
+            continue
+        if _is_synthetic_control_message(later):
+            continue
+        role = later.get('role')
+        if role == 'user':
+            if is_context_compression_marker(later):
+                # Synthetic compaction cards are not a user-turn boundary.
+                continue
+            return False
+        if role != 'assistant':
+            # Tool rows never prove a final answer.
+            continue
+        if (
+            later.get('_partial')
+            or later.get('_error')
+            or later.get('_recovered')
+            or later.get('_recovered_from_run_journal')
+        ):
+            continue
+        if is_context_compression_marker(later):
+            continue
+        if _assistant_message_has_final_visible_text(later):
+            return True
+    return False
+
+
 def _transcript_already_advanced_past_pending(session) -> bool:
-    """#6366: a stale pending user message whose content already appears
-    in the durable transcript as a user row, followed by a newer settled
-    assistant row, means the transcript has already advanced past this
-    pending turn. Returning True here lets the recovery path skip the
-    recovered user / ``_partial`` clone / journal replay / generic
-    no-response error that would otherwise append after the valid
+    """#6366: a stale pending user message whose own user row already appears
+    in the durable transcript, followed by a genuine final assistant answer
+    inside that same user-turn boundary, means the transcript has already
+    advanced past this pending turn. Returning True here lets the recovery
+    path skip the recovered user / ``_partial`` clone / journal replay /
+    generic no-response error that would otherwise append after the valid
     final answer. The tail-only check at line ~3485 (``session.messages[-1]``)
     misses this case: when the pending turn's user row is older than
     the transcript tail, the tail is a *newer* assistant row that
     can never match the pending **user** checkpoint, and the recovery
     path falls through into the append branch.
 
-    Strict match: uses ``_message_matches_pending_checkpoint`` (content
-    + timestamp + source + attachments) rather than the looser text-
-    only matcher, so a *new* user turn that happens to repeat the
-    same prompt text (e.g. user re-sends the same question) is NOT
-    misclassified as a stale advance. That distinction is the
-    regression guard for the repeated-prompt identity cases covered
-    by ``test_repeated_pending_prompt_uses_current_checkpoint_identity``.
+    Identity is bound to the pending stream's exact active-turn token
+    (``_transcript_user_row_is_pending_turn``), so a repeated prompt from a
+    different stream — even one submitted in the same integer second —
+    can never be matched against this pending turn and silently dropped.
+
+    Completion requires a genuine final visible assistant answer
+    (``_pending_turn_has_final_assistant_answer``): empty, tool-call-only,
+    interim ``_partial``, journal-recovered and compaction tails all keep
+    recovery active, because that is precisely the interrupted-turn shape
+    the recovery path exists for.
+
+    The suppression is therefore deliberately conservative: whenever the
+    turn's identity or its completion cannot be positively proven, this
+    helper returns False and the prompt is recovered instead of discarded.
+    A false negative leaves a visible cosmetic duplicate; a false positive
+    silently destroys a prompt or a response.
 
     Idempotent: this is a pure read that does not mutate the session.
     Running recovery twice therefore produces the same outcome.
@@ -2465,48 +2575,17 @@ def _transcript_already_advanced_past_pending(session) -> bool:
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return False
-    pending_started_at = getattr(session, 'pending_started_at', None)
-    pending_source = getattr(session, 'pending_user_source', None)
-    pending_attachments = getattr(session, 'pending_attachments', None)
     messages = getattr(session, 'messages', None)
     if not isinstance(messages, list):
         return False
+    pending_token = _pending_active_turn_token(session)
     for idx, message in enumerate(messages):
-        if not isinstance(message, dict) or message.get('role') != 'user':
+        if not _transcript_user_row_is_pending_turn(message, session, pending_token):
             continue
-        if not _message_matches_pending_checkpoint(
-            message,
-            pending_text,
-            pending_started_at,
-            pending_source,
-            pending_attachments,
-        ):
-            continue
-        # Found a strictly-matching user row at ``idx``. Walk
-        # forward and look for a settled assistant row (not
-        # ``_partial``, not ``_error``, not the recovery marker).
-        # Any such row means the transcript has already advanced
-        # past this pending turn into a newer settled
-        # user/assistant boundary, and recovery must not append
-        # duplicate rows after it.
-        for later in messages[idx + 1:]:
-            if not isinstance(later, dict):
-                continue
-            if later.get('role') != 'assistant':
-                continue
-            if later.get('_partial') or later.get('_error'):
-                continue
-            if later.get('_recovered'):
-                # A previously-recovered assistant row (from an
-                # earlier recovery pass that may have appended the
-                # very row we are trying to avoid) is not a
-                # settled answer either. Skip and keep looking.
-                continue
-            return True
-        # Matched user row but no later settled assistant row →
-        # the transcript has not advanced past this pending turn.
-        # Recovery is the legitimate path.
-        return False
+        # Found the pending turn's own user row at ``idx``. Only a genuine
+        # final answer inside that turn's boundary proves the transcript
+        # advanced past it.
+        return _pending_turn_has_final_assistant_answer(messages, idx)
     return False
 
 

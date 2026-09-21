@@ -336,3 +336,35 @@ def test_both_append_branches_are_gated_by_the_ownership_check():
         "the segment-swap and whole-turn replace branches must stay unguarded — "
         "they replace a node instead of adding one and cannot duplicate"
     )
+
+
+def test_segment_block_insertion_moves_nodes_instead_of_reparsing_html():
+    """Wiring: every message-block insertion in renderMessages() goes through the
+    helper, and the helper MOVES parsed nodes instead of re-parsing a string.
+
+    Appending a DocumentFragment moves its children and empties it, so a DOM-API
+    wrapper that executes the call twice appends nothing the second time; an
+    insertAdjacentHTML wrapper that does the same parses and appends a second copy.
+    That difference is the whole fix, so it is pinned here rather than left to the
+    three call sites.
+    """
+    helper = UI_JS[UI_JS.index("function _insertSegmentBlock("):]
+    helper = helper[:helper.index("\nfunction renderMessages")]
+    assert "createElement('template')" in helper, (
+        "the block must be parsed into a <template>, not inserted as a string"
+    )
+    assert "seg.appendChild(tpl.content)" in helper, (
+        "the template's content must be MOVED into the segment — that is what makes "
+        "a repeated call a no-op"
+    )
+    assert helper.count("insertAdjacentHTML") == 1, (
+        "insertAdjacentHTML may survive only as the fallback for an environment "
+        "without <template>"
+    )
+    render = UI_JS[UI_JS.index("function renderMessages(options){"):]
+    assert render.count("_insertSegmentBlock(") == 3, (
+        "all three assistant-segment block insertions must go through the helper"
+    )
+    assert "seg.insertAdjacentHTML('beforeend', `${filesHtml}" not in render, (
+        "an assistant segment's block must not be built from an HTML string again"
+    )

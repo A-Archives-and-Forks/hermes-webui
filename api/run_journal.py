@@ -454,7 +454,7 @@ class RunJournalWriter:
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
         self._lock = _lock_for(self._path)
 
-    def append_sse_event(self, event_name: str, payload=None) -> dict:
+    def append_sse_event(self, event_name: str, payload=None) -> dict | None:
         # Live-UI-only telemetry (metering) has no recovery value in the journal:
         # nothing reads those rows back for recovery, and journaling them at ~10 Hz
         # on marathon runs balloons the durable file (12+ MB of a single 18 MB run

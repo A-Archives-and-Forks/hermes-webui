@@ -10313,6 +10313,10 @@ def _run_agent_streaming(
                     _reasoning_last_put[0] = now
                     put('reasoning', {'text': _reasoning_buffer[0]})
                     _reasoning_buffer[0] = ''
+                    # The folded index mirrors this buffer 1:1 — dropping the
+                    # text without dropping the index would leave it describing
+                    # text that is no longer there.
+                    _reasoning_buffer_index.reset()
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])

@@ -4788,7 +4788,34 @@ class _FullSessionResolveRequired(RuntimeError):
     """Internal signal that a full sidecar load must enter the bounded path."""
 
 
-_FULL_SESSION_RESOLVE_MAX_CONCURRENT = 2
+def _read_max_session_resolve_concurrent() -> int:
+    """#7421: env override for the heavy session-resolve cap. The
+    hardcoded literal 2 is too low for high-concurrency
+    deployments where several parallel active sessions all need
+    a full-transcript resolve; operators can set
+    ``HERMES_WEBUI_MAX_SESSION_RESOLVE`` to a positive int to
+    raise the cap without code changes. A bad or missing value
+    falls back to the previous default of 2, so an operator who
+    sets ``HERMES_WEBUI_MAX_SESSION_RESOLVE=0`` or a non-numeric
+    value does not regress to a blocked or unbounded state. The
+    upper bound (64) is a generous but finite safety net against
+    a typo like ``=999999`` bypassing the bounded semaphore
+    entirely; the deeper per-read cost is tracked in #7310."""
+    raw = (os.getenv("HERMES_WEBUI_MAX_SESSION_RESOLVE") or "").strip()
+    if not raw:
+        return 2
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 2
+    if n < 1:
+        return 2
+    if n > 64:
+        return 64
+    return n
+
+
+_FULL_SESSION_RESOLVE_MAX_CONCURRENT = _read_max_session_resolve_concurrent()
 _FULL_SESSION_RESOLVE_SLOTS = threading.BoundedSemaphore(
     _FULL_SESSION_RESOLVE_MAX_CONCURRENT
 )

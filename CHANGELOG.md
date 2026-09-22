@@ -5,6 +5,14 @@
 
 ### Fixed
 
+- **The opencode-go provider lists its real models again instead of a frozen snapshot.** Model
+  discovery had fallen back to a hard-coded catalog, so models added or removed upstream never
+  appeared. The provider now queries live, with the lookup scoped to opencode-go alone: a slow
+  or unreachable endpoint falls back to the static catalog rather than blocking the picker for
+  anyone else, older Agent builds that lack the discovery API keep the previous behaviour, and a
+  configured model allowlist still wins over whatever discovery returns. Thanks
+  @shameez-struggles-to-commit. (#7220)
+
 - **Denying a gateway approval now retires the request instead of leaving the run waiting.**
   When an approval routed through the gateway was denied, the deny reached the agent but the
   local producer was never retired, so the run could sit waiting on a decision that had already

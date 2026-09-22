@@ -3484,16 +3484,31 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         emit_error=False,
     ):
         return None
-    summary = find_run_summary(stream_id)
-    if not summary:
-        return None
-    session_id = str(summary.get("session_id") or "")
-    if not session_id:
-        return None
+    # Locate the run journal WITHOUT parsing it first. find_run_summary reads
+    # and parses the whole file (tens of thousands of rows on a long live
+    # run), and read_run_events below then parsed it AGAIN — two full passes
+    # cost ~0.6s per rebuild. Derive the durable summary from the single
+    # parse below instead; its last_seq / last_event_id are rebuilt from the
+    # same rows the snapshot consumes.
+    located = find_run_file(stream_id)
+    if located:
+        session_id, _journal_path = located
+    else:
+        # No journal file on disk for this run id: fall back to the
+        # historical summary-based lookup seam (defensive — a real miss
+        # returns None exactly like before; this is also the seam that
+        # long-standing tests stub with a handler-side summary).
+        fallback_summary = find_run_summary(stream_id)
+        if not fallback_summary:
+            return None
+        session_id = str(fallback_summary.get("session_id") or "")
+        if not session_id:
+            return None
     journal = read_run_events(session_id, stream_id)
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
+    summary = _summary_from_events(session_id, stream_id, events)
     event_run_ids: set[str] = set()
     malformed_envelope_run_id = False
     for event in events:
@@ -3513,6 +3528,18 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     assistant_text = ""
     reasoning_text = ""
+    # Reasoning deltas arrive as thousands of tiny append events. Growing the
+    # transcript with ``reasoning_text += chunk`` copies the full (multi-
+    # hundred-KB) string on every append inside these closures — quadratic
+    # (~2.3s of a 4.6s rebuild on a 9.7k-chunk run). Collect chunks and
+    # materialize lazily; readers (echo probes, strip, final message) join at
+    # most once per interim segment.
+    reasoning_parts: list[str] = []
+    reasoning_dirty = False
+    # Incremental folded index over the reasoning transcript: the per-interim
+    # echo probe consults this instead of re-walking the raw text (see
+    # ``_CompactEchoIndex``).
+    reasoning_index = _CompactEchoIndex()
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
@@ -3520,6 +3547,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     fresh_segment = True
     last_ts = None
     reasoning_first_tool_count: int | None = None
+
+    def _materialize_reasoning_text() -> str:
+        nonlocal reasoning_text, reasoning_dirty
+        if reasoning_dirty:
+            reasoning_text = "".join(reasoning_parts)
+            reasoning_dirty = False
+        return reasoning_text
 
     def mark_boundary() -> int:
         nonlocal current_activity_burst_id
@@ -3585,22 +3619,42 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         tool_calls.append(call)
 
     def reasoning_echo_tail_matches(text: str) -> bool:
-        candidate = _compact_for_echo_compare(text)
-        if not candidate:
-            return False
-        return _compact_for_echo_compare(reasoning_text).endswith(candidate)
+        # Indexed tail match (no raw-text walk): the incremental index folds
+        # each reasoning chunk once as it is appended, so this probe costs
+        # O(len(text)) regardless of how much interior whitespace stretches
+        # the raw span. The previous raw backward walk re-walked that span
+        # once per interim event, which turned the replay quadratic on a
+        # whitespace-heavy transcript (#7569 review, ~55x slower than master
+        # on a production-shaped journal).
+        return reasoning_index.matches_tail(text)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count
-        next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
-        if did_remove:
-            reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
-        return did_remove
+        nonlocal reasoning_text, reasoning_dirty, reasoning_first_tool_count
+        cut = reasoning_index.cut_to(text)
+        if cut is None:
+            return False
+        next_reasoning = _materialize_reasoning_text()[:cut].rstrip()
+        reasoning_text = next_reasoning
+        reasoning_parts.clear()
+        reasoning_parts.append(next_reasoning)
+        reasoning_dirty = False
+        # Re-index the truncated transcript so later probes match against it
+        # instead of the pre-strip tail (the index is the match authority).
+        reasoning_index.reset()
+        reasoning_index.append(next_reasoning)
+        if not _compact_for_echo_compare(reasoning_text):
+            reasoning_first_tool_count = None
+        return True
 
     for event in events:
         event_name = str(event.get("event") or event.get("type") or "")
+        if event_name == "metering":
+            # Metering rows are the bulk of a long live journal (~10k rows,
+            # ~60% of its bytes) and project nothing onto the snapshot; skip
+            # their per-row work while preserving the last_ts watermark they
+            # carry.
+            last_ts = event.get("created_at", last_ts)
+            continue
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
         if event_name == "token":
@@ -3611,9 +3665,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
-            reasoning_text += text
+            if text:
+                if reasoning_first_tool_count is None:
+                    reasoning_first_tool_count = len(tool_calls)
+                reasoning_parts.append(text)
+                reasoning_index.append(text)
+                reasoning_dirty = True
             continue
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
@@ -3657,6 +3714,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+
+    reasoning_text = _materialize_reasoning_text()
 
     if assistant_text or reasoning_text:
         message = {
@@ -10770,12 +10829,14 @@ from api.streaming import (
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
     _compact_for_echo_compare,
-    _strip_compact_echo_suffix,
+    _CompactEchoIndex,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    _summary_from_events,
     bound_run_journal_snapshot_args,
+    find_run_file,
     find_run_summary,
     journal_replay_visible,
     read_run_events,

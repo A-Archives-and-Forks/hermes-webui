@@ -272,6 +272,19 @@ def test_maintenance_skips_indexes_an_older_schema_cannot_hold(tmp_path, mainten
     assert "idx_sessions_webui_fingerprint" not in names
 
 
+def test_maintenance_fails_loud_on_a_database_without_agent_tables(tmp_path, maintenance_without_fcntl):
+    """``skipped`` is for a missing column only. A database with no ``messages``
+    table is not an agent state.db, so the tool must raise, not report success."""
+    module = maintenance_without_fcntl
+    path = tmp_path / "state.db"
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.execute("CREATE TABLE unrelated(x)")
+    with pytest.raises(RuntimeError, match="no 'messages' table"):
+        module.ensure_read_indexes(path, confirmed_drained=True)
+    with closing(sqlite3.connect(str(path))) as conn:
+        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='index'").fetchone()[0] == 0
+
+
 @pytest.fixture
 def maintenance_without_fcntl(monkeypatch):
     """Import the maintenance module as a platform without ``fcntl`` sees it."""

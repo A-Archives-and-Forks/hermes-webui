@@ -97,6 +97,10 @@ def ensure_read_indexes(db_path, *, confirmed_drained=False, lock_file=None):
                     # messages.timestamp). Skip that index instead of letting its
                     # CREATE fail and roll back the ones this schema supports.
                     present = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+                    if not present:
+                        # No such table: this is not an agent state.db (or a
+                        # mistyped path to another database). Fail loud.
+                        raise RuntimeError(f"state.db has no {table!r} table; refusing to continue")
                     if any(col not in present for col, _ in keys):
                         statuses[name] = "skipped"
                         continue

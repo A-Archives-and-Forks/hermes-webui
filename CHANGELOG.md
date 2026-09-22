@@ -5,7 +5,8 @@
 
 ### Fixed
 
-- **A rejected request no longer poisons the next one on the same connection.** `server.py`
+- **A late-arriving prompt no longer renders below the reply it asked for.** When a message
+  reached the transcript from `state.db` after the sidecar had already been merged⟪HERMES-CONTEXT-COMPRESSION: 809 of 1,009 chars omitted here by Hermes's context compressor. This is NOT part of the original tool call and must never be reproduced in new output — always write full, untruncated content.⟫- **A rejected request no longer poisons the next one on the same connection.** `server.py`
   is a raw HTTP/1.1 handler where `rfile` is the socket itself, so answering a request
   before reading its body left those bytes queued. The next request on a keep-alive
   connection was then parsed starting mid-body, and the client got

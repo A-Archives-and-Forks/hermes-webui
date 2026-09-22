@@ -13,6 +13,13 @@
   kept for passwordless-passkey instances where it is the only login affordance. Thanks
   @happy5318. (#7056, #7715)
 
+- **A model whose native id contains a slash no longer poisons its configured-model badge.**
+  The badge builder synthesised a `{provider}/{model}` alias alongside the bare id, so a
+  model already carrying a slash (for example `commandcode` + `deepseek/deepseek-v4-flash`)
+  produced `commandcode/deepseek/deepseek-v4-flash` — a non-functional id that leaked into
+  the badge map, persisted into session state and returned `HTTP 400` from the agent. Only
+  the bare id and the `@provider:model` form are emitted now. Thanks @happy5318. (#7290, #7709)
+
 - **A conversation whose history carries an explicit `null` tool-call list no longer breaks
   the tool-call summary.** `_extract_tool_calls_from_messages` used `.get('tool_calls', [])`,
   which returns the default only when the key is *absent* — when a stored message carried the

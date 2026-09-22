@@ -5,6 +5,14 @@
 
 ### Fixed
 
+- **Denying a gateway approval now retires the request instead of leaving the run waiting.**
+  When an approval routed through the gateway was denied, the deny reached the agent but the
+  local producer was never retired, so the run could sit waiting on a decision that had already
+  been made. Denial now settles the producer atomically, scoped to the exact
+  `(session_id, run_id, approval_id)` that was answered — sibling approvals from the same run
+  and approvals from other runs are left untouched — and repeated or late responses are bounded
+  no-ops rather than resurrecting a settled request. Thanks @snoyberg. (#7570)
+
 - **The approval card's "Skip all this session" button no longer shows two lightning bolts.**
   The button rendered its ⚡ twice — once from the icon span in the markup and again from the
   translated label, which carried its own leading glyph in 14 of 15 locales. The icon now comes

@@ -1868,7 +1868,8 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
 
     try:
         from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
-    except ImportError:
+    except ImportError as exc:
+        logger.debug("agent.skill_utils unavailable; reporting skill stats as unknown: %s", exc)
         # agent source not mounted (two-container Docker,
         # HERMES_WEBUI_CHAT_BACKEND=gateway): this must never 500 GET
         # /api/profiles (#7305). Report the skill stats as unknown — a stable

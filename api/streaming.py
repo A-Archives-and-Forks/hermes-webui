@@ -7950,7 +7950,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                             pending_names[tid] = part.get('name', '')
                             pending_args[tid] = part.get('input', {})
                             pending_asst_idx[tid] = msg_idx
-            for tc in m.get('tool_calls', []):
+            for tc in m.get('tool_calls') or []:
                 if not isinstance(tc, dict):
                     continue
                 tid = tc.get('id', '') or tc.get('call_id', '')
@@ -9600,7 +9600,7 @@ def _run_agent_streaming(
             except Exception:
                 logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+            queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")

@@ -9009,6 +9009,19 @@ async function respondClarify(response) {
     // not tear B down on A's late 409. The SSE/poll path will re-render the
     // next prompt's card from scratch via ``showClarifyCard`` either way.
     if (e && e.status === 409) {
+      // #7710: a cross-profile refusal now also arrives as 409
+      // (``session_profile_mismatch``). The prompt is NOT expired — the write
+      // was refused because the session belongs to another profile. Treating
+      // it as expired would hide a live clarification card and mislabel the
+      // cause, so leave the card standing and report the real reason.
+      if (typeof _sessionProfileMismatchFromError === 'function'
+          && _sessionProfileMismatchFromError(e)) {
+        _clarifySetControlsDisabled(false, false);
+        if (typeof setStatus === "function") {
+          setStatus("Clarify: session belongs to a different profile");
+        }
+        return;
+      }
       if (_clarifyId === clarifyId) {
         // Same card still showing — dismiss it and rescue the typed draft.
         // Order matters: ``_stashClarifyDraft`` (called from

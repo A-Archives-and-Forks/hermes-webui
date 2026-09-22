@@ -5,6 +5,14 @@
 
 ### Fixed
 
+- **A long-running turn no longer replays a stale token count after a reload.** The run-journal
+  recorded live metering frames, so reattaching to a stream — or reloading a tab mid-turn —
+  could replay a snapshot from earlier in the same run and briefly show token/TPS figures that
+  had already been superseded. Metering is now live-only and never journaled, and replayed
+  frames no longer carry an event id that could advance the client's resume cursor past real
+  content. Reattach and reload now show the current numbers for the turn in progress. Thanks
+  @laitekin. (#7291)
+
 - **Steering a conversation works again after the context is compressed.** When compression
   rotated `agent.session_id`, a steer could no longer find the active worker: it was either
   silently dropped or accepted and never delivered. Steers now resolve the owning worker

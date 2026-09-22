@@ -92,6 +92,14 @@ def ensure_read_indexes(db_path, *, confirmed_drained=False, lock_file=None):
             db.execute("BEGIN IMMEDIATE")
             try:
                 for name, (table, keys) in INDEXES.items():
+                    # An older Agent schema can lack a column one index keys on
+                    # (sessions.last_activity_at is newer than
+                    # messages.timestamp). Skip that index instead of letting its
+                    # CREATE fail and roll back the ones this schema supports.
+                    present = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+                    if any(col not in present for col, _ in keys):
+                        statuses[name] = "skipped"
+                        continue
                     existing = db.execute("SELECT tbl_name FROM sqlite_master WHERE name=?", (name,)).fetchone()
                     if existing:
                         actual = tuple((r[2], r[4]) for r in db.execute(f"PRAGMA index_xinfo({name})") if r[5])

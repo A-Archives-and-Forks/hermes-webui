@@ -248,6 +248,30 @@ def _maintenance_schema(path):
         )
 
 
+def test_maintenance_skips_indexes_an_older_schema_cannot_hold(tmp_path, maintenance_without_fcntl):
+    """A legacy ``sessions`` table without ``last_activity_at`` must not roll back
+    the message indexes the schema does support."""
+    module = maintenance_without_fcntl
+    path = tmp_path / "state.db"
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sessions(source TEXT, id TEXT, message_count INTEGER);
+            CREATE TABLE messages(session_id TEXT, timestamp REAL, role TEXT);
+            """
+        )
+    result = module.ensure_read_indexes(path, confirmed_drained=True)
+    assert result == {
+        "idx_messages_session": "created",
+        "idx_messages_session_role": "created",
+        "idx_sessions_webui_fingerprint": "skipped",
+    }
+    with closing(sqlite3.connect(str(path))) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert {"idx_messages_session", "idx_messages_session_role"} <= names
+    assert "idx_sessions_webui_fingerprint" not in names
+
+
 @pytest.fixture
 def maintenance_without_fcntl(monkeypatch):
     """Import the maintenance module as a platform without ``fcntl`` sees it."""

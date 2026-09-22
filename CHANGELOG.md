@@ -5,6 +5,13 @@
 
 ### Fixed
 
+- **A conversation whose history carries an explicit `null` tool-call list no longer breaks
+  the tool-call summary.** `_extract_tool_calls_from_messages` used `.get('tool_calls', [])`,
+  which returns the default only when the key is *absent* — when a stored message carried the
+  key with a `null` value, the code tried to iterate `None` and raised `TypeError`. Reading
+  such a session now skips the empty entry and still summarises the tool calls that follow it.
+  Thanks @KayZz69. (#7265)
+
 - **The opencode-go provider lists its real models again instead of a frozen snapshot.** Model
   discovery had fallen back to a hard-coded catalog, so models added or removed upstream never
   appeared. The provider now queries live, with the lookup scoped to opencode-go alone: a slow

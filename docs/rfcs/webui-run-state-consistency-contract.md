@@ -35,8 +35,10 @@ while WebUI still has multiple overlapping state stores.
 Initial and credential self-heal Agent construction use the same registration
 boundary. Under `STREAMS_LOCK`, both the worker-retained cancellation event and
 live stream membership must permit registration. A removed `CANCEL_FLAGS` entry
-is not permission to restart. If Stop won during self-heal construction, the
-replacement must not enter the reusable cache or call `run_conversation`.
+is not permission to restart. If Stop won during initial or self-heal
+construction, the candidate must not enter the reusable cache or call
+`run_conversation`. New-agent lifecycle/cache publication follows successful
+registration; it must not precede the cancellation check.
 
 Interrupt and cancellation finalization occur outside the stream registry lock.
 Session finalization still owns the session lock: the returned-error path already

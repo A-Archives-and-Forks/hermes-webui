@@ -67,19 +67,29 @@ The browser closes its persistent per-session SSE while hidden and uses
 subject to browser timer throttling. An active stream can be attached through
 the existing replay path; successful attachment stops the poll.
 
-HTTP `404` and `410` are terminal for the owning hidden-session poll. The
-response stops the interval and clears the matching hidden-resume session ID,
-so returning to the visible tab does not reopen SSE through that stale owner.
-A delayed response for session A must not stop session B's replacement poll or
-clear B's resume owner. This cleanup affects browser observation state only;
+HTTP `404` is ambiguous: the profile-visibility guard can return it for a live
+session after another tab changes the browser-wide active-profile cookie.
+A single `404` therefore keeps polling and retains the hidden-resume owner.
+After three consecutive `404` responses, the poll pauses to bound repeated
+missing-session requests, but retains that owner so returning to the visible
+tab can reopen SSE. Any other response or network error resets this budget;
+a newly started poll also starts with a fresh budget.
+
+HTTP `410` is terminal: it stops the interval and clears the matching
+hidden-resume session ID. Returning to the visible tab then does not reopen
+SSE through that owner. Responses and queued ticks belong to one poll timer,
+not merely a session ID: they cannot stop or attach a replacement poll, even
+when the replacement observes the same session. The budget counts responses
+received by the current poll. Cleanup affects browser observation state only;
 it does not delete a session or cancel an agent run.
 
 Successful idle responses with no `active_stream_id`, network failures, and
 other non-success HTTP responses (including `401`, `403`, `429`, and `5xx`)
 remain retryable. Visibility return normally restores per-session SSE when a
-resume owner still exists; a terminal missing-session response removes that
-automatic recovery path. Explicit later session selection follows normal
-session loading. Behavior coverage lives in
+resume owner still exists, including after repeated `404` responses. Only a
+terminal `410` removes that automatic recovery path. A profile restored before
+the three-miss limit can recover through the next hidden poll; after the limit,
+recovery waits for visibility return or explicit session loading. Behavior coverage lives in
 `tests/test_hidden_tab_server_initiated_turn.py`.
 
 ### Heartbeat

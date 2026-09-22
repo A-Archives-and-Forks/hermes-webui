@@ -67,8 +67,10 @@ The browser closes its persistent per-session SSE while hidden and uses
 subject to browser timer throttling. An active stream can be attached through
 the existing replay path; successful attachment stops the poll.
 
-HTTP `404` is ambiguous: the profile-visibility guard can return it for a live
-session after another tab changes the browser-wide active-profile cookie.
+HTTP `404` is ambiguous: older profile-visibility guards and the legacy
+unknown-profile path can return it for a live session. Current master returns
+`409 session_profile_mismatch` for a known foreign profile; that response
+remains retryable when another tab changes the browser-wide profile cookie.
 A single `404` therefore keeps polling and retains the hidden-resume owner.
 After three consecutive `404` responses, the poll pauses to bound repeated
 missing-session requests, but retains that owner so returning to the visible

@@ -358,6 +358,24 @@ def hidden_poll_results():
           };
         }
 
+        async function runLateJson() {
+          reset();
+          let resolveBody;
+          globalThis.fetch = () => {
+            fetchCalls++;
+            if (fetchCalls === 1) return Promise.resolve({ok: true, status: 200,
+              json: () => new Promise(resolve => { resolveBody = resolve; })});
+            return Promise.resolve(response(200));
+          };
+          _sessionStreamHiddenSid = 'session-a';
+          _startHiddenActiveStreamPoll('session-a');
+          await settle();
+          _startHiddenActiveStreamPoll('session-a');
+          resolveBody({active_stream_id: 'old-stream'});
+          await settle();
+          return {attachCalls, running: intervalFn !== null};
+        }
+
         async function runSequence(statuses) {
           reset();
           const states = [];
@@ -385,6 +403,10 @@ def hidden_poll_results():
             missing404: await runStatus(404),
             missing410: await runStatus(410),
             server500: await runStatus(500),
+            profile409: await runStatus(409),
+            auth401: await runStatus(401),
+            forbidden403: await runStatus(403),
+            rate429: await runStatus(429),
             offline: await runStatus(0, true),
             idle200: await runStatus(200),
             stale404: await runStaleResponse(404),
@@ -394,9 +416,12 @@ def hidden_poll_results():
             visible410: await runVisibilityRecovery(410),
             repeated404: await runSequence([404, 404, 404, 404]),
             recoveredProfile: await runSequence([404, 'active']),
+            recoveredKnownProfile: await runSequence([409, 'active']),
             reset200: await runSequence([404, 404, 200, 404, 404, 404]),
             reset500: await runSequence([404, 404, 500, 404, 404, 404]),
             resetOffline: await runSequence([404, 404, -1, 404, 404, 404]),
+            reset409: await runSequence([404, 404, 409, 404, 404, 404]),
+            lateJson: await runLateJson(),
           };
           process.stdout.write(JSON.stringify(result));
         })().catch(error => {
@@ -423,6 +448,7 @@ def test_hidden_poll_transient_404_preserves_visibility_recovery(hidden_poll_res
         "fetchCalls": 2, "running": True, "pollSid": "session-a", "hiddenSid": "session-a",
     }
     assert result["recoveredProfile"]["attachCalls"] == 1
+    assert result["recoveredKnownProfile"]["attachCalls"] == 1
 
 
 def test_hidden_poll_repeated_404_is_bounded_but_can_resume(hidden_poll_results):
@@ -433,7 +459,7 @@ def test_hidden_poll_repeated_404_is_bounded_but_can_resume(hidden_poll_results)
     assert result["eventSourceCalls"] == 1
 
 
-@pytest.mark.parametrize("key", ["reset200", "reset500", "resetOffline"])
+@pytest.mark.parametrize("key", ["reset200", "reset500", "resetOffline", "reset409"])
 def test_hidden_poll_404_budget_requires_consecutive_responses(hidden_poll_results, key):
     result = hidden_poll_results[key]
     assert [s["running"] for s in result["states"]] == [True] * 5 + [False]
@@ -458,7 +484,7 @@ def test_hidden_poll_410_stops_and_clears_resume_owner(hidden_poll_results):
 
 def test_hidden_poll_transient_failures_and_idle_remain_retryable(hidden_poll_results):
     result = hidden_poll_results
-    for key in ("server500", "offline", "idle200"):
+    for key in ("server500", "offline", "idle200", "profile409", "auth401", "forbidden403", "rate429"):
         assert result[key]["fetchCalls"] == 2
         assert result[key]["running"] is True
         assert result[key]["pollSid"] == "session-a"
@@ -474,3 +500,7 @@ def test_hidden_poll_stale_response_and_tick_cannot_stop_replacement(hidden_poll
         "pollSid": sid,
         "hiddenSid": sid,
     }
+
+
+def test_hidden_poll_late_json_cannot_attach_into_replacement(hidden_poll_results):
+    assert hidden_poll_results["lateJson"] == {"attachCalls": 0, "running": True}

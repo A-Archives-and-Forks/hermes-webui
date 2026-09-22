@@ -52,6 +52,14 @@ INDEXES = {
         ("source", "id", "message_count", "last_activity_at"))),
 }
 
+# The only schema gap an older Agent is known to have: sessions.last_activity_at
+# arrived later than the other keyed columns. An index whose missing columns are
+# all listed here is reported "skipped"; any other missing column means this is
+# not an Agent state.db (or a damaged one), and the tool fails closed.
+_LEGACY_OPTIONAL_COLUMNS = {
+    "idx_sessions_webui_fingerprint": frozenset({"last_activity_at"}),
+}
+
 
 def _exclusive_lock(lock_file):
     if lock_file is None:
@@ -91,20 +99,30 @@ def ensure_read_indexes(db_path, *, confirmed_drained=False, lock_file=None):
         with closing(sqlite3.connect(state_db_file_uri(db_path) + "?mode=rw", uri=True)) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                # Validate the whole Agent schema before creating anything, so a
+                # wrong database fails closed without a partial index set.
+                missing_by_index = {}
                 for name, (table, keys) in INDEXES.items():
-                    # An older Agent schema can lack a column one index keys on
-                    # (sessions.last_activity_at is newer than
-                    # messages.timestamp). Skip that index instead of letting its
-                    # CREATE fail and roll back the ones this schema supports.
                     present = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
                     if not present:
-                        # No such table: this is not an agent state.db (or a
-                        # mistyped path to another database). Fail loud.
                         raise RuntimeError(f"state.db has no {table!r} table; refusing to continue")
-                    if any(col not in present for col, _ in keys):
+                    missing = {col for col, _ in keys if col not in present}
+                    if missing - _LEGACY_OPTIONAL_COLUMNS.get(name, frozenset()):
+                        raise RuntimeError(
+                            f"state.db {table!r} table lacks Agent column(s) "
+                            f"{sorted(missing)}; not an Agent state.db, refusing to continue"
+                        )
+                    missing_by_index[name] = missing
+                for name, (table, keys) in INDEXES.items():
+                    existing = db.execute("SELECT tbl_name FROM sqlite_master WHERE name=?", (name,)).fetchone()
+                    if missing_by_index[name]:
+                        # Known legacy gap. A same-named index here cannot be the
+                        # shape we expect (it keys on the absent column), so it is
+                        # incompatible, not something to skip past.
+                        if existing:
+                            raise RuntimeError(f"Incompatible index: {name}")
                         statuses[name] = "skipped"
                         continue
-                    existing = db.execute("SELECT tbl_name FROM sqlite_master WHERE name=?", (name,)).fetchone()
                     if existing:
                         actual = tuple((r[2], r[4]) for r in db.execute(f"PRAGMA index_xinfo({name})") if r[5])
                         flags = next((r for r in db.execute(f"PRAGMA index_list({table})") if r[1] == name), None)

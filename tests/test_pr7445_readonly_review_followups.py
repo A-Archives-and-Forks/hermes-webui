@@ -285,6 +285,40 @@ def test_maintenance_fails_loud_on_a_database_without_agent_tables(tmp_path, mai
         assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='index'").fetchone()[0] == 0
 
 
+def test_maintenance_fails_closed_on_same_named_tables_without_agent_columns(tmp_path, maintenance_without_fcntl):
+    """Tables named ``messages``/``sessions`` with foreign columns are not an Agent
+    state.db: raise, create nothing, never report every index ``skipped``."""
+    module = maintenance_without_fcntl
+    path = tmp_path / "state.db"
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.executescript("CREATE TABLE messages(body TEXT); CREATE TABLE sessions(title TEXT);")
+    with pytest.raises(RuntimeError, match="not an Agent state.db"):
+        module.ensure_read_indexes(path, confirmed_drained=True)
+    with closing(sqlite3.connect(str(path))) as conn:
+        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='index'").fetchone()[0] == 0
+
+
+def test_maintenance_rejects_a_same_named_index_on_the_legacy_gap(tmp_path, maintenance_without_fcntl):
+    """On the legacy schema a pre-existing ``idx_sessions_webui_fingerprint`` can't
+    be the expected shape (it would key on the absent column): report it as
+    incompatible instead of skipping past it, and roll back the message indexes."""
+    module = maintenance_without_fcntl
+    path = tmp_path / "state.db"
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sessions(source TEXT, id TEXT, message_count INTEGER);
+            CREATE TABLE messages(session_id TEXT, timestamp REAL, role TEXT);
+            CREATE INDEX idx_sessions_webui_fingerprint ON messages(role);
+            """
+        )
+    with pytest.raises(RuntimeError, match="Incompatible index: idx_sessions_webui_fingerprint"):
+        module.ensure_read_indexes(path, confirmed_drained=True)
+    with closing(sqlite3.connect(str(path))) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert names == {"idx_sessions_webui_fingerprint"}
+
+
 @pytest.fixture
 def maintenance_without_fcntl(monkeypatch):
     """Import the maintenance module as a platform without ``fcntl`` sees it."""

@@ -181,7 +181,13 @@ def test_agent_backed_path_counts_these_shapes_accurately(tmp_path):
     - dropping that config disable flips it to enabled without changing the
       compatible total.
     """
-    pytest.importorskip("agent.skill_utils")
+    skill_utils = pytest.importorskip("agent.skill_utils")
+    # Other test files install a bare ``types.ModuleType`` stub for
+    # ``agent.skill_utils`` in ``sys.modules`` (no ``__file__``, rglob walk,
+    # MagicMock frontmatter). This positive control is only meaningful against
+    # the real agent package, so a stub must skip it, not satisfy it.
+    if not getattr(skill_utils, "__file__", None):
+        pytest.skip("agent.skill_utils is a test stub, not the real agent package")
     from agent.skill_utils import iter_skill_index_files
 
     home = _write_profile(tmp_path)

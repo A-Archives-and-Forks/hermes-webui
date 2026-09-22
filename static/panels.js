@@ -5415,8 +5415,13 @@ function _renderExternalNotesSources() {
   const recall = data.automatic_recall_unchanged !== false
     ? `<div class="memory-detail-mtime">${esc(t('external_notes_auto_recall_hint'))}</div>`
     : '';
+  // Same withheld-runtime state as the MCP panel: sources still list, but their
+  // live status/tools are hidden until the profile's runtime scope is confirmed.
+  const scopeNotice = data.runtime_scope === 'unavailable'
+    ? `<div class="memory-detail-mtime">${esc(t('mcp_runtime_scope_unavailable'))}</div>`
+    : '';
   if (!sources.length) {
-    body.innerHTML = `<div class="main-view-content">${recall}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
   } else {
     const selected = sources.find(src => (src.name || '').toLowerCase() === (_notesSelectedSource || '').toLowerCase()) || sources[0];
     _notesSelectedSource = (selected && selected.name) || 'joplin';
@@ -5463,7 +5468,7 @@ function _renderExternalNotesSources() {
       ${searchError}
       ${resultHtml}
     </section>`;
-    body.innerHTML = `<div class="main-view-content">${recall}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
   }
   body.style.display = '';
   if (empty) empty.style.display = 'none';

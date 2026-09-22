@@ -29835,7 +29835,7 @@ def _handle_notes_sources_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    server_summaries, tools, source, _runtime_scope = _mcp_profile_runtime_inventory(
+    server_summaries, tools, source, runtime_scope = _mcp_profile_runtime_inventory(
         servers, "/api/notes/sources"
     )
     return j(handler, {
@@ -29843,6 +29843,7 @@ def _handle_notes_sources_list(handler):
         "sources": _notes_sources_from_mcp_inventory(server_summaries, tools),
         "source": source,
         "inventory_scope": "already_known_runtime_only",
+        "runtime_scope": runtime_scope,
         "attach_supported": False,
         "automatic_recall_unchanged": True,
         "recent_ai_notes": _joplin_recent_ai_notes(limit=6),

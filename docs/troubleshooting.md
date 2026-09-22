@@ -311,7 +311,7 @@ Interpret the two together:
 
 ## MCP panel shows another profile's servers, or "Live status for this profile is unavailable"
 
-**Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the panel shows the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.
+**Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the MCP panel and the external Notes drawer show the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.
 
 **Why.** Hermes Agent keeps one in-process MCP ledger per WebUI process and keys a connection by profile only when it can tell the request serves a profile other than the process's own. The WebUI binds every MCP status read and `/reload-mcp` to the request profile (`ARCHITECTURE.md` §4.10). While a chat turn is streaming, the WebUI mirrors that turn's profile into `HERMES_HOME`; Agents that predate `hermes_constants.pin_process_hermes_home` cannot distinguish that mirror from the process profile, so the WebUI withholds runtime data and refuses the reload instead of showing or resetting another profile's connection.
 

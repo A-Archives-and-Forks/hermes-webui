@@ -423,9 +423,17 @@ def test_adopted_connection_serves_status_inventory_and_reload(monkeypatch, tmp_
 
 
 def test_skewed_routing_hides_runtime_and_refuses_reload(monkeypatch, tmp_path):
-    from api.routes import _handle_mcp_servers_list, _handle_mcp_tools_list
+    from api.routes import (
+        _handle_mcp_servers_list,
+        _handle_mcp_tools_list,
+        _handle_notes_sources_list,
+    )
 
     agent = _install(monkeypatch, tmp_path, pin_supported=False)
+    _configure(agent, "profile-write", {
+        "atlassian": {"command": "fake", "fake_tools": WRITE},
+        "joplin": {"command": "fake", "fake_tools": []},   # a notes-drawer source
+    })
     agent.connect("atlassian", READ, scope=None)
     monkeypatch.setenv("HERMES_HOME", str(agent.base / "profiles" / "profile-write"))  # turn mirror
 
@@ -434,6 +442,12 @@ def test_skewed_routing_hides_runtime_and_refuses_reload(monkeypatch, tmp_path):
     assert servers["servers"][0]["status"] == "configured"
     assert servers["servers"][0]["tool_count"] is None
     assert _call("profile-write", _handle_mcp_tools_list)["total"] == 0
+    # The notes drawer reads the same inventory and must be told the runtime is withheld.
+    monkeypatch.setenv("HERMES_WEBUI_EXTERNAL_NOTES_SOURCES", "1")
+    notes = _call("profile-write", _handle_notes_sources_list)
+    assert notes["runtime_scope"] == "unavailable"
+    assert [s["name"] for s in notes["sources"]] == ["joplin"]
+    assert notes["sources"][0]["active"] is False
     with pytest.raises(RuntimeError, match="could not be confirmed"):
         _reload("profile-write")
     assert not [c for c in agent.calls if c[0] in ("discover", "shutdown")]

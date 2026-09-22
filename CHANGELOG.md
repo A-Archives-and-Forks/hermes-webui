@@ -5,6 +5,14 @@
 
 ### Fixed
 
+- **An OIDC-only or passkey-only deployment no longer shows a dead password prompt.** The
+  `/login` page rendered the password input, submit button and passkey control
+  unconditionally, so an instance with native OIDC configured and no
+  `HERMES_WEBUI_PASSWORD` displayed a password form that silently 401'd every submit. The
+  controls are now gated on the auth methods actually configured, with the passkey button
+  kept for passwordless-passkey instances where it is the only login affordance. Thanks
+  @happy5318. (#7056, #7715)
+
 - **A conversation whose history carries an explicit `null` tool-call list no longer breaks
   the tool-call summary.** `_extract_tool_calls_from_messages` used `.get('tool_calls', [])`,
   which returns the default only when the key is *absent* — when a stored message carried the

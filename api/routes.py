@@ -11088,9 +11088,7 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
-    <button type="submit">{{LOGIN_BTN}}</button>
-    <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
+    {{PASSWORD_FORM_HTML}}
     {{OIDC_LOGIN_HTML}}
   </form>
   <div class="err" id="err"></div>
@@ -13633,6 +13631,36 @@ def handle_get(handler, parsed) -> bool:
         ]
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
+        # #7056: only render the password input / submit / passkey controls
+        # when password auth is actually enabled. With native OIDC configured
+        # and ``HERMES_WEBUI_PASSWORD`` unset, the form previously still
+        # displayed the password prompt and accepted — silently 401-ing at
+        # the server — every submit. The OIDC SSO entry point stays the
+        # sole path. ``is_password_auth_enabled`` is the same predicate
+        # ``/api/auth/status`` reports as ``password_auth_enabled``.
+        from api.auth import are_passkeys_enabled, is_password_auth_enabled
+
+        # The password INPUT is gated on a configured password, but the passkey
+        # button must survive a passwordless-passkey deployment: settings expose
+        # ``passwordless_enabled = passkeys registered AND not password_auth_enabled``
+        # (routes.py ~14059) and ``is_auth_enabled()`` counts passkeys as an
+        # independent auth method, so hiding the button when no password is set
+        # would remove the ONLY working login affordance for those instances.
+        _passkey_button_html = (
+            '<button type="button" id="passkey-login" class="passkey-login" '
+            'style="display:none">Sign in with passkey</button>'
+        )
+        if is_password_auth_enabled():
+            _password_form_html = (
+                f'<input type="password" id="pw" '
+                f'placeholder="{_html.escape(_login_strings["placeholder"])}" autofocus>'
+                f'<button type="submit">{_html.escape(_login_strings["btn"])}</button>'
+                f'{_passkey_button_html}'
+            )
+        elif are_passkeys_enabled():
+            _password_form_html = _passkey_button_html
+        else:
+            _password_form_html = ""
         version_token = quote(WEBUI_VERSION, safe="")
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
@@ -13641,10 +13669,7 @@ def handle_get(handler, parsed) -> bool:
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
-            .replace(
-                "{{LOGIN_PLACEHOLDER}}", _html.escape(_login_strings["placeholder"])
-            )
-            .replace("{{LOGIN_BTN}}", _html.escape(_login_strings["btn"]))
+            .replace("{{PASSWORD_FORM_HTML}}", _password_form_html)
             .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
             .replace(
                 "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])

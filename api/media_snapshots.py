@@ -504,7 +504,7 @@ def annotate_media_snapshots(
         resolve_ref = resolve_media_ref
     if allowed_predicate is None:
         allowed_predicate = media_capture_allowed
-    media_re = _re.compile(r"MEDIA:([^\s\)\]]+)")
+    media_re = _re.compile(r"MEDIA:([^\s\)\]\`]+)")
     captured = 0
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":

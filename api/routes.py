@@ -20450,7 +20450,7 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]\`]+)")
 
 
 def _message_content_text(content) -> str:

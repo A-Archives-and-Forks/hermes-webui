@@ -79,7 +79,11 @@ PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
 # one project's remaining budget; and the sum of those budgets across every
 # starved project is at most effective_limit * len(projects), which the scan
 # ceiling above already caps. Worst case per build: 1 global query + 1 GROUP BY
-# probe + one small project-scoped query per starved project.
+# probe + one small project-scoped query per starved project, plus the pass's
+# single widening budget (query_limit, see `widening_budget`) shared by the
+# compression-heavy retries — a retry is NOT granted the global allowance per
+# project, which would make a build scale with the number of starved projects
+# (greptile P1 on #6659).
 #
 # --- Bounds for the UNASSIGNED refill pass (see _load_cli_sessions_uncached).
 # The SQL 'unassigned' filter reads state.db.project_id, but a WebUI-side move
@@ -8754,6 +8758,21 @@ def _load_cli_sessions_uncached(
                     # cost stays bounded because each query is limited to one
                     # project's remaining budget (sum <= the scan ceiling) and
                     # only fires when the global window was saturated.
+                    #
+                    # The WIDENING below is rationed per PASS instead (greptile
+                    # P1 on #6659): `remaining` bounds each project's FIRST
+                    # query, but a retry that jumps to `query_limit` is not
+                    # bounded by the project's own share at all, so granting it
+                    # to every starved project made a build scan
+                    # len(starved) * query_limit — an order of magnitude past
+                    # the ceiling on a profile with ten compression-heavy
+                    # projects. One aggregate pool, spent at the full width of
+                    # each retry, caps the pass at 2 * query_limit of scoped
+                    # reading regardless of how many projects are starved.
+                    # Only the widening is rationed; the first query of every
+                    # starved project is never skipped, which is what keeps the
+                    # completeness guarantee above intact.
+                    widening_budget = query_limit
                     for _kept, project_id in starved:
                         remaining = effective_limit - kept_per_project.get(project_id, 0)
                         if remaining <= 0:
@@ -8768,10 +8787,10 @@ def _load_cli_sessions_uncached(
                         # the loop would advance to the next project and leave
                         # this one under-delivered on every rebuild — the same
                         # failure the global query already guards against
-                        # (greptile P1 on #6659). Re-query once at the widest
-                        # limit this pass is allowed to scan, so the retry is
-                        # bounded to one extra query per starved project and
-                        # cannot out-read the pass's own scan budget.
+                        # (greptile P1 on #6659). Re-query once, widened to
+                        # whatever the pass's widening budget has left, which is
+                        # what bounds the retry at the PASS level instead of per
+                        # project (greptile P1 on #6659).
                         scoped_limit = remaining
                         while True:
                             scoped_rows, scoped_window_exhausted = cast(
@@ -8797,7 +8816,15 @@ def _load_cli_sessions_uncached(
                                 or scoped_limit >= query_limit
                             ):
                                 break
-                            scoped_limit = query_limit
+                            widened = min(query_limit, widening_budget)
+                            if widened <= scoped_limit:
+                                # The pass has spent its widening budget. A
+                                # retry now could only re-read a window this
+                                # query already consumed, so stop instead of
+                                # paying for a read that cannot deliver.
+                                break
+                            widening_budget -= widened
+                            scoped_limit = widened
             except Exception:
                 logger.debug("Project-assigned CLI recovery pass failed", exc_info=True)
 

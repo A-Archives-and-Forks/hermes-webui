@@ -2385,3 +2385,96 @@ def test_all_profiles_view_resolves_each_context_against_its_own_profile(
     assert by_id["older-assigned-b"]["project_id"] == "project-b"
     # A foreign id is still not an assignment.
     assert by_id["newest-foreign-b"]["project_id"] is None
+
+
+@pytest.mark.parametrize("quiet_count", [1, 3])
+def test_compression_heavy_widening_is_one_pass_budget_not_per_project(
+    fake_hermes_home, tmp_path, monkeypatch, quiet_count
+):
+    """The retry after a binding scoped window is paid from ONE pass budget.
+
+    ``remaining`` bounds each starved project's first scoped query, but the
+    widening that follows a binding raw window jumped straight to the global
+    ``query_limit`` — and it was granted to every starved project in turn. A
+    profile with ten compression-heavy projects therefore scanned ten times the
+    ceiling in a single build, growing with the number of starved projects
+    (greptile P1 on #6659). The widening now comes out of one pass-level pool,
+    so the scoped reading of a build is bounded by ``2 * query_limit`` however
+    many projects are starved — while every starved project still pays its own
+    first query, the completeness guarantee that a fixed per-build project cap
+    used to break (greptile P1 on #6659).
+
+    Parametrized over the number of starved projects because that is exactly
+    what the budget must not scale with.
+    """
+    ceiling = 20
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", ceiling)
+    per_project_limit = 4
+    quiet = [f"project-quiet-{index}" for index in range(quiet_count)]
+    _register_projects(tmp_path, "project-busy", *quiet)
+
+    project_count = len(quiet) + 1
+    # The pass's own query budget: every project's equal share of the ceiling.
+    effective_limit = min(per_project_limit, max(1, ceiling // project_count))
+    query_limit = min(effective_limit * project_count, ceiling)
+
+    # Each quiet project's scoped raw window is consumed by its OWN compression
+    # segments, so its first scoped query comes back short with older assigned
+    # conversations of its own still waiting behind the window.
+    scoped_raw_window = per_project_limit * max(agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS)
+    rows = []
+    for index, project_id in enumerate(quiet):
+        rows.append(_session(f"{project_id}-old", BASE_TS + index, project_id=project_id))
+        rows.extend(_lineage(
+            f"{project_id}-chain",
+            BASE_TS + 10_000 + index * 1_000,
+            scoped_raw_window + 100,
+            project_id=project_id,
+            step=1.0,
+        ))
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 5_000 + index, project_id="project-busy")
+        for index in range(25)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 90_000 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((kwargs["project_ids"][0], kwargs.get("limit")))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=per_project_limit,
+    )
+
+    # Completeness is untouched: EVERY starved project still gets its query.
+    # (The busy project is starved in this fixture too and is queried as well;
+    # what matters here is that no project of interest is skipped.)
+    tried = {project_id for project_id, _ in scoped_queries}
+    assert set(quiet) <= tried
+
+    # A widened query is one that asks for more than the project's own share.
+    widened = [limit for _, limit in scoped_queries if limit > effective_limit]
+    # The pool is one query_limit wide and each retry is charged its full width,
+    # so exactly one project can take the widest retry — not one per project.
+    assert widened == [query_limit]
+    # And the whole pass stays inside the documented 2 * query_limit bound,
+    # whatever the number of starved projects.
+    assert sum(limit for _, limit in scoped_queries) <= 2 * query_limit
+
+    # The widening the budget did fund still recovers the conversation behind
+    # the neediest project's window — the retry was rationed, not disabled.
+    widened_project = quiet[0]
+    assert f"{widened_project}-old" in {
+        session["session_id"] for session in sessions
+    }, "the one funded widening must still reach behind the binding window"

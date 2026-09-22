@@ -50,9 +50,9 @@ from api.process_event_utils import stamp_message_source
 logger = logging.getLogger(__name__)
 # Size of the interactive sidebar recency window. Also bounds how many
 # delegated subagent children can be rendered at once, since a child only
-# nests when it wins a slot in this window. Override with
-# HERMES_WEBUI_VISIBLE_SESSION_LIMIT.
-CLI_VISIBLE_SESSION_LIMIT = _cfg._env_int("HERMES_WEBUI_VISIBLE_SESSION_LIMIT", 20)
+# nests when it wins a slot in this window. Resolved in api.config before
+# profile init; override with HERMES_WEBUI_VISIBLE_SESSION_LIMIT (clamped 1–200).
+CLI_VISIBLE_SESSION_LIMIT = _cfg.CLI_VISIBLE_SESSION_LIMIT
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default

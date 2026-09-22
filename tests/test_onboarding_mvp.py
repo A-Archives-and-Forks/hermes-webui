@@ -261,14 +261,19 @@ def test_openrouter_wizard_no_dead_zai_ids():
     or_setup = _SUPPORTED_PROVIDER_SETUPS["openrouter"]
     or_ids = {m["id"] for m in or_setup["models"]}
 
-    # Dead id must not appear in the OpenRouter projection
-    assert "zai/glm-4.5-flash" not in or_ids, (
-        "OpenRouter wizard still offers dead id zai/glm-4.5-flash"
+    # Dead id must not appear in the OpenRouter projection. Since #7514 the
+    # projection maps zai/ -> z-ai/, so the id actually offered (and dead on
+    # OpenRouter) is z-ai/glm-4.5-flash; check both spellings so this test
+    # fails on the pre-fix code rather than passing vacuously.
+    assert "z-ai/glm-4.5-flash" not in or_ids, (
+        "OpenRouter wizard still offers dead id z-ai/glm-4.5-flash"
     )
-    # The remapped replacement must be present
-    assert "z-ai/glm-4.5-air" in or_ids, (
-        "OpenRouter wizard missing remapped z-ai/glm-4.5-air"
-    )
+    assert "zai/glm-4.5-flash" not in or_ids
+    # The remapped replacement must be present, and must not be labelled
+    # "free": OpenRouter bills z-ai/glm-4.5-air as a paid model.
+    air = [m for m in or_setup["models"] if m["id"] == "z-ai/glm-4.5-air"]
+    assert air, "OpenRouter wizard missing remapped z-ai/glm-4.5-air"
+    assert "free" not in air[0]["label"].lower()
 
 
 def test_zai_native_still_has_glm_4_5_flash():

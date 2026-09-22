@@ -37,8 +37,18 @@ boundary. Under `STREAMS_LOCK`, both the worker-retained cancellation event and
 live stream membership must permit registration. A removed `CANCEL_FLAGS` entry
 is not permission to restart. If Stop won during initial or self-heal
 construction, the candidate must not enter the reusable cache or call
-`run_conversation`. New-agent lifecycle/cache publication follows successful
-registration; it must not precede the cancellation check.
+`run_conversation`. Stream registration, reusable-cache publication and the
+in-memory lifecycle handle share one atomic Stop admission, using lock order
+`STREAMS_LOCK` then `SESSION_AGENT_CACHE_LOCK`. Merely moving a cache write
+after a cancellation check does not protect that check-to-publication gap.
+
+After prompt preparation and immediately before each initial/self-heal invocation,
+revalidate the retained cancel event, stream membership and exact registered
+Agent. If Stop already won, remove only that Agent's matching reusable entry
+and settle cancellation. Never clear a successor's cache or lifecycle handle.
+Stop after invocation admission uses the existing Agent interrupt mechanism;
+registry locks must not span provider or tool execution. LRU eviction/close stays
+outside the stream lock and retains the existing active-worker policy.
 
 Interrupt and cancellation finalization occur outside the stream registry lock.
 Session finalization still owns the session lock: the returned-error path already

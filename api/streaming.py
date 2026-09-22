@@ -4379,9 +4379,10 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
        short and frequently embed a borrowed Latin technical term (e.g. a CJK
        title containing the word "Python"), the title side uses a proportion
        threshold (>=35% of the title's alphabetic characters in a non-start
-       script, min 2 chars) rather than a strict majority -- so a CJK title with
-       one English word still trips, while an English title with a single
-       foreign place-name does not.
+       script, min 2 chars) rather than a strict majority. CJK titles with
+       borrowed Latin terms are allowed when the title also contains CJK
+       characters (#7693), but pure-Latin titles for CJK conversations are
+       still rejected.
     2. The legacy German-start → English-title heuristic, preserved verbatim so
        the original behavior keeps working for same-script (latin) drift that
        the script check can't see.
@@ -4391,13 +4392,26 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
         return False
 
     # (1) Cross-script mismatch — language-agnostic.
+    # CJK text routinely borrows Latin product/technical terms (e.g. "WeChat
+    # Pay", "Python", "ProRes RAW"), so when the user writes in CJK, Latin
+    # characters in the title are acceptable as long as the title also
+    # contains CJK — i.e. the title is genuinely mixed, not pure drift.
+    # A pure-Latin title for a CJK conversation is still rejected.
+    # Unrelated scripts (Cyrillic, Arabic, Greek …) are always flagged.
     user_script = _dominant_script(user_text)
     if user_script:
         title_counts = _script_counts(candidate)
         title_total = sum(title_counts.values())
         if title_total >= 2:
             for script, n in title_counts.items():
-                if script != user_script and n >= 2 and (n / title_total) >= 0.35:
+                if script == user_script:
+                    continue
+                # When user writes in CJK, Latin in the title is a borrowed
+                # term as long as the title also contains CJK characters.
+                if user_script == 'cjk' and script == 'latin':
+                    if title_counts.get('cjk', 0) >= 2:
+                        continue
+                if n >= 2 and (n / title_total) >= 0.35:
                     return True
 
     # (2) Legacy same-script German→English heuristic.

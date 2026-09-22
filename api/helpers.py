@@ -306,13 +306,20 @@ def _declared_content_lengths(handler) -> set[int] | None:
     """
     parsed: set[int] = set()
     for raw in _framing_header_values(handler, 'Content-Length'):
-        stripped = raw.strip(_FIELD_VALUE_OWS)
-        if not (stripped.isascii() and stripped.isdigit()):
-            return None
-        try:
-            parsed.add(int(stripped))
-        except ValueError:
-            return None
+        # RFC 9110 §5.3: a list-valued field may arrive as repeated lines OR as
+        # one comma-combined line, and the two spellings mean the same thing.
+        # So "0, 0" is the same bodyless request as two "Content-Length: 0"
+        # headers and must keep its keep-alive; only a DISAGREEING list (caught
+        # below by len(parsed) > 1) is unframeable. Without the split the comma
+        # fails isdigit() and every agreeing list over-closed a healthy socket.
+        for member in raw.split(','):
+            stripped = member.strip(_FIELD_VALUE_OWS)
+            if not (stripped.isascii() and stripped.isdigit()):
+                return None
+            try:
+                parsed.add(int(stripped))
+            except ValueError:
+                return None
     return parsed
 
 

@@ -5,6 +5,18 @@
 
 ### Fixed
 
+- **A rejected request no longer poisons the next one on the same connection.** `server.py`
+  is a raw HTTP/1.1 handler where `rfile` is the socket itself, so answering a request
+  before reading its body left those bytes queued. The next request on a keep-alive
+  connection was then parsed starting mid-body, and the client got
+  `400 Bad request syntax ('{"a": "b"}GET /api/health HTTP/1.1')` — an error naming a
+  request it never sent, which is expensive to diagnose from the client side. Every
+  reject path now arms `Connection: close` when a body is still pending, and framing is
+  validated strictly (RFC 9110 `1*DIGIT`, duplicate and comma-combined `Content-Length`
+  reconciled, every `Transfer-Encoding` refused since nothing here decodes one). A
+  genuinely bodyless rejection keeps its keep-alive, so healthy pooled connections are
+  not dropped. Thanks @rodrigogs. (#7550, #6658)
+
 - **Opening a session that belongs to another profile now offers to switch to it instead of
   looking deleted.** Several cross-profile guards answered `404 Session not found`, which the
   front-end treats as a missing session and self-heals by clearing the URL and local storage —

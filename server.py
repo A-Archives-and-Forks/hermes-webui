@@ -100,7 +100,7 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 from api.request_logging import emit_request_log
-from api.auth import check_auth, check_auth_or_close, reset_trusted_auth_request_state
+from api.auth import check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -378,7 +378,8 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            # Body-pending-aware: a body-bearing GET failing auth would poison reuse (#7550).
+            if not check_auth_or_close(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)

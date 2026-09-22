@@ -5,6 +5,15 @@
 
 ### Fixed
 
+- **The gateway watcher no longer polls `state.db` around the clock with nobody listening.**
+  Its poll loop re-fingerprinted the gateway state database every few seconds whether or not
+  any SSE client was attached, and slept in 0.1s increments — roughly 10 wakeups a second, all
+  day, on an idle server. The loop now parks on an event when there are no subscribers and is
+  woken by the first one, so an idle instance does no polling work at all; while subscribed it
+  waits on a single timer that still returns immediately on shutdown. Connecting a client
+  remains prompt — the first subscriber unparks the loop rather than waiting out the poll
+  interval. Thanks @DevNexsler. (#7694)
+
 - **A long-running turn no longer replays a stale token count after a reload.** The run-journal
   recorded live metering frames, so reattaching to a stream — or reloading a tab mid-turn —
   could replay a snapshot from earlier in the same run and briefly show token/TPS figures that

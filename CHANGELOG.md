@@ -5,6 +5,13 @@
 
 ### Fixed
 
+- **The approval card's "Skip all this session" button no longer shows two lightning bolts.**
+  The button rendered its ⚡ twice — once from the icon span in the markup and again from the
+  translated label, which carried its own leading glyph in 14 of 15 locales. The icon now comes
+  only from the markup, matching every sibling button on the card (Allow once / Allow session /
+  Always allow / Deny all pair an icon element with a glyph-free label), and translators no
+  longer carry the symbol in their strings. (#7701)
+
 - **The gateway watcher no longer polls `state.db` around the clock with nobody listening.**
   Its poll loop re-fingerprinted the gateway state database every few seconds whether or not
   any SSE client was attached, and slept in 0.1s increments — roughly 10 wakeups a second, all

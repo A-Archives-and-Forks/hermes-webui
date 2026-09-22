@@ -16,6 +16,18 @@
 
 ### Fixed
 
+- **Opening the sidebar can no longer stall the agent's writes to `state.db`.** Several WebUI
+  paths that only read the agent's `state.db` could quietly become writers. The read-only opener
+  fell back to a writable connection when `mode=ro` failed. The session listing self-healed a
+  missing `idx_messages_session` with `CREATE INDEX` through its own writable connection, which
+  holds the SQLite writer lock for minutes on a large `messages` table. The cron sidebar, insights
+  and deep-health checks opened the database with a bare `sqlite3.connect()`. Every one of these
+  readers now opens strictly read-only (`file:...?mode=ro`) and never creates an index. A missing
+  index falls back to the existing pre-aggregated listing. The gateway watcher also no longer polls
+  the database when no client is subscribed. Operators with an older agent can create the read
+  indexes in a drained maintenance window with `scripts/ensure_state_db_read_indexes.py`; see
+  `docs/troubleshooting.md`. (#7445 by @ruizanthony)
+
 - **A failed chat launch no longer leaves the session stuck "running".** If the worker thread
   couldn't start, its stream ownership and the session's pending-stream fields were never cleared,
   so the session could look permanently active and the registries grew. Launch failure now clears

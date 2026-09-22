@@ -3431,9 +3431,24 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
+      // #7622 (round 2): the settings payload's `s.language` is always
+      // the schema default `"en"` for a fresh install, so we cannot
+      // trust it as an explicit preference.  Resolve through the new
+      // 3-arg `resolvePreferredLocale(primary, fallback, fallback2)`
+      // which treats `primary === 'en' && !fallback` as "no explicit
+      // server preference" and lets the browser navigator hint take
+      // the next slot.  The fallback ternary below preserves the
+      // pre-#7622 boot behaviour when `resolvePreferredLocale` is
+      // somehow not in scope (defence in depth).
+      const _stored=localStorage.getItem('hermes-lang');
+      const _browserHint=(typeof navigator!=='undefined')
+        ? (Array.isArray(navigator.languages)&&navigator.languages.length
+            ? navigator.languages[0]
+            : (typeof navigator.language==='string'?navigator.language:null))
+        : null;
       const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
-        : (s.language || localStorage.getItem('hermes-lang') || 'en');
+        ? resolvePreferredLocale(s.language, _stored, _browserHint)
+        : (s.language || _stored || _browserHint || 'en');
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }

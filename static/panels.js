@@ -9300,9 +9300,23 @@ async function loadSettingsPanel(){
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
+    // #7622 (round 2): the settings payload's `settings.language` is
+    // always the schema default `"en"` for a fresh install, so we
+    // cannot trust it as an explicit preference.  Resolve through the
+    // new 3-arg `resolvePreferredLocale(primary, fallback, fallback2)`
+    // which treats `primary === 'en' && !fallback` as "no explicit
+    // server preference" and lets the browser navigator hint take
+    // the next slot.  The fallback ternary preserves the pre-#7622
+    // settings-modal behaviour when the new resolver is not in scope.
+    const _stored=localStorage.getItem('hermes-lang');
+    const _browserHint=(typeof navigator!=='undefined')
+      ? (Array.isArray(navigator.languages)&&navigator.languages.length
+          ? navigator.languages[0]
+          : (typeof navigator.language==='string'?navigator.language:null))
+      : null;
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
-      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
-      : (settings.language || localStorage.getItem('hermes-lang') || 'en');
+      ? resolvePreferredLocale(settings.language, _stored, _browserHint)
+      : (settings.language || _stored || _browserHint || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
     if(typeof setLocale==='function'){
       setLocale(resolvedLanguage);

@@ -13638,15 +13638,27 @@ def handle_get(handler, parsed) -> bool:
         # the server — every submit. The OIDC SSO entry point stays the
         # sole path. ``is_password_auth_enabled`` is the same predicate
         # ``/api/auth/status`` reports as ``password_auth_enabled``.
-        from api.auth import is_password_auth_enabled
+        from api.auth import are_passkeys_enabled, is_password_auth_enabled
+
+        # The password INPUT is gated on a configured password, but the passkey
+        # button must survive a passwordless-passkey deployment: settings expose
+        # ``passwordless_enabled = passkeys registered AND not password_auth_enabled``
+        # (routes.py ~14059) and ``is_auth_enabled()`` counts passkeys as an
+        # independent auth method, so hiding the button when no password is set
+        # would remove the ONLY working login affordance for those instances.
+        _passkey_button_html = (
+            '<button type="button" id="passkey-login" class="passkey-login" '
+            'style="display:none">Sign in with passkey</button>'
+        )
         if is_password_auth_enabled():
             _password_form_html = (
                 f'<input type="password" id="pw" '
                 f'placeholder="{_html.escape(_login_strings["placeholder"])}" autofocus>'
                 f'<button type="submit">{_html.escape(_login_strings["btn"])}</button>'
-                '<button type="button" id="passkey-login" class="passkey-login" '
-                'style="display:none">Sign in with passkey</button>'
+                f'{_passkey_button_html}'
             )
+        elif are_passkeys_enabled():
+            _password_form_html = _passkey_button_html
         else:
             _password_form_html = ""
         version_token = quote(WEBUI_VERSION, safe="")
@@ -13658,6 +13670,10 @@ def handle_get(handler, parsed) -> bool:
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
             .replace("{{PASSWORD_FORM_HTML}}", _password_form_html)
+            .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
+            .replace(
+                "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
+            )
             .replace("{{OIDC_LOGIN_HTML}}", _oidc_login_html(parsed))
         )
         return t(handler, _page, content_type="text/html; charset=utf-8")

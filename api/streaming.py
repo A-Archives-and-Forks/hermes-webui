@@ -4028,9 +4028,10 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
        short and frequently embed a borrowed Latin technical term (e.g. a CJK
        title containing the word "Python"), the title side uses a proportion
        threshold (>=35% of the title's alphabetic characters in a non-start
-       script, min 2 chars) rather than a strict majority -- so a CJK title with
-       one English word still trips, while an English title with a single
-       foreign place-name does not.
+       script, min 2 chars) rather than a strict majority. CJK titles with
+       borrowed Latin terms are allowed when the title also contains CJK
+       characters (#7693), but pure-Latin titles for CJK conversations are
+       still rejected.
     2. The legacy German-start → English-title heuristic, preserved verbatim so
        the original behavior keeps working for same-script (latin) drift that
        the script check can't see.

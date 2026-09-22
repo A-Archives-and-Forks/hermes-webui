@@ -5,6 +5,16 @@
 
 ### Fixed
 
+- **Opening a session that belongs to another profile now offers to switch to it instead of
+  looking deleted.** Several cross-profile guards answered `404 Session not found`, which the
+  front-end treats as a missing session and self-heals by clearing the URL and local storage —
+  so a valid deep link into another profile's session destroyed its own way back. Those guards
+  now return the same `409 session_profile_mismatch` the detail-load endpoint has used since
+  #5419, while a genuinely missing session still 404s and still self-heals. The clarify card,
+  compression-recovery card and manual-compression flow were each treating *every* `409` as
+  their own "stale" signal and are now scoped so a cross-profile refusal no longer hides a live
+  prompt or reports a false compression failure. Thanks @happy5318. (#7710, #7714)
+
 - **An OIDC-only or passkey-only deployment no longer shows a dead password prompt.** The
   `/login` page rendered the password input, submit button and passkey control
   unconditionally, so an instance with native OIDC configured and no

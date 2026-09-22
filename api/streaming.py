@@ -9791,6 +9791,23 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    def _register_agent_if_current(candidate):
+        # Every constructor, including both credential self-heal branches, must
+        # share the Stop publication edge. CANCEL_FLAGS may already be detached;
+        # the worker-retained event and stream membership remain authoritative.
+        with STREAMS_LOCK:
+            cancelled = cancel_event.is_set() or stream_id not in STREAMS
+            if not cancelled:
+                AGENT_INSTANCES[stream_id] = candidate
+        if not cancelled:
+            return True
+        # No Agent call, session persistence or SSE write under registry locks.
+        try:
+            candidate.interrupt("Cancelled before start")
+        except Exception:
+            logger.debug("Failed to interrupt cancelled candidate agent")
+        return False
+
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -11189,20 +11206,7 @@ def _run_agent_streaming(
                         logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
 
-            # Stop may already have detached CANCEL_FLAGS while initialization
-            # was in flight. The worker-owned event and stream membership, not
-            # the removable registry entry, fence registration with cancellation.
-            with STREAMS_LOCK:
-                _cancelled_before_start = cancel_event.is_set() or stream_id not in STREAMS
-                if not _cancelled_before_start:
-                    AGENT_INSTANCES[stream_id] = agent
-            if _cancelled_before_start:
-                # Interrupt, persistence and event writes must not hold the
-                # registry lock (the session lock can be held by another caller).
-                try:
-                    agent.interrupt("Cancelled before start")
-                except Exception:
-                    logger.debug("Failed to interrupt agent before start")
+            if not _register_agent_if_current(agent):
                 with _agent_lock:
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
@@ -11949,8 +11953,11 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                             agent = _AIAgent(**_agent_kwargs)
-                            with STREAMS_LOCK:
-                                AGENT_INSTANCES[stream_id] = agent
+                            if not _register_agent_if_current(agent):
+                                # Returned-error settlement already owns _agent_lock.
+                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                put('cancel', _cancel_event_payload('Cancelled by user'))
+                                return
                             _agent_sig = _compute_agent_cache_signature(
                                 resolved_model,
                                 resolved_api_key,
@@ -13301,8 +13308,11 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                     _heal_agent = _AIAgent(**_heal_kwargs)
-                    with STREAMS_LOCK:
-                        AGENT_INSTANCES[stream_id] = _heal_agent
+                    if not _register_agent_if_current(_heal_agent):
+                        with _agent_lock:
+                            _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        return
                     _agent_sig = _compute_agent_cache_signature(
                         resolved_model,
                         resolved_api_key,

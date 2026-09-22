@@ -30,6 +30,19 @@ This RFC defines a consistency contract for those layers. It complements the
 larger run adapter direction in #1925 by documenting what must remain coherent
 while WebUI still has multiple overlapping state stores.
 
+## Agent registration after cancellation
+
+Initial and credential self-heal Agent construction use the same registration
+boundary. Under `STREAMS_LOCK`, both the worker-retained cancellation event and
+live stream membership must permit registration. A removed `CANCEL_FLAGS` entry
+is not permission to restart. If Stop won during self-heal construction, the
+replacement must not enter the reusable cache or call `run_conversation`.
+
+Interrupt and cancellation finalization occur outside the stream registry lock.
+Session finalization still owns the session lock: the returned-error path already
+holds it, while initial registration and the exception path acquire it. Do not
+reacquire this non-reentrant lock from a branch that already owns it.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

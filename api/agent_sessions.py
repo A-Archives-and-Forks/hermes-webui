@@ -1,11 +1,12 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import json
 import logging
+import os
 import sqlite3
 import sys
 from contextlib import closing
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from urllib.parse import quote
+from urllib.parse import quote, quote_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,13 @@ def state_db_file_uri(db_path, platform: str | None = None) -> str:
         # ``file:///C:/...`` shape (``Path.as_uri()`` leaves it unescaped too).
         return "file://" + quote(posix_path, safe="/:")
     posix_path = PurePosixPath(str(db_path)).as_posix()
-    return "file://" + quote(posix_path, safe="/")
+    # Quote the filesystem BYTES, not the str: a POSIX path component that is
+    # not valid UTF-8 is carried in the str as ``surrogateescape`` code points,
+    # which ``quote(str)`` rejects with UnicodeEncodeError (the caller then
+    # treats the db as unreadable and every agent-backed session vanishes).
+    # ``Path.as_uri()`` — what master used — percent-encodes os.fsencode()
+    # bytes; this keeps that behavior.
+    return "file://" + quote_from_bytes(os.fsencode(posix_path), safe="/")
 
 
 def state_db_readonly_uri(db_path, platform: str | None = None) -> str:

@@ -207,6 +207,33 @@ def test_empty_authority_uri_opens_on_this_platform(tmp_path):
             conn.execute("INSERT INTO t VALUES (1)")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX filesystem-bytes path")
+def test_non_utf8_posix_path_still_opens_readonly(tmp_path):
+    """A non-UTF-8 path component must not make every agent session vanish.
+
+    Python carries undecodable POSIX filename bytes as ``surrogateescape``
+    code points; ``quote(str)`` rejects those with UnicodeEncodeError, which
+    the listing path swallows as "no sessions". ``Path.as_uri()`` (the pre-PR
+    shape) percent-encoded the fsencode() bytes, so the URI builder must too.
+    """
+    try:
+        odd_dir = tmp_path / os.fsdecode(b"hermes-\xff-home")
+        odd_dir.mkdir()
+    except (OSError, UnicodeError):
+        pytest.skip("filesystem rejects non-UTF-8 names")
+    path = odd_dir / "state.db"
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.execute("CREATE TABLE t(x)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+    uri = agent_sessions.state_db_readonly_uri(path.resolve())
+    assert "%FF" in uri
+    with closing(agent_sessions.open_state_db_readonly(path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone() == (1,)
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO t VALUES (2)")
+
+
 # --------------------------------------------------------------------------
 # 3. The index maintenance script imports and runs without fcntl.
 # --------------------------------------------------------------------------

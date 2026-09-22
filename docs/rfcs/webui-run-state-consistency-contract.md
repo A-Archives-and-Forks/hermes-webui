@@ -44,8 +44,17 @@ after a cancellation check does not protect that check-to-publication gap.
 
 After prompt preparation and immediately before each initial/self-heal invocation,
 revalidate the retained cancel event, stream membership and exact registered
-Agent. If Stop already won, remove only that Agent's matching reusable entry
-and settle cancellation. Never clear a successor's cache or lifecycle handle.
+Agent. If Stop already won, retire a matching reusable entry only while the
+existing `SESSION_WRITEBACK_OWNERS` record still equals this exact stream.
+Hold that ownership lock through cache/lifecycle retirement. Object identity is
+insufficient because successors can reuse the same Agent; absent ownership is
+not permission either, since a completed successor clears its record. Never
+clear a successor's cache or lifecycle handle, and do not issue another Agent
+interrupt for an invocation that never started. Rejected cache-hit registration
+likewise must not interrupt the borrowed Agent; only a never-published newly
+constructed candidate may receive construction-cancellation cleanup. Drop the
+old worker's local borrowed handle as well, so final pending-Steer drain cannot
+reach a successor through an object-reference fallback.
 Stop after invocation admission uses the existing Agent interrupt mechanism;
 registry locks must not span provider or tool execution. LRU eviction/close stays
 outside the stream lock and retains the existing active-worker policy.

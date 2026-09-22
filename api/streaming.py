@@ -9792,6 +9792,7 @@ def _run_agent_streaming(
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
     def _register_agent_if_current(candidate, cache_signature=None):
+        nonlocal agent
         # Every constructor, including both credential self-heal branches, must
         # share the Stop publication edge. CANCEL_FLAGS may already be detached;
         # the worker-retained event and stream membership remain authoritative.
@@ -9815,6 +9816,15 @@ def _run_agent_streaming(
                         logger.debug("Lifecycle register_agent failed for session %s", session_id, exc_info=True)
         if not cancelled:
             return True
+        # A cache hit is a borrowed reusable object, not this worker's private
+        # candidate. Stop may already have let a successor reuse it. Rejected
+        # cache-hit admission must not interrupt that other turn.
+        if cache_signature is None and not ephemeral:
+            if agent is candidate:
+                agent = None
+            return False
+        # Newly constructed candidates were never published on this failed
+        # admission; they cannot have been borrowed by a successor from us.
         # No Agent call, session persistence or SSE write under registry locks.
         try:
             candidate.interrupt("Cancelled before start")
@@ -9823,30 +9833,40 @@ def _run_agent_streaming(
         return False
 
     def _agent_can_invoke(candidate):
+        nonlocal agent
         # Prompt preparation and LRU cleanup can yield after registration. Admit
         # each invocation again at its point of use; never hold registry locks
         # across run_conversation or interrupt. A later Stop interrupts the
         # already-admitted invocation through the registered Agent as usual.
-        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+        from api.config import (
+            SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK,
+            SESSION_WRITEBACK_OWNERS, SESSION_WRITEBACK_OWNERS_LOCK,
+        )
         with STREAMS_LOCK:
             current = (not cancel_event.is_set() and stream_id in STREAMS
                        and AGENT_INSTANCES.get(stream_id) is candidate)
             if not current:
                 if AGENT_INSTANCES.get(stream_id) is candidate:
                     AGENT_INSTANCES.pop(stream_id, None)
-                with SESSION_AGENT_CACHE_LOCK:
-                    entry = SESSION_AGENT_CACHE.get(session_id)
-                    if entry and entry[0] is candidate:
-                        SESSION_AGENT_CACHE.pop(session_id, None)
-                        # Dirty memory segments retain their own owner; clear
-                        # only this still-current reusable future-turn handle.
-                        from api.session_lifecycle import unregister_agent
-                        unregister_agent(session_id)
-        if not current:
-            try:
-                candidate.interrupt("Cancelled before invocation")
-            except Exception:
-                logger.debug("Failed to interrupt unstarted candidate agent")
+                # Agent identity is not turn identity: a successor can reuse the
+                # same cached object. Use the existing cancellation-surviving
+                # ownership record, holding its lock through cache retirement.
+                # Missing ownership also fails closed (successor may have ended).
+                with SESSION_WRITEBACK_OWNERS_LOCK:
+                    if SESSION_WRITEBACK_OWNERS.get(session_id) == stream_id:
+                        with SESSION_AGENT_CACHE_LOCK:
+                            entry = SESSION_AGENT_CACHE.get(session_id)
+                            if entry and entry[0] is candidate:
+                                SESSION_AGENT_CACHE.pop(session_id, None)
+                                # Dirty memory segments keep their original owner.
+                                from api.session_lifecycle import unregister_agent
+                                unregister_agent(session_id)
+        # This invocation never started. Stop owns any required interrupt of the
+        # running Agent; a late duplicate interrupt could hit its new borrower.
+        # Drop our local borrowed handle too: final Steer drain must not reach
+        # the successor through the old worker's fallback `agent` reference.
+        if not current and agent is candidate:
+            agent = None
         return current
 
     # Initialised here (before any code that may raise) so the outer `finally`

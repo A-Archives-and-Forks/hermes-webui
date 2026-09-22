@@ -15,7 +15,7 @@ from tests.test_steer_worker_boundaries import worker_scene as worker_scene
 
 
 @pytest.mark.parametrize("path", ["initial", "cached", "returned", "exception"])
-@pytest.mark.parametrize("cancellation", ["stop", "event-only", "detached-only", "successor", "none"])
+@pytest.mark.parametrize("cancellation", ["stop", "event-only", "detached-only", "successor", "same-agent-successor", "same-agent-completed", "none"])
 def test_stop_after_registration_before_cache_or_invocation(worker_scene, monkeypatch, path, cancellation):
     scene = worker_scene
     reached, release = threading.Event(), threading.Event()
@@ -23,10 +23,20 @@ def test_stop_after_registration_before_cache_or_invocation(worker_scene, monkey
     worker_id = [None]
     paused = [False]
     successor = object()
+    stop_interrupt_seen = threading.Event()
+    successor_interrupt_count = None
     monkeypatch.setattr(session_lifecycle, "_sessions", {})
+    monkeypatch.setattr(config, "SESSION_WRITEBACK_OWNERS", {})
+    config.register_session_writeback_owner("original", "run")
 
     def on_init():
         created.append(scene.agent)
+        interrupt = scene.agent.interrupt
+        def observed_interrupt(reason):
+            result = interrupt(reason)
+            stop_interrupt_seen.set()
+            return result
+        scene.agent.interrupt = observed_interrupt
 
     def on_run():
         assert scene.lock.owner != threading.get_ident(), "provider invocation under stream lock"
@@ -49,6 +59,8 @@ def test_stop_after_registration_before_cache_or_invocation(worker_scene, monkey
         scene.session.pending_user_message = "Do the task."
         scene.session.pending_started_at = 2.0
         scene.session.save()
+        config.register_session_writeback_owner("original", "run")
+        stop_interrupt_seen.clear()
 
     class ObservedCache(OrderedDict):
         def __setitem__(self, key, value):
@@ -100,16 +112,32 @@ def test_stop_after_registration_before_cache_or_invocation(worker_scene, monkey
         try:
             assert reached.wait(8), "worker never released target registration lock"
             retained = config.CANCEL_FLAGS["run"]
-            if cancellation in ("stop", "successor"):
+            if cancellation in ("stop", "successor", "same-agent-successor", "same-agent-completed"):
                 stop_future = pool.submit(streaming.cancel_stream, "run")
                 assert retained.wait(5), "Stop did not publish cancellation"
+                assert stop_interrupt_seen.wait(5), "Stop has not finished its own interrupt"
                 with config.STREAMS_LOCK:
                     assert "run" not in config.STREAMS
-                    if cancellation == "successor":
+                    if cancellation in ("successor", "same-agent-successor", "same-agent-completed"):
+                        if cancellation.startswith("same-agent"):
+                            successor = created[-1]
+                        config.register_session_writeback_owner("original", "successor")
                         with config.SESSION_AGENT_CACHE_LOCK:
                             OrderedDict.__setitem__(cache, "original", (successor, "new-signature"))
                         session_lifecycle.register_agent("original", successor)
-                        config.AGENT_INSTANCES["successor"] = successor
+                        scene.session.active_stream_id = "successor"
+                        scene.session.pending_user_message = "Successor request"
+                        if cancellation == "same-agent-completed":
+                            config.clear_session_writeback_owner_if_owned("original", "successor")
+                            scene.session.active_stream_id = None
+                            scene.session.pending_user_message = None
+                        else:
+                            config.AGENT_INSTANCES["successor"] = successor
+                            config.register_active_run("successor", session_id="original", backend="legacy")
+                        if cancellation == "same-agent-successor":
+                            with successor.pending_lock:
+                                successor.pending.append("Successor-only guidance")
+                        successor_interrupt_count = scene.calls.count("interrupt")
             elif cancellation == "event-only":
                 with config.STREAMS_LOCK:
                     retained.set()
@@ -131,12 +159,21 @@ def test_stop_after_registration_before_cache_or_invocation(worker_scene, monkey
     else:
         assert scene.calls.count("run") == prior_runs, "cancelled candidate was invoked"
         cached = config.SESSION_AGENT_CACHE.get("original")
-        assert not cached or cached[0] is not created[-1], "cancelled candidate stayed reusable"
+        if not cancellation.startswith("same-agent"):
+            assert not cached or cached[0] is not created[-1], "cancelled candidate stayed reusable"
         assert finalized, "cancellation did not reach terminal settlement"
-    if cancellation == "successor":
+    if successor_interrupt_count is not None:
+        assert scene.calls.count("interrupt") == successor_interrupt_count, "stale worker interrupted its successor"
         assert config.SESSION_AGENT_CACHE["original"][0] is successor
         assert session_lifecycle._sessions["original"]["agent"] is successor
-        assert config.AGENT_INSTANCES["successor"] is successor
+        if cancellation == "same-agent-successor":
+            assert successor.pending == ["Successor-only guidance"], "stale terminal drain stole successor guidance"
+        if cancellation == "same-agent-completed":
+            assert scene.session.active_stream_id is None
+        else:
+            assert config.AGENT_INSTANCES["successor"] is successor
+            assert scene.session.active_stream_id == "successor"
+            assert scene.session.pending_user_message == "Successor request"
     assert all(held and live for _, held, live in publications), (
         "Agent cache publication escaped the stream/Stop admission boundary", publications)
     assert "run" not in config.AGENT_INSTANCES
@@ -150,6 +187,8 @@ def test_cache_publication_and_registration_exclude_competing_stop(worker_scene,
     interrupted_state = []
     interrupt_observed = threading.Event()
     monkeypatch.setattr(session_lifecycle, "_sessions", {})
+    monkeypatch.setattr(config, "SESSION_WRITEBACK_OWNERS", {})
+    config.register_session_writeback_owner("original", "run")
 
     class PublicationBarrier(OrderedDict):
         def __setitem__(self, key, value):

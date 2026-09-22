@@ -44,10 +44,14 @@ def _capture(monkeypatch):
     # #7710: the real ``j`` signature is ``j(handler, payload, status=200,
     # extra_headers=None, *, pretty=True)``; the mock has to accept the
     # status keyword so the helper's 409 ``session_profile_mismatch``
-    # payload can be captured here.
-    monkeypatch.setattr(
-        routes, "j", lambda h, o, *_, **__: (cap.__setitem__("ok", o), True)[1]
-    )
+    # payload can be captured here. Capture the STATUS too — swallowing it
+    # into ``*_`` would let a wrong status (200/404) pass this test.
+    def _fake_j(h, o, status=200, *_, **__):
+        cap["ok"] = o
+        cap["ok_status"] = status
+        return True
+
+    monkeypatch.setattr(routes, "j", _fake_j)
     monkeypatch.setattr(
         routes,
         "bad",
@@ -98,6 +102,7 @@ def test_import_cli_existing_foreign_profile_unqualified_request_404(monkeypatch
     )
 
     assert "ok" in cap, f"expected 409 session_profile_mismatch, got {cap}"
+    assert cap["ok_status"] == 409, f"expected status 409, got {cap.get('ok_status')}"
     assert cap["ok"] == {
         "error": "Session belongs to a different profile",
         "code": "session_profile_mismatch",

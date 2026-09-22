@@ -508,6 +508,16 @@ async function startCompressionRecovery(btn){
     const composer=$('msg');
     if(composer&&typeof composer.focus==='function') composer.focus();
   }catch(e){
+    // #7710: a cross-profile refusal now also arrives as 409
+    // (``session_profile_mismatch``). That is NOT a stale recovery action —
+    // the card is still valid, the request was simply refused because the
+    // session belongs to another profile. Retiring it would hide a live card
+    // and show a false "conversation already moved on" note.
+    if(e&&e.status===409&&typeof _sessionProfileMismatchFromError==='function'
+       &&_sessionProfileMismatchFromError(e)){
+      if(typeof setStatus==='function') setStatus('Session belongs to a different profile');
+      return;
+    }
     // A 409 means this session no longer has an active recovery action (the
     // session already moved on — e.g. a substantive prompt cleared it). The
     // persisted card in the transcript is stale, so retire it and show a neutral

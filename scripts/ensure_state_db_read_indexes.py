@@ -61,6 +61,34 @@ _LEGACY_OPTIONAL_COLUMNS = {
 }
 
 
+def _require_agent_schema(db) -> None:
+    """Fail closed unless this is an Agent ``state.db``.
+
+    Matching column names alone would accept a look-alike chat database. Every
+    Agent ``state.db`` since the first schema has carried a ``schema_version``
+    row and ``sessions.id`` as the primary key, so require both before any
+    ``CREATE INDEX``.
+    """
+    has_marker = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+    ).fetchone()
+    version = None
+    if has_marker:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(schema_version)")}
+        if "version" in cols:
+            row = db.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+            version = row[0] if row else None
+    if not isinstance(version, int) or version < 1:
+        raise RuntimeError(
+            "state.db has no Agent schema_version marker; not an Agent state.db, refusing to continue"
+        )
+    pk = [r[1] for r in db.execute("PRAGMA table_info(sessions)") if r[5]]
+    if pk != ["id"]:
+        raise RuntimeError(
+            "state.db sessions table is not keyed on id; not an Agent state.db, refusing to continue"
+        )
+
+
 def _exclusive_lock(lock_file):
     if lock_file is None:
         return nullcontext()
@@ -101,6 +129,7 @@ def ensure_read_indexes(db_path, *, confirmed_drained=False, lock_file=None):
             try:
                 # Validate the whole Agent schema before creating anything, so a
                 # wrong database fails closed without a partial index set.
+                _require_agent_schema(db)
                 missing_by_index = {}
                 for name, (table, keys) in INDEXES.items():
                     present = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}

@@ -238,12 +238,33 @@ def test_non_utf8_posix_path_still_opens_readonly(tmp_path):
 # 3. The index maintenance script imports and runs without fcntl.
 # --------------------------------------------------------------------------
 
+_AGENT_MARKER_SQL = """
+CREATE TABLE schema_version(version INTEGER NOT NULL);
+INSERT INTO schema_version(version) VALUES (30);
+"""
+
+
+def _tool_indexes(path):
+    """Names of the indexes this tool manages that exist in ``path``.
+
+    SQLite auto-creates ``sqlite_autoindex_*`` for a ``TEXT PRIMARY KEY``, so a
+    raw index count is the wrong oracle for "the tool created nothing".
+    """
+    with closing(sqlite3.connect(str(path))) as conn:
+        return {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+            if not r[0].startswith("sqlite_autoindex_")
+        }
+
+
 def _maintenance_schema(path):
     with closing(sqlite3.connect(str(path))) as conn:
         conn.executescript(
-            """
-            CREATE TABLE sessions(source TEXT, id TEXT, message_count INTEGER, last_activity_at REAL);
-            CREATE TABLE messages(session_id TEXT, timestamp REAL, role TEXT);
+            _AGENT_MARKER_SQL
+            + """
+            CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT, message_count INTEGER, last_activity_at REAL);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL, role TEXT);
             """
         )
 
@@ -255,9 +276,10 @@ def test_maintenance_skips_indexes_an_older_schema_cannot_hold(tmp_path, mainten
     path = tmp_path / "state.db"
     with closing(sqlite3.connect(str(path))) as conn:
         conn.executescript(
-            """
-            CREATE TABLE sessions(source TEXT, id TEXT, message_count INTEGER);
-            CREATE TABLE messages(session_id TEXT, timestamp REAL, role TEXT);
+            _AGENT_MARKER_SQL
+            + """
+            CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT, message_count INTEGER);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL, role TEXT);
             """
         )
     result = module.ensure_read_indexes(path, confirmed_drained=True)
@@ -278,11 +300,10 @@ def test_maintenance_fails_loud_on_a_database_without_agent_tables(tmp_path, mai
     module = maintenance_without_fcntl
     path = tmp_path / "state.db"
     with closing(sqlite3.connect(str(path))) as conn:
-        conn.execute("CREATE TABLE unrelated(x)")
+        conn.executescript(_AGENT_MARKER_SQL + "CREATE TABLE sessions(id TEXT PRIMARY KEY); CREATE TABLE unrelated(x);")
     with pytest.raises(RuntimeError, match="no 'messages' table"):
         module.ensure_read_indexes(path, confirmed_drained=True)
-    with closing(sqlite3.connect(str(path))) as conn:
-        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='index'").fetchone()[0] == 0
+    assert _tool_indexes(path) == set()
 
 
 def test_maintenance_fails_closed_on_same_named_tables_without_agent_columns(tmp_path, maintenance_without_fcntl):
@@ -291,11 +312,48 @@ def test_maintenance_fails_closed_on_same_named_tables_without_agent_columns(tmp
     module = maintenance_without_fcntl
     path = tmp_path / "state.db"
     with closing(sqlite3.connect(str(path))) as conn:
-        conn.executescript("CREATE TABLE messages(body TEXT); CREATE TABLE sessions(title TEXT);")
+        conn.executescript(
+            _AGENT_MARKER_SQL
+            + "CREATE TABLE messages(body TEXT); CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT);"
+        )
     with pytest.raises(RuntimeError, match="not an Agent state.db"):
         module.ensure_read_indexes(path, confirmed_drained=True)
+    assert _tool_indexes(path) == set()
+
+
+def test_maintenance_rejects_a_look_alike_chat_database_without_the_agent_marker(tmp_path, maintenance_without_fcntl):
+    """Codex round-3 repro: a non-Agent chat schema that happens to carry all seven
+    indexed column names must not be indexed. The Agent ``schema_version`` marker
+    is the identity check; column names alone are not."""
+    module = maintenance_without_fcntl
+    path = tmp_path / "chat.db"
     with closing(sqlite3.connect(str(path))) as conn:
-        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='index'").fetchone()[0] == 0
+        conn.executescript(
+            """
+            CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT, message_count INTEGER, last_activity_at REAL);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL, role TEXT);
+            """
+        )
+    with pytest.raises(RuntimeError, match="no Agent schema_version marker"):
+        module.ensure_read_indexes(path, confirmed_drained=True)
+    assert _tool_indexes(path) == set()
+
+
+def test_maintenance_rejects_a_sessions_table_not_keyed_on_id(tmp_path, maintenance_without_fcntl):
+    """Marker present but ``sessions`` isn't keyed on ``id``: not the Agent shape."""
+    module = maintenance_without_fcntl
+    path = tmp_path / "state.db"
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.executescript(
+            _AGENT_MARKER_SQL
+            + """
+            CREATE TABLE sessions(source TEXT, id TEXT, message_count INTEGER, last_activity_at REAL);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL, role TEXT);
+            """
+        )
+    with pytest.raises(RuntimeError, match="not keyed on id"):
+        module.ensure_read_indexes(path, confirmed_drained=True)
+    assert _tool_indexes(path) == set()
 
 
 def test_maintenance_rejects_a_same_named_index_on_the_legacy_gap(tmp_path, maintenance_without_fcntl):
@@ -306,17 +364,16 @@ def test_maintenance_rejects_a_same_named_index_on_the_legacy_gap(tmp_path, main
     path = tmp_path / "state.db"
     with closing(sqlite3.connect(str(path))) as conn:
         conn.executescript(
-            """
-            CREATE TABLE sessions(source TEXT, id TEXT, message_count INTEGER);
-            CREATE TABLE messages(session_id TEXT, timestamp REAL, role TEXT);
+            _AGENT_MARKER_SQL
+            + """
+            CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT, message_count INTEGER);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL, role TEXT);
             CREATE INDEX idx_sessions_webui_fingerprint ON messages(role);
             """
         )
     with pytest.raises(RuntimeError, match="Incompatible index: idx_sessions_webui_fingerprint"):
         module.ensure_read_indexes(path, confirmed_drained=True)
-    with closing(sqlite3.connect(str(path))) as conn:
-        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
-    assert names == {"idx_sessions_webui_fingerprint"}
+    assert _tool_indexes(path) == {"idx_sessions_webui_fingerprint"}
 
 
 @pytest.fixture

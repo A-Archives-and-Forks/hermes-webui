@@ -65,8 +65,10 @@ def test_listing_does_not_create_indexes(tmp_path):
 def _maintenance_schema(path):
     with closing(sqlite3.connect(path)) as db:
         db.executescript("""
-        CREATE TABLE sessions(source TEXT, id TEXT, message_count INTEGER, last_activity_at REAL);
-        CREATE TABLE messages(session_id TEXT, timestamp REAL, role TEXT);
+        CREATE TABLE schema_version(version INTEGER NOT NULL);
+        INSERT INTO schema_version(version) VALUES (30);
+        CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT, message_count INTEGER, last_activity_at REAL);
+        CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL, role TEXT);
         """)
 
 

@@ -120,16 +120,29 @@ def test_env_negative_falls_back_to_default():
     assert models._FULL_SESSION_RESOLVE_MAX_CONCURRENT == 2
 
 
-def test_env_above_upper_bound_is_clamped_to_64():
+def test_env_above_upper_bound_falls_back_to_default():
     """``HERMES_WEBUI_MAX_SESSION_RESOLVE=999999`` is almost
-    certainly a typo and would defeat the bounded-semaphore
-    design entirely. The helper clamps to 64, which is
-    generous for any realistic deployment while still bounded
-    enough to remain a real cap."""
+    certainly a typo and must NOT defeat the safety-bound
+    design by clamping up to the ceiling. The previous
+    clamp-to-64 behavior (round-1) admitted 64 simultaneous
+    unbounded transcript loads; a synthetic 4.27 MB transcript
+    consumed ~9.6 MB per parse, so the round-1 ceiling
+    permitted ~614 MB at 64-way concurrency before any other
+    application memory.
+
+    The cap is a *safety bound*, not a user preference — a
+    typo must fall back to the safe default (2), never to
+    the permissive extreme. The upper bound (64) is reachable
+    only via an explicit in-range operator value; out-of-range
+    values degrade silently to the default, matching the
+    behavior of every other bad input in this helper. See
+    #7656 round-3 finding 1.
+    """
     models = _import_models_with_env("999999")
-    assert models._FULL_SESSION_RESOLVE_MAX_CONCURRENT == 64, (
-        "out-of-band values must be clamped, not propagated; the "
-        "whole point of the cap is to bound concurrency"
+    assert models._FULL_SESSION_RESOLVE_MAX_CONCURRENT == 2, (
+        "out-of-band values must fall back to the safe default, "
+        "not clamp up to the ceiling; a typo should never widen "
+        "the cap"
     )
 
 
@@ -200,3 +213,75 @@ def test_helper_defined_in_models():
         "the bare literal-2 initializer must be removed; the "
         "cap is now sourced from the helper"
     )
+
+
+# ── #7656 round-3 finding 2: profile .env must not resize the cap ───────────
+
+
+def test_protected_env_keys_includes_resolve_cap():
+    """``HERMES_WEBUI_MAX_SESSION_RESOLVE`` is a process-wide
+    resource cap; a profile's ``.env`` must not override it.
+
+    The operator/launcher env at startup is the only place the
+    cap is configurable. Without this, a first-loaded profile
+    could set the cap to one value and a later profile-switch
+    would silently re-size the already-constructed
+    BoundedSemaphore — the same first-load-wins asymmetry
+    the maintainer flagged for the isolated-profile key in
+    #4589. Pin the contract.
+    """
+    from api.profiles import _PROTECTED_ENV_KEYS
+    assert "HERMES_WEBUI_MAX_SESSION_RESOLVE" in _PROTECTED_ENV_KEYS, (
+        "HERMES_WEBUI_MAX_SESSION_RESOLVE must be in "
+        "_PROTECTED_ENV_KEYS so a profile's .env cannot "
+        "override the process-wide cap"
+    )
+
+
+def test_blocked_runtime_env_keys_includes_resolve_cap():
+    """``filter_runtime_env_for_gateway_parity`` must also drop
+    the resolve cap from a profile's runtime env, so the
+    gateway/CLI/agent paths see the operator-set value rather
+    than whatever the profile tried to set.
+
+    This is the runtime counterpart of the protected-key
+    check. Together they pin the contract from both sides:
+    a profile cannot inject the env var at any layer
+    (startup reload, runtime env, gateway parity filter).
+    """
+    from api.profiles import _BLOCKED_RUNTIME_ENV_KEYS
+    assert "HERMES_WEBUI_MAX_SESSION_RESOLVE" in _BLOCKED_RUNTIME_ENV_KEYS, (
+        "HERMES_WEBUI_MAX_SESSION_RESOLVE must be in "
+        "_BLOCKED_RUNTIME_ENV_KEYS so a profile's runtime env "
+        "is filtered out before the gateway/CLI/agent paths "
+        "see it"
+    )
+
+
+def test_filter_runtime_env_strips_resolve_cap():
+    """A profile env containing the resolve cap must be filtered
+    out by ``filter_runtime_env_for_gateway_parity``.
+
+    End-to-end exercise of the SILENT finding: the
+    runtime-env filter is the one that actually prevents the
+    cap from being silently re-sized by a profile switch.
+    Without this, the cap the operator set at startup is
+    silently overridden the first time a profile with the
+    env var in its ``.env`` loads.
+    """
+    from api.profiles import filter_runtime_env_for_gateway_parity
+    profile_env = {
+        "HERMES_WEBUI_MAX_SESSION_RESOLVE": "64",
+        "LANG": "en_US.UTF-8",
+    }
+    filtered = filter_runtime_env_for_gateway_parity(profile_env)
+    assert "HERMES_WEBUI_MAX_SESSION_RESOLVE" not in filtered, (
+        "filter_runtime_env_for_gateway_parity must strip "
+        "HERMES_WEBUI_MAX_SESSION_RESOLVE from a profile's "
+        "runtime env so the cap stays at the operator/launcher value"
+    )
+    # Sanity: an unrelated, non-blocked env key still passes through.
+    # (PATH, HOME, etc. are themselves in _BLOCKED_RUNTIME_ENV_KEYS,
+    # so pick something neutral like LANG.)
+    assert filtered.get("LANG") == "en_US.UTF-8"
+

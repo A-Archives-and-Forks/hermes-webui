@@ -4797,10 +4797,17 @@ def _read_max_session_resolve_concurrent() -> int:
     raise the cap without code changes. A bad or missing value
     falls back to the previous default of 2, so an operator who
     sets ``HERMES_WEBUI_MAX_SESSION_RESOLVE=0`` or a non-numeric
-    value does not regress to a blocked or unbounded state. The
-    upper bound (64) is a generous but finite safety net against
-    a typo like ``=999999`` bypassing the bounded semaphore
-    entirely; the deeper per-read cost is tracked in #7310."""
+    value does not regress to a blocked or unbounded state.
+
+    The cap is a *safety bound* (per-resolve cost tracked in
+    #7310), not a user preference — a typo like ``=999999``
+    must fall back to the safe default, never to the permissive
+    extreme. Every other bad input in this function falls back
+    to ``2``; out-of-range values do too. The previously
+    accepted upper bound (64) is reachable only via an explicit
+    in-range operator value; a profile's ``.env`` cannot reach
+    it at all (see ``_PROTECTED_ENV_KEYS``).
+    """
     raw = (os.getenv("HERMES_WEBUI_MAX_SESSION_RESOLVE") or "").strip()
     if not raw:
         return 2
@@ -4811,7 +4818,7 @@ def _read_max_session_resolve_concurrent() -> int:
     if n < 1:
         return 2
     if n > 64:
-        return 64
+        return 2  # #7656 round-3: typo-safe fallback, not clamp-up-to-64
     return n
 
 

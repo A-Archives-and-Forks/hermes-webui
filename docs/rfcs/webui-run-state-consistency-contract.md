@@ -30,6 +30,16 @@ This RFC defines a consistency contract for those layers. It complements the
 larger run adapter direction in #1925 by documenting what must remain coherent
 while WebUI still has multiple overlapping state stores.
 
+## Run-journal sequence publication
+
+Within one WebUI process, auto-numbered appends to the same journal allocate
+sequence numbers and write their rows under the same per-path lock.
+`RunJournalWriter` delegates both operations to `append_run_event`; it must not
+reserve a sequence and release the lock before the physical append. Otherwise
+individually valid rows can reach disk out of order and the session replay
+reader must reject them as noncontiguous. This does not change caller-supplied
+sequence semantics, cross-process ownership, or failed-write recovery.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

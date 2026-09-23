@@ -28,6 +28,11 @@
 
 ### Fixed
 
+- **Reconnecting to a new turn no longer resumes from the previous turn's replay cursor.** A new
+  turn copies the full transcript into the in-flight state, so the previous turn's assistant reply
+  could seed the replay floor and the reattached stream skipped the current reply's early events.
+  Replay now seeds only from the current live assistant row, and falls back to a full replay that
+  rebuilds the assistant body when a cursor outlives its live state. (#7651 by @happy5318)
 - **Context-length lookup keeps the configured base URL for ownerless and underscore-named
   providers.** The #7535 ownership guard also dropped the global `model.base_url` for a `model:`
   section with a `base_url` but no `provider`, and for provider IDs written with an underscore

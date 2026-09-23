@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **Reconnecting to a new turn no longer resumes from the previous turn's replay cursor.** A new
+  turn copies the full transcript into the in-flight state, so the previous turn's assistant reply
+  could seed the replay floor and the reattached stream skipped the current reply's early events.
+  Replay now seeds only from the current live assistant row, and falls back to a full replay that
+  rebuilds the assistant body when a cursor outlives its live state. (#7651 by @happy5318)
+
 - **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
   another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's
   "another Hermes process is using this session" notices now reach the chat as a warning status

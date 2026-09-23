@@ -891,6 +891,9 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
             or 'falling back' in m
             or 'fallback activated' in m
             or 'trying fallback' in m
+            or 'model fallback:' in m
+            or 'switched to fallback' in m
+            or 'primary model restored:' in m
         )
     )
 
@@ -9734,6 +9737,37 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to put event to queue")
 
+    _last_runtime_model_identity = None
+    _runtime_model_session_id = session_id
+
+    def _observe_runtime_model():
+        """Publish this turn's Agent identity at output, never at an attempted route."""
+        nonlocal _last_runtime_model_identity
+        raw_model = getattr(agent, 'model', None)
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            return
+        raw_provider = getattr(agent, 'provider', None)
+        provider = str(raw_provider).strip().lstrip('@').lower() if isinstance(raw_provider, str) else ''
+        # The Agent may carry a provider-qualified routing hint in its model.
+        from api.config import _parse_provider_qualified_model_id
+        parsed = _parse_provider_qualified_model_id(raw_model.strip())
+        model_id = (parsed[0] if parsed else raw_model).strip()
+        if not model_id:
+            return
+        fallback_active = getattr(agent, '_provider_fallback_active', None) is True
+        identity = (provider, model_id.lower(), fallback_active)
+        if identity == _last_runtime_model_identity:
+            return
+        payload = {
+            'session_id': _runtime_model_session_id, 'stream_id': stream_id,
+            'model': model_id, 'fallback_active': fallback_active,
+            'phase': 'observed_output',
+        }
+        if provider:
+            payload['provider'] = provider
+        put('runtime_model', payload)
+        _last_runtime_model_identity = identity
+
     # #5940: capture a terminal (non-retryable) provider error the Agent emits via
     # its lifecycle status_callback. The Agent aborts a non-retryable API error
     # (e.g. HTTP 400 "invalid model / no credentials") with
@@ -9754,6 +9788,7 @@ def _run_agent_streaming(
         turn-completion classifier can report the real cause instead of the
         generic no_response fallback. All other lifecycle messages are dropped.
         """
+        nonlocal _last_runtime_model_identity
         _message = str(message or '').strip()
         _kind = str(kind or '').strip().lower()
         if not _message:
@@ -9778,6 +9813,7 @@ def _run_agent_streaming(
         # show them as warnings via the existing messages.js 'warning' listener.
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:
+            _last_runtime_model_identity = None
             put('warning', {'type': 'fallback', 'message': _message})
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
@@ -10325,6 +10361,8 @@ def _run_agent_streaming(
                 nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
+                if text:
+                    _observe_runtime_model()
                 # #4729: visible output is starting — flush any buffered reasoning tail
                 # first so the live Thinking stream is complete before/at the transition.
                 _flush_reasoning_buffer()
@@ -10368,6 +10406,8 @@ def _run_agent_streaming(
                     # partial window is not lost when the reasoning phase ends.
                     _flush_reasoning_buffer()
                     return
+                if text:
+                    _observe_runtime_model()
                 _tool_boundary_advanced = False
                 reasoning_delta = str(text)
                 # Some runtimes mirror user-visible progress text through the
@@ -11570,6 +11610,11 @@ def _run_agent_streaming(
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
                         _answer = str(_m.get('content', ''))
                         break
+                if (_answer.strip() and not result.get('error')
+                    and not _agent_result_terminal_failure(result)
+                    and not getattr(agent, '_last_error', None)
+                    and not _captured_terminal_error[0]):
+                    _observe_runtime_model()
                 # /btw is intentionally non-persistent, but its terminal SSE
                 # payload is still public output.  Project the ephemeral
                 # session before enqueueing it so raw Agent ``api_content`` or
@@ -12272,6 +12317,8 @@ def _run_agent_streaming(
                         # the catch-all label, hint, and provider details.
                         return  # apperror already closes the stream on the client side
 
+                _observe_runtime_model()
+
                 # ── Handle context compression side effects ──
                 # Also detect compression via the result dict or compressor state
                 if not _compressed:
@@ -12478,7 +12525,9 @@ def _run_agent_streaming(
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
                 # attribution matters most.
-                _used_model = getattr(agent, 'model', None) or resolved_model or model
+                # The configured selection is not proof that it served this turn.
+                _observed_model = getattr(agent, 'model', None)
+                _used_model = _observed_model.strip() if isinstance(_observed_model, str) else None
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -13364,6 +13413,9 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                     _heal_agent = _AIAgent(**_heal_kwargs)
+                    # Delta callbacks close over `agent`; the replacement, not
+                    # the failed original, owns any successful retry output.
+                    agent = _heal_agent
                     _agent_sig = _compute_agent_cache_signature(
                         resolved_model,
                         resolved_api_key,
@@ -13491,6 +13543,7 @@ def _run_agent_streaming(
                                             s, tool_calls=s.tool_calls
                                         )
                                     )
+                            _observe_runtime_model()
                             if _done_session_payload is not None:
                                 put('done', {
                                     'session': _done_session_payload,

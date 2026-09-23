@@ -44,7 +44,7 @@ global._sessionSourceFilter = 'webui';
 for (const fn of ['_isSessionLocallyStreaming','_hasPendingUserMessageSignal','_isSessionEffectivelyStreaming',
   '_isChildSession','_isForkWithResolvableParent','_sessionLineageKey','_sidebarLineageKeyForRow',
   '_collapseSessionLineageForSidebar','_attachChildSessionsToSidebarRows','_sessionAttentionState',
-  '_sidebarRowHasVisibleMessages','_sidebarProjectIdForRow','_sidebarRowsById','_sidebarHasUnprojectedRows',
+  '_sidebarRowHasVisibleMessages','_isDelegatedSubagentRow','_sidebarProjectResolver','_sidebarRowsById','_sidebarHasUnprojectedRows',
   '_partitionSidebarSessionRows','_scopedSidebarReferenceRows','_renderSidebarRowsFromRawSessions']) {
   eval.call(global, extractFunc(fn));
 }
@@ -115,7 +115,7 @@ console.log(JSON.stringify({raw: rows.raw, scoped}));
 
 
 def test_unassigned_chip_ignores_subagents_of_project_parents():
-    out = _run("console.log(JSON.stringify(_sidebarHasUnprojectedRows([parent, child], _sidebarRowsById([[parent, child]]))));")
+    out = _run("console.log(JSON.stringify(_sidebarHasUnprojectedRows([parent, child], _sidebarProjectResolver(_sidebarRowsById([[parent, child]])))));")
     assert out is False
 
 
@@ -125,8 +125,64 @@ def test_unassigned_chip_uses_reference_parent():
 global._sidebarReferenceSessions = [parent];
 global._activeProject = null;
 const part = _partitionSidebarSessionRows([child], null);
-console.log(JSON.stringify({has: _sidebarHasUnprojectedRows(part.profileFiltered, part.rowsById),
+console.log(JSON.stringify({has: _sidebarHasUnprojectedRows(part.profileFiltered, part.projectIdFor),
   unassigned: render(NO_PROJECT_FILTER, [child]).raw}));
 """)
     assert out["unassigned"] == []
     assert out["has"] is False
+
+
+def test_unassigned_fork_stays_unassigned():
+    """A fork moved to "No project" keeps project_id null; only subagents inherit."""
+    out = _run("""
+const fork = { session_id:'fork_child', title:'Fork', parent_session_id:'proj_parent', relationship_type:'child_session', session_source:'fork', raw_source:'webui', source_tag:'webui', project_id:null, message_count:2, updated_at:103, last_message_at:103 };
+global._activeProject = null;
+const p = _partitionSidebarSessionRows([parent, fork], null);
+console.log(JSON.stringify({unassigned: render(NO_PROJECT_FILTER, [parent, fork]).raw,
+  project: render('projX', [parent, fork]).raw,
+  chip: _sidebarHasUnprojectedRows(p.profileFiltered, p.projectIdFor)}));
+""")
+    assert out["unassigned"] == ["fork_child"]
+    assert out["project"] == ["proj_parent"]
+    assert out["chip"] is True
+
+
+def test_project_resolution_is_linear_in_lineage_depth():
+    """Each lineage resolves once: ancestor lookups stay O(n) for a deep chain."""
+    out = _run("""
+function chain(n) {
+  const rows = [parent];
+  for (let i = 0; i < n; i++) rows.push(Object.assign({}, grandchild, {session_id:'c'+i,
+    parent_session_id: i ? 'c'+(i-1) : 'proj_parent', updated_at:200+i, last_message_at:200+i}));
+  return rows;
+}
+function lookups(n) {
+  const rows = chain(n);
+  let gets = 0;
+  const realGet = Map.prototype.get;
+  Map.prototype.get = function(k) { gets++; return realGet.call(this, k); };
+  try {
+    global._activeProject = 'projX';
+    global._sidebarReferenceSessions = rows.slice(0, 50);
+    const part = _partitionSidebarSessionRows(rows, null);
+    _scopedSidebarReferenceRows(false, part.projectIdFor);
+    _sidebarHasUnprojectedRows(part.profileFiltered, part.projectIdFor);
+    return {gets, raw: part.sessionsRaw.length};
+  } finally { Map.prototype.get = realGet; }
+}
+console.log(JSON.stringify({small: lookups(1000), big: lookups(4000)}));
+""")
+    assert out["small"]["raw"] == 1001 and out["big"]["raw"] == 4001
+    # 4x the rows must cost ~4x the lookups, not ~16x.
+    assert out["big"]["gets"] <= 5 * out["small"]["gets"], out
+    assert out["big"]["gets"] <= 20 * 4001, out
+
+
+def test_project_resolver_is_cycle_safe():
+    out = _run("""
+const a = Object.assign({}, grandchild, {session_id:'a', parent_session_id:'b'});
+const b = Object.assign({}, grandchild, {session_id:'b', parent_session_id:'a'});
+const resolve = _sidebarProjectResolver(_sidebarRowsById([[a, b]]));
+console.log(JSON.stringify([resolve(a), resolve(b)]));
+""")
+    assert out == [None, None]

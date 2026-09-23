@@ -31,6 +31,13 @@
   through the reattached stream); the replay stays for legacy restores and for a failed or
   unavailable scene. (#7436, @atchisonbrent)
 
+- **A settled assistant answer is no longer shown twice (#2051).** Two client-side paths could put a
+  second copy of a finished answer on screen after a turn settled: a stale live-turn node that was
+  still treated as live, and a settled rebuild branch that appended a turn instead of replacing it.
+  The same fix stops an interrupted turn's notice from appearing twice, and stops the composer's
+  model picker from listing one configured custom-provider model twice. The stored transcript was
+  always correct; only the rendering duplicated it. (#7374, @Thireus)
+
 - **A hidden browser tab stops polling a session that was deleted.** When a tab is in the
   background, its stream poll kept asking for a session every few seconds after it was deleted or
   archived away, forever. A `404`/`410` for the polled session now stops that poll; `503` and network

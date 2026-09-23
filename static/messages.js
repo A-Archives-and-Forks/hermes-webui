@@ -8128,7 +8128,22 @@ function _startHiddenActiveStreamPoll(sid) {
     if (S.activeStreamId) return; // already rendering; wait it out
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
-        .then(r => r.ok ? r.json() : null)
+        .then(r => {
+          // #7299: 404 Not Found / 410 Gone are TERMINAL for this
+          // session-owned poll. The session has been deleted or no
+          // longer exists in the active state directory, so further
+          // polls are guaranteed to fail. Stop the poll immediately
+          // to avoid the infinite 404 loop on stale background tabs
+          // (one tab could fire ~10 such requests per minute; multiple
+          // tabs multiply the noise). Transient failures (5xx, rate
+          // limit, network error) keep polling — only the missing
+          // session itself is terminal.
+          if ((r.status === 404 || r.status === 410) && _sessionStreamHiddenPollSid === sid) {
+            _stopHiddenActiveStreamPoll();
+            return null;
+          }
+          return r.ok ? r.json() : null;
+        })
         .then(d => {
           if (!d || _sessionStreamHiddenPollSid !== sid) return;
           const streamId = d.active_stream_id;

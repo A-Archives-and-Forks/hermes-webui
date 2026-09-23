@@ -380,3 +380,21 @@ def test_reattach_http_rejection_settles_the_turn_with_an_error(isolated_session
     assert saved["messages"][-1]["_error"] is True
     assert message in saved["messages"][-1]["content"]
     assert saved["active_stream_id"] is None and saved["gateway_run"] is None
+
+
+def test_failed_recovery_checkpoint_never_admits_the_run(isolated_sessions, monkeypatch):
+    s = new_session()
+    stream_id = "stream-unsaved"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "hi"
+    s.pending_attachments = []
+    s.pending_started_at = 1.0
+    s.save()
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *a, **k: pytest.fail("admitted without a checkpoint"))
+    monkeypatch.setattr(models.Session, "save", lambda self, **kw: (_ for _ in ()).throw(OSError("disk full")))
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(s.session_id, "hi", "test-model", "/tmp", stream_id, [])
+    assert stream_id not in STREAMS

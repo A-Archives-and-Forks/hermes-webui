@@ -868,6 +868,8 @@ def _record_gateway_run(session_id: str, stream_id: str, run_id: str, request=No
             session.save(touch_updated_at=False)
     except Exception:
         logger.warning("Failed to persist gateway run %s for session %s", run_id, session_id, exc_info=True)
+        if not run_id:
+            raise  # never admit a run a restart could not recover
 
 
 def _get_gateway_run_status(base_url: str, api_key: str, run_id: str) -> dict:

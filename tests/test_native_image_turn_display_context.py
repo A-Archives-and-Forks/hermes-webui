@@ -869,6 +869,63 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery():
         session.context_messages = context
 
 
+def test_marked_native_image_rows_with_distinct_ids_survive_recovery():
+    import api.models as models
+
+    timestamp = 870.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    state_rows = [
+        {
+            "role": "user",
+            "content": mirror,
+            "timestamp": timestamp,
+            "_state_db_row_id": row_id,
+            "api_content": api_content,
+        }
+        for row_id in (42, 43)
+    ]
+
+    first_public = None
+    first_replay = None
+    for _ in range(4):
+        display = models.reconciled_state_db_messages_for_session(
+            session,
+            state_messages=state_rows,
+        )
+        context = models.reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=state_rows,
+        )
+        for messages in (display, context):
+            rows = [
+                message for message in messages
+                if message.get("_state_db_row_id") in (42, 43)
+            ]
+            assert [message["_state_db_row_id"] for message in rows] == [42, 43]
+            assert all(message["api_content"] == api_content for message in rows)
+
+        public = public_session_projection({"messages": display})["messages"]
+        replay = _sanitize_messages_for_agent(context)
+        if first_public is None:
+            first_public = public
+            first_replay = replay
+            assert sum(message.get("content") == mirror for message in public) == 2
+        else:
+            assert public == first_public
+            assert replay == first_replay
+        session.messages = display
+        session.context_messages = context
+
+
 def test_unlinked_state_db_image_projection_uses_existing_reconciliation():
     import api.models as models
 

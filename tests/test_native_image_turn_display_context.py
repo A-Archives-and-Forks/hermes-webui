@@ -698,6 +698,43 @@ def test_state_db_image_projection_suppresses_only_exact_agent_row_id(
     assert len(public_literals) == 1
     assert "_state_db_row_id" not in public_literals[0]
 
+    reconciled_context = models.reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=state_rows,
+    )
+    session.messages = reconciled
+    session.context_messages = reconciled_context
+    first_api_transcript = public_session_projection(
+        {"messages": session.messages}
+    )["messages"]
+    first_next_replay = _new_turn_context_from_messages(
+        session.context_messages,
+        "Tell me more",
+    )
+
+    reconciled_again = models.reconciled_state_db_messages_for_session(
+        session,
+        state_messages=state_rows,
+    )
+    reconciled_context_again = models.reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=state_rows,
+    )
+    for messages in (reconciled_again, reconciled_context_again):
+        assert sum(
+            message.get("_state_db_row_id") == 42
+            for message in messages
+        ) == 1
+    assert public_session_projection(
+        {"messages": reconciled_again}
+    )["messages"] == first_api_transcript
+    assert _new_turn_context_from_messages(
+        reconciled_context_again,
+        "Tell me more",
+    ) == first_next_replay
+
     for untrusted_identity in (
         {key: value for key, value in state_rows[0].items() if key != "_state_db_row_id"},
         {**state_rows[0], "_row_id": 42},

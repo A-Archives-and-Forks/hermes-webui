@@ -10993,6 +10993,28 @@ def _merge_session_messages_append_only_impl(
         visible_key = _cached_message_key(msg, "visible_state")
         content_key = _cached_message_key(msg, "content_state")
         if preserve_native_image_row:
+            row_id, row_id_valid = _state_db_row_identity_details(msg)
+            existing = (
+                merged_by_row_id.get(row_id)
+                if row_id_valid and row_id is not None
+                else None
+            )
+            if (
+                existing is not None
+                and row_id not in ambiguous_row_ids
+                and _row_id_fast_path_allowed(existing, msg)
+            ):
+                existing_api_content = _session_message_api_content_key(existing)
+                incoming_api_content = _session_message_api_content_key(msg)
+                if not (
+                    existing_api_content is not None
+                    and incoming_api_content is not None
+                    and existing_api_content != incoming_api_content
+                ):
+                    if existing_api_content is None and incoming_api_content is not None:
+                        _copy_api_content_sidecar(existing, msg)
+                    _merge_session_display_metadata(existing, msg)
+                    continue
             if not _insert_state_message_chronologically(merged_messages, msg):
                 merged_messages.append(msg)
             seen_message_keys.add(key)

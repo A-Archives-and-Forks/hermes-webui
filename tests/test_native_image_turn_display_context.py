@@ -4,6 +4,8 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from api.helpers import public_session_projection
 from api.models import get_state_db_session_messages
 from api.process_event_utils import build_active_turn_token
@@ -919,6 +921,85 @@ def test_marked_native_image_rows_with_distinct_ids_survive_recovery():
             first_public = public
             first_replay = replay
             assert sum(message.get("content") == mirror for message in public) == 2
+        else:
+            assert public == first_public
+            assert replay == first_replay
+        session.messages = display
+        session.context_messages = context
+
+
+@pytest.mark.parametrize(
+    ("row_identity", "copies"),
+    [
+        pytest.param({}, 1, id="idless-row"),
+        pytest.param({}, 2, id="duplicate-idless-rows"),
+        pytest.param({"_state_db_row_id": "x"}, 1, id="malformed-row-id"),
+        pytest.param(
+            {"_row_id": 42, "_state_db_row_id": 43},
+            1,
+            id="conflicting-row-id-aliases",
+        ),
+    ],
+)
+def test_untrusted_native_image_row_identity_deduplicates_stably(
+    row_identity, copies
+):
+    import api.models as models
+
+    timestamp = 880.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    state_rows = [
+        {
+            "role": "user",
+            "content": mirror,
+            "timestamp": timestamp,
+            "api_content": api_content,
+            **row_identity,
+        }
+        for _ in range(copies)
+    ]
+
+    first_public = None
+    first_replay = None
+    for _ in range(4):
+        display = models.reconciled_state_db_messages_for_session(
+            session,
+            state_messages=state_rows,
+        )
+        context = models.reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=state_rows,
+        )
+        for messages in (display, context):
+            mirrored_rows = [
+                message for message in messages
+                if message.get("content") == mirror
+                and message.get("timestamp") == timestamp
+            ]
+            assert len(mirrored_rows) == 1
+
+        public = public_session_projection({"messages": display})["messages"]
+        public_mirrors = [
+            message for message in public
+            if message.get("content") == mirror
+            and message.get("timestamp") == timestamp
+        ]
+        assert len(public_mirrors) == 1
+        assert "api_content" not in public_mirrors[0]
+        assert all("api_content" not in message for message in public)
+        replay = _sanitize_messages_for_agent(context)
+        if first_public is None:
+            first_public = public
+            first_replay = replay
         else:
             assert public == first_public
             assert replay == first_replay

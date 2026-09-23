@@ -11021,24 +11021,27 @@ def _merge_session_messages_append_only_impl(
                 duplicate_row_id, duplicate_row_id_valid = (
                     _state_db_row_identity_details(duplicate)
                 )
-                same_durable_row = (
+                two_distinct_durable_rows = (
                     row_id_valid
                     and row_id is not None
                     and duplicate_row_id_valid
-                    and duplicate_row_id == row_id
+                    and duplicate_row_id is not None
+                    and duplicate_row_id != row_id
                 )
-                if not same_durable_row and row_id_valid and row_id is not None:
-                    duplicate = merged_by_row_id.get(row_id)
-                    duplicate_row_id, duplicate_row_id_valid = (
-                        _state_db_row_identity_details(duplicate)
-                    )
-                    same_durable_row = (
-                        row_id not in ambiguous_row_ids
-                        and duplicate_row_id_valid
-                        and duplicate_row_id == row_id
-                        and _cached_message_key(duplicate, "dedup") == dedup_key
-                        and _row_id_fast_path_allowed(duplicate, msg)
-                    )
+                if not two_distinct_durable_rows:
+                    _merge_session_display_metadata(duplicate, msg)
+                    continue
+                duplicate = merged_by_row_id.get(row_id)
+                duplicate_row_id, duplicate_row_id_valid = (
+                    _state_db_row_identity_details(duplicate)
+                )
+                same_durable_row = (
+                    row_id not in ambiguous_row_ids
+                    and duplicate_row_id_valid
+                    and duplicate_row_id == row_id
+                    and _cached_message_key(duplicate, "dedup") == dedup_key
+                    and _row_id_fast_path_allowed(duplicate, msg)
+                )
                 if same_durable_row:
                     _merge_session_display_metadata(duplicate, msg)
                     continue

@@ -602,8 +602,6 @@ def _run_gateway_runs_api_streaming(
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
             headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-        # Durable run record on the gateway: GET /v1/runs/{id} keeps answering after either side restarts.
-        post_headers = {**headers, "Idempotency-Key": f"webui-{stream_id}"}
         message_content: Any = str(msg_text or "")
         if attachments:
             try:
@@ -659,7 +657,8 @@ def _run_gateway_runs_api_streaming(
         req = urllib.request.Request(
             url_runs,
             data=json.dumps(run_body).encode("utf-8"),
-            headers=post_headers,
+            # Durable run record on the gateway: GET /v1/runs/{id} survives either side restarting.
+            headers={**headers, "Idempotency-Key": f"webui-{stream_id}"},
             method="POST",
         )
         update_active_run(stream_id, phase="gateway-request")
@@ -873,12 +872,7 @@ def _await_gateway_run_result(
     session_id, stream_id, run_id, base_url, api_key,
     *, put_gateway_event, cancel_event,
 ):
-    """Follow a gateway run started by a previous WebUI process until it settles.
-
-    Returns the same ``(final_text | None, usage)`` contract as
-    ``_run_gateway_runs_api_streaming``; token/tool events emitted before the
-    restart are not replayed, only the terminal result is written back.
-    """
+    """Poll a run started by a previous WebUI process; same return contract as _run_gateway_runs_api_streaming."""
     from api.route_approvals import settle_gateway_pending_run
 
     _publish_gateway_run_id(stream_id, run_id)
@@ -892,55 +886,44 @@ def _await_gateway_run_result(
         try:
             status = _get_gateway_run_status(base_url, api_key, run_id)
             failures = 0
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            code = getattr(exc, "code", None)
+            if code == 404:
                 raise RuntimeError("Gateway no longer has this run; its result could not be recovered after the WebUI restart.") from exc
-            if exc.code in (401, 403):
-                raise RuntimeError(f"Gateway rejected the WebUI credentials (HTTP {exc.code}) while reattaching to a run after the restart.") from exc
+            if code in (401, 403):
+                raise RuntimeError(f"Gateway rejected the WebUI credentials (HTTP {code}) while reattaching to a run after the restart.") from exc
             failures += 1
-            status = None
-        except (urllib.error.URLError, OSError, ValueError):
-            failures += 1
-            status = None
-        if status is None:
             if failures >= GATEWAY_REATTACH_MAX_POLL_FAILURES:
-                raise RuntimeError("Gateway became unreachable while waiting for a run that outlived the WebUI restart.")
-        else:
-            state = str(status.get("status") or "").strip().lower()
-            if state == "waiting_for_approval" and isinstance(status.get("approval"), dict):
-                approval = status["approval"]
-                approval_key = str(approval.get("approval_id") or approval.get("id") or approval.get("timestamp") or "")
-                if approval_key not in surfaced_approval_ids:
-                    surfaced_approval_ids.add(approval_key)
-                    _relay_gateway_run_approval(
-                        session_id, run_id, approval, base_url, api_key,
-                        put_gateway_event=put_gateway_event,
-                    )
-            if state in _GATEWAY_RUN_TERMINAL_STATUSES:
-                settle_gateway_pending_run(
-                    session_id,
-                    run_id,
-                    reason=f"Gateway run {state} before approval resolution",
+                raise RuntimeError("Gateway became unreachable while waiting for a run that outlived the WebUI restart.") from exc
+            cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+            continue
+        state = str(status.get("status") or "").strip().lower()
+        approval = status.get("approval")
+        if state == "waiting_for_approval" and isinstance(approval, dict):
+            approval_key = str(approval.get("approval_id") or approval.get("id") or approval.get("timestamp") or "")
+            if approval_key not in surfaced_approval_ids:
+                surfaced_approval_ids.add(approval_key)
+                _relay_gateway_run_approval(
+                    session_id, run_id, approval, base_url, api_key, put_gateway_event=put_gateway_event,
                 )
-                if state == "cancelled":
-                    put_gateway_event("cancel", {"message": "Cancelled by gateway"})
-                    return None, {}
-                if state != "completed":
-                    raise RuntimeError(str(status.get("error") or f"Gateway run {state}"))
-                usage = {k: v for k, v in _gateway_stream_usage(status).items() if v}
-                output = str(status.get("output") or "")
-                if output and stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] = output
-                return output, usage
+        if state in _GATEWAY_RUN_TERMINAL_STATUSES:
+            settle_gateway_pending_run(session_id, run_id, reason=f"Gateway run {state} before approval resolution")
+            if state == "cancelled":
+                put_gateway_event("cancel", {"message": "Cancelled by gateway"})
+                return None, {}
+            if state != "completed":
+                raise RuntimeError(str(status.get("error") or f"Gateway run {state}"))
+            output = str(status.get("output") or "")
+            if output and stream_id in STREAM_PARTIAL_TEXT:
+                STREAM_PARTIAL_TEXT[stream_id] = output
+            return output, {k: v for k, v in _gateway_stream_usage(status).items() if v}
         cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
 
 
 def resume_gateway_runs_after_restart() -> list[str]:
-    """Reattach pending turns whose gateway run outlived the previous WebUI process.
+    """Reattach pending turns whose gateway run outlived the previous WebUI process; never raises.
 
-    Must run before the server accepts requests: registering the stream first
-    keeps stale-pending repair from marking these still-running turns interrupted.
-    Never raises; startup must not depend on the gateway being reachable.
+    Call before serving so stale-pending repair does not mark these turns interrupted.
     """
     from api import models as _models
     from api.config import get_config
@@ -965,11 +948,7 @@ def resume_gateway_runs_after_restart() -> list[str]:
 
 
 def _sidecars_with_active_stream(session_dir) -> list[str]:
-    """Session ids whose sidecar may still carry a pending turn.
-
-    Scans the sidecars rather than the derived index, which can lag a save.
-    A head read skips the common idle case without parsing the file.
-    """
+    """Ids of sidecars (not the index, which can lag a save) whose header shows an active stream."""
     ids = []
     for path in sorted(session_dir.glob("*.json")):
         if path.name.startswith("_"):
@@ -984,27 +963,19 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
-def _gateway_endpoint_for_reattach(session) -> tuple[str, str]:
-    """Resolve gateway URL and key together from the session's profile, never the process default."""
-    from api import profiles as _profiles
-    from api.config import get_config
-
-    with _profiles.profile_scope_for_detached_worker(
-        getattr(session, "profile", None), "gateway reattach", logger_override=logger,
-    ):
-        return _gateway_base_url(get_config()), _gateway_api_key()
-
-
 def _resume_gateway_run_for_session(session) -> bool:
-    from api.config import create_stream_channel, register_session_writeback_owner, register_stream_owner
+    from api import profiles as _profiles
+    from api.config import create_stream_channel, get_config, register_session_writeback_owner, register_stream_owner
 
-    run = getattr(session, "gateway_run", None) if session is not None else None
-    stream_id = str(getattr(session, "active_stream_id", None) or "")
-    run_id = str((run or {}).get("run_id") or "").strip()
-    if not stream_id or not run_id or run.get("stream_id") != stream_id:
+    run = (session.gateway_run if session is not None else None) or {}
+    stream_id = str(run.get("stream_id") or "")
+    run_id = str(run.get("run_id") or "").strip()
+    if not stream_id or not run_id or session.active_stream_id != stream_id:
         return False
     sid = session.session_id
-    endpoint = _gateway_endpoint_for_reattach(session)
+    # URL and key come together from the session's profile, never the process default.
+    with _profiles.profile_scope_for_detached_worker(session.profile, "gateway reattach", logger_override=logger):
+        endpoint = (_gateway_base_url(get_config()), _gateway_api_key())
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
@@ -1014,14 +985,8 @@ def _resume_gateway_run_for_session(session) -> bool:
     _mark_gateway_run_starting(stream_id)
     threading.Thread(
         target=_run_gateway_chat_streaming,
-        args=(
-            sid,
-            session.pending_user_message or "",
-            session.model,
-            session.workspace,
-            stream_id,
-            list(session.pending_attachments or []),
-        ),
+        args=(sid, session.pending_user_message or "", session.model, session.workspace,
+              stream_id, list(session.pending_attachments or [])),
         kwargs={
             "model_provider": session.model_provider,
             "goal_related": bool(run.get("goal_related")),
@@ -1108,7 +1073,7 @@ def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
 def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     if not _stream_writeback_is_current(session, stream_id):
         # Cancel clears active_stream_id eagerly; still drop this stream's run record.
-        if session is not None and (getattr(session, "gateway_run", None) or {}).get("stream_id") == stream_id:
+        if session is not None and (session.gateway_run or {}).get("stream_id") == stream_id:
             session.gateway_run = None
             session.save(touch_updated_at=False)
         return
@@ -1231,11 +1196,7 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
-        if reattach_endpoint:
-            base_url, api_key = reattach_endpoint
-        else:
-            base_url = _gateway_base_url(cfg)
-            api_key = _gateway_api_key()
+        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
         try:
             from api.config import _main_model_request_overrides
             _gw_overrides = _main_model_request_overrides(
@@ -1246,9 +1207,7 @@ def _run_gateway_chat_streaming(
         except Exception:
             _gw_overrides = {}
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
-        _use_runs_api = bool(reattach_run_id) or (
-            _runs_api_enabled and gateway_supports_approval(base_url, api_key)
-        )
+        _use_runs_api = bool(reattach_run_id) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
             runs_api_pending_marked = False

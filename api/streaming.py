@@ -5441,52 +5441,92 @@ def _strip_oob_blocks(content):
     return content
 
 
-def _content_has_oob_marker(content) -> bool:
-    """True when ``content`` holds a complete [OUT-OF-BAND USER MESSAGE] block.
+_OOB_ANY_OPEN_RE = re.compile(
+    r'\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]',
+    re.IGNORECASE,
+)
+_OOB_ANY_CLOSE_RE = re.compile(
+    r'\[/OUT-OF-BAND\s+USER\s+MESSAGE\]',
+    re.IGNORECASE,
+)
 
-    Cheap pre-check so a scrub pass over a settled transcript only copies the
-    rows that actually carry the control wrapper.
+
+def _unwrap_single_oob_frame(content: str) -> str | None:
+    """Unwrap exactly one fully-validated [OUT-OF-BAND USER MESSAGE] frame.
+
+    Returns the extracted inner user text if and only if ``content`` consists of
+    exactly one valid opening tag and one valid closing tag wrapping the user
+    content. If markers are multiple, nested, incomplete, or ambiguous, returns
+    None so caller preserves the row byte-for-byte.
     """
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped:
+        return None
+
+    open_matches = list(_OOB_ANY_OPEN_RE.finditer(stripped))
+    close_matches = list(_OOB_ANY_CLOSE_RE.finditer(stripped))
+
+    # Must have exactly one opening marker and one closing marker
+    if len(open_matches) != 1 or len(close_matches) != 1:
+        return None
+
+    open_m = open_matches[0]
+    close_m = close_matches[0]
+
+    # Opening marker must be at the very start of stripped content
+    if open_m.start() != 0:
+        return None
+
+    # Closing marker must be at the very end of stripped content
+    if close_m.end() != len(stripped):
+        return None
+
+    # Opening marker must end before closing marker starts
+    if open_m.end() > close_m.start():
+        return None
+
+    inner = stripped[open_m.end():close_m.start()]
+    # Strip surrounding whitespace/newlines from the extracted user text
+    return inner.strip('\r\n').strip()
+
+
+def _unwrap_steer_row_oob_marker(message: dict) -> None:
+    """Extract inner steer text from a typed steer row in place (#7600).
+
+    The Hermes Agent emits mid-turn steers as standalone typed user rows
+    (`role == 'user'`, `display_kind == 'steer'`). The control wrapper
+    `[OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]` is
+    extracted to preserve only the user-authored instruction.
+
+    Mutates caller-row in place to maintain object identity. If the marker
+    frame is malformed, nested, multiple, or legacy, preserves the row
+    byte-for-byte.
+    """
+    if not isinstance(message, dict):
+        return
+    if message.get('role') != 'user' or message.get('display_kind') != 'steer':
+        return
+    content = message.get('content')
     if isinstance(content, str):
-        return bool(_OOB_USER_MESSAGE_BLOCK_RE.search(content))
-    if isinstance(content, list):
-        return any(_content_has_oob_marker(part) for part in content)
-    if isinstance(content, dict):
-        return any(_content_has_oob_marker(value) for value in content.values())
-    return False
+        unwrapped = _unwrap_single_oob_frame(content)
+        if unwrapped is not None:
+            message['content'] = unwrapped
+    elif isinstance(content, list):
+        if len(content) == 1 and isinstance(content[0], dict):
+            part = content[0]
+            if part.get('type') == 'text' and isinstance(part.get('text'), str):
+                unwrapped = _unwrap_single_oob_frame(part['text'])
+                if unwrapped is not None:
+                    part['text'] = unwrapped
 
 
 def _strip_oob_markers_from_messages(messages):
-    """Drop consumed OOB steer wrappers from the tool rows that carry them.
-
-    A mid-turn ``/steer`` is delivered as an ``[OUT-OF-BAND USER MESSAGE ...]``
-    block appended to the turn's last tool result. The wrapper is agent control
-    data: the gateway history builder already strips it from the model-facing
-    copy, and the settled transcript must not keep it either — ``session.messages``
-    is rendered verbatim in the UI (#7600).
-
-    Only ``role == 'tool'`` rows are candidates, because that is the only place
-    the transport ever appends a wrapper. User and assistant rows are
-    user-visible content: a message that quotes a complete marker — a pasted
-    example, a log excerpt — must survive verbatim, so the scrub never reaches
-    those rows. Only the carrier's ``content`` is rebuilt; every other field
-    stays the object it already is, so stable ids, reasoning metadata, and turn
-    bookkeeping are untouched and the scrubbed rows still compare equal to the
-    marker-free rows already persisted from earlier turns.
-    """
-    cleaned = []
+    """Unwrap OOB steer markers from typed steer rows in place (#7600)."""
     for message in messages or []:
-        if not isinstance(message, dict) or message.get('role') != 'tool':
-            cleaned.append(message)
-            continue
-        content = message.get('content')
-        if not _content_has_oob_marker(content):
-            cleaned.append(message)
-            continue
-        scrubbed = dict(message)
-        scrubbed['content'] = _strip_oob_blocks(content)
-        cleaned.append(scrubbed)
-    return cleaned
+        _unwrap_steer_row_oob_marker(message)
+    return messages
 
 
 def _content_has_reasoning_only_parts(content) -> bool:

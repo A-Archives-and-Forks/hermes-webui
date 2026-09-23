@@ -24,6 +24,13 @@
 
 ### Fixed
 
+- **A turn's Worklog no longer vanishes when the sidebar reports idle before the final frame.**
+  `/api/sessions` could say a session was idle before the chat stream's terminal frame reached the
+  page, and three sidebar paths (idle reconciliation, the INFLIGHT purge and optimistic-row
+  retirement) then erased the pane's Worklog and stream id, so the late `done` was rejected as stale
+  and the settled scene was never saved. The cleanup now waits briefly for the pane's own open
+  stream, then checks `/api/chat/stream/status` once, and falls back to the existing
+  interrupted-stream recovery if that check fails. (#7749 by @franksong2702)
 - **A session's run journal can no longer be written out of order.** The journal writer reserved a
   sequence number under the per-path lock, released it, and then appended, so two concurrent writers
   could land sequence N+1 on disk before N and the replay reader would stop at the gap

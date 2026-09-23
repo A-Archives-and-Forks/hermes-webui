@@ -5,6 +5,10 @@
 
 ### Added
 
+- **Full-session resolve concurrency is configurable.** `HERMES_WEBUI_MAX_SESSION_RESOLVE` sets how
+  many full-transcript session resolves may run at once (default 2, a positive integer up to 64;
+  zero, negative, non-numeric or out-of-range values fall back to 2). It is process-wide, so a
+  profile's `.env` cannot override it. (#7421, #7656 by @happy5318)
 - **The sidebar's recent-session window is configurable.** `HERMES_WEBUI_VISIBLE_SESSION_LIMIT` sets
   how many recent sessions the sidebar lists (default 20). It also bounds how many delegated subagent
   children can nest at once, so raise it for wide fan-outs. Invalid or non-positive values fall back to

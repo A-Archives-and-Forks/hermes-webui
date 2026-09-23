@@ -2544,8 +2544,8 @@ def _build_session_list_cache_payload(
     )
     if show_cli_sessions:
         diag_stage("cli_cap")
-        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        archived_scoped = _cap_recent_cli_sessions(archived_scoped)
+        visible_scoped = _cap_recent_cli_sessions(visible_scoped)
     if visible_only:
         archived_scoped = [
             s for s in archived_scoped if _session_has_server_visible_messages(s)
@@ -10405,11 +10405,16 @@ def _dedupe_cli_sidebar_sessions_for_api(
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
-CLI_VISIBLE_SESSION_CAP = 20
+def _cli_visible_session_cap() -> int:
+    """Shared sidebar window, not a second hard-coded 20."""
+    from api.config import CLI_VISIBLE_SESSION_LIMIT
+    return CLI_VISIBLE_SESSION_LIMIT
 
 
-def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
+def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int | None = None) -> list[dict]:
     """Keep only the most recent CLI-visible sessions after filtering."""
+    if cli_cap is None:
+        cli_cap = _cli_visible_session_cap()
     if cli_cap <= 0:
         return sessions
     kept = []

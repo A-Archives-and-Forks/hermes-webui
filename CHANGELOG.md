@@ -28,6 +28,13 @@
 
 ### Fixed
 
+- **Context-length lookup keeps the configured base URL for ownerless and underscore-named
+  providers.** The #7535 ownership guard also dropped the global `model.base_url` for a `model:`
+  section with a `base_url` but no `provider`, and for provider IDs written with an underscore
+  (`opencode_go` vs `opencode-go`), so those sessions could resolve the wrong context window. Both
+  now keep the URL, while a different declared owner still does not leak its endpoint.
+  (#7743 by @webtecnica)
+
 - **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
   another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's
   "another Hermes process is using this session" notices now reach the chat as a warning status

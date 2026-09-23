@@ -11007,15 +11007,18 @@ def _merge_session_messages_append_only_impl(
             ):
                 existing_api_content = _session_message_api_content_key(existing)
                 incoming_api_content = _session_message_api_content_key(msg)
-                if not (
+                if (
                     existing_api_content is not None
                     and incoming_api_content is not None
                     and existing_api_content != incoming_api_content
                 ):
-                    if existing_api_content is None and incoming_api_content is not None:
-                        _copy_api_content_sidecar(existing, msg)
-                    _merge_session_display_metadata(existing, msg)
-                    continue
+                    # The unique durable row ID makes state.db authoritative
+                    # for this marked native-image mirror's provider payload.
+                    existing["api_content"] = incoming_api_content
+                elif existing_api_content is None and incoming_api_content is not None:
+                    _copy_api_content_sidecar(existing, msg)
+                _merge_session_display_metadata(existing, msg)
+                continue
             if dedup_key in seen_dedup_keys:
                 duplicate = merged_by_dedup_key.get(dedup_key)
                 duplicate_row_id, duplicate_row_id_valid = (

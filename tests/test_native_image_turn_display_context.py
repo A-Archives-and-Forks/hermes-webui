@@ -805,7 +805,7 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery():
     import api.models as models
 
     timestamp = 860.0
-    session, identity, _ = _settle_image_turn(
+    session, identity, image_api_content = _settle_image_turn(
         timestamp=timestamp,
         agent_row_id=41,
     )
@@ -851,16 +851,41 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery():
             message for message in context
             if message.get("_state_db_row_id") == 42
         ]
-        assert len(display_row_42) == 2
-        assert {message["api_content"] for message in display_row_42} == {
-            "OLD-PROVIDER-BYTES",
-            "NEW-PROVIDER-BYTES",
-        }
+        assert len(display_row_42) == 1
+        assert display_row_42[0]["api_content"] == "NEW-PROVIDER-BYTES"
         assert len(context_row_42) == 1
         assert context_row_42[0]["api_content"] == "NEW-PROVIDER-BYTES"
 
         public = public_session_projection({"messages": display})["messages"]
+        public_mirrors = [message for message in public if message.get("content") == mirror]
+        assert len(public_mirrors) == 1
+        assert "api_content" not in public_mirrors[0]
+        display_image_turn = next(
+            message for message in display
+            if message.get("_active_turn_token") == identity["token"]
+        )
+        assert display_image_turn["attachments"][0]["name"] == "sample.png"
+        public_image_turn = next(
+            message for message in public
+            if message.get("content") == "Describe this image"
+        )
+        assert public_image_turn["attachments"][0]["name"] == "sample.png"
+
         replay = _sanitize_messages_for_agent(context)
+        replay_row_42 = [message for message in replay if message.get("content") == mirror]
+        assert len(replay_row_42) == 1
+        assert replay_row_42[0]["api_content"] == "NEW-PROVIDER-BYTES"
+        replay_image_turn = next(
+            message for message in replay
+            if isinstance(message.get("content"), list)
+            and any(
+                part.get("type") == "image_url"
+                and part.get("image_url", {}).get("url") == IMAGE_A
+                for part in message["content"]
+                if isinstance(part, dict)
+            )
+        )
+        assert replay_image_turn["api_content"] == image_api_content
         if first_public is None:
             first_public = public
             first_replay = replay

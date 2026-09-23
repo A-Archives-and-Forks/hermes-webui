@@ -171,7 +171,16 @@ and 5; it does not mark every run-state boundary implemented.
    do not conflict, and the pairing is unambiguous. Keep the rich sidecar row;
    if any requirement is missing or contradictory, preserve both rows rather
    than deduplicating. Literal scalar `[screenshot]` text alone is not identity
-   evidence.
+   evidence. A WebUI-submitted native-image turn has a separate display owner:
+   keep its exact submitted text and attachment in the visible session row,
+   while the Agent's expanded multipart row remains in `context_messages` for
+   model replay. Match its scalar state.db projection only with trusted turn
+   and durable-row identity, never the marker alone. For a uniquely identified
+   unmatched state.db row already present in the sidecar, conflicting provider
+   sidecars are two versions of that *one* durable row: show it once and use
+   the state.db provider payload for replay. Preserve genuinely distinct or
+   ambiguous rows. Agent state.db alone cannot restore the original attachment
+   if the WebUI sidecar is lost.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.

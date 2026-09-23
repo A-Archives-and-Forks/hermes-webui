@@ -16,7 +16,7 @@ import copy
 import json
 
 from api.models import Session
-from api.streaming import _settle_result_messages, _unwrap_single_oob_frame, _unwrap_steer_row_oob_marker
+from api.streaming import _settle_result_messages, _unwrap_steer_row_oob_marker
 from api import streaming as _streaming
 
 PROMPT = "please run the smoke checks"
@@ -143,9 +143,8 @@ def test_settle_leaves_legacy_tool_rows_alone(monkeypatch):
     assert tool_text in tool_bodies
 
 
-def test_settle_preserves_malformed_nested_and_multiple_blocks_byte_for_byte(monkeypatch):
+def test_settle_preserves_malformed_nested_and_multiple_blocks_byte_for_byte():
     """Nested markers, multiple frames, and incomplete markers degrade gracefully."""
-    session = _session_with_prior_turn()
     nested = f"{OOB_OPEN}\nhello {OOB_VARIANT} world\n{OOB_CLOSE}"
     multiple = f"{OOB_VARIANT} and {OOB_BLOCK}"
     incomplete = "[OUT-OF-BAND USER MESSAGE — truncated"

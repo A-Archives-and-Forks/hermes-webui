@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **Saving a very large session no longer reads and parses the whole file just to count messages.**
+  The #1558 backup safeguard in `Session.save()` needs the on-disk message count; it obtained it by
+  loading the entire sidecar. On a real 203 MB / 266,940-message session that made every save
+  expensive. The count is now taken without a full parse, and the shrink-backup behaviour is
+  unchanged. (#7578 by @rodrigogs)
+
 - **The live stream reports which model actually served the turn.** A new additive `runtime_model`
   SSE event carries the model (and provider, when known) that the Agent reported while producing
   output, separately from the model that was requested. It is journaled for replay, is exposed as

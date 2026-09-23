@@ -33,6 +33,17 @@
   could seed the replay floor and the reattached stream skipped the current reply's early events.
   Replay now seeds only from the current live assistant row, and falls back to a full replay that
   rebuilds the assistant body when a cursor outlives its live state. (#7651 by @happy5318)
+- **Context-length lookup keeps the configured base URL for ownerless and underscore-named
+  providers.** The #7535 ownership guard also dropped the global `model.base_url` for a `model:`
+  section with a `base_url` but no `provider`, and for provider IDs written with an underscore
+  (`opencode_go` vs `opencode-go`), so those sessions could resolve the wrong context window. Both
+  now keep the URL, while a different declared owner still does not leak its endpoint.
+  (#7743 by @webtecnica)
+- **A session deleted during a restart no longer produces a spurious recovery warning.** When
+  WebUI startup recovery re-attached background processes, a session that had vanished between
+  enumeration and rebind raised a `KeyError` that was logged as a warning. It now follows the
+  existing skip path, confined to the session lookup, so the vanished owner is skipped, live owners
+  still rebind, and registry errors still warn. (#7753, #7774 by @happy5318)
 
 - **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
   another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's

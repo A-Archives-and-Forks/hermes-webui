@@ -287,12 +287,22 @@ class GatewayWatcher:
         return q
 
     def unsubscribe(self, q: queue.Queue):
-        """Remove a subscriber queue."""
+        """Remove a subscriber queue.
+
+        When the last subscriber leaves, drop the cheap fingerprint and parity
+        timestamp so the next subscription runs a fresh projection. The poll
+        loop parks *before* calling ``_poll_once`` once nobody is subscribed,
+        so the equivalent reset inside ``_poll_once`` is not reached on the
+        normal disconnect path.
+        """
         with self._sub_lock:
             try:
                 self._subscribers.remove(q)
             except ValueError:
-                pass
+                return
+            if not self._subscribers:
+                self._last_cheap_fp = ''
+                self._last_full_projection_at = None
 
     def _notify_subscribers(self, sessions: list):
         """Push change event to all subscribers."""

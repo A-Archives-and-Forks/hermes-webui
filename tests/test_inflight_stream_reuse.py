@@ -1113,7 +1113,7 @@ const recovering=[
   {toolCalls:[{name:'read_file'}]},
   {activityBurstAnchors:[{seq:12}]},
   {anchorActivityScene:{activity_rows:[{kind:'tool'}]}},
-  {messages:[{role:'user', content:'p'}, {role:'assistant', content:'answer'}]},
+  {messages:[{role:'user', content:'p'}, {role:'assistant', content:'answer', _live:true}]},
 ];
 for (const extra of recovering) {
   const state={messages:[{role:'user', content:'p'}], ...extra};
@@ -1126,6 +1126,39 @@ for (const extra of recovering) {
   );
   assert.strictEqual(_runJournalReplayEventIdForInflight(state), 'stream-e75e:206');
 }
+
+// #7651: an ESTABLISHED conversation copies the whole transcript, so the last
+// assistant row is the previous turn's reply. Historical assistant content must
+// never authorize the stale cursor that belongs to the still-running turn.
+const established={
+  messages:[
+    {role:'user', content:'first question'},
+    {role:'assistant', content:'the previous turn answer'},
+    {role:'user', content:'current question'},
+  ],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+assert.strictEqual(
+  _inflightCanSeedJournalReplay(established),
+  false,
+  'a historical assistant row must not seed the replay floor'
+);
+assert.strictEqual(_runJournalReplayFloorForInflight(established), 0);
+assert.strictEqual(_runJournalReplayEventIdForInflight(established), '');
+
+// Even after the latest user boundary, evidence must be LIVE output: a
+// settled/non-live assistant row at the current position still yields zero.
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({
+    messages:[
+      {role:'user', content:'current question'},
+      {role:'assistant', content:'settled reply without _live'},
+    ],
+    lastRunJournalSeq:206,
+  }),
+  0
+);
 
 // Degenerate inputs must stay on the zero floor.
 assert.strictEqual(_runJournalReplayFloorForInflight(null), 0);
@@ -1192,6 +1225,29 @@ const recovering={
 _normalizeInflightReplayCursorForReattach(recovering);
 assert.strictEqual(recovering.lastRunJournalSeq, 206);
 assert.strictEqual(recovering.lastRunJournalEventId, 'stream-e75e:206');
+
+// #7651: a historical assistant row must not protect the cursor either, or an
+// established conversation settles with a blank body over a painted footer.
+const established={
+  streamId:'stream-e75e',
+  reattach:true,
+  messages:[
+    {role:'user', content:'first question'},
+    {role:'assistant', content:'the previous turn answer'},
+    {role:'user', content:'current question'},
+  ],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+_normalizeInflightReplayCursorForReattach(established);
+assert.strictEqual(established.lastRunJournalSeq, 0);
+assert.strictEqual(established.lastRunJournalEventId, '');
+assert.strictEqual(_runJournalReplayFloorForInflight(established), 0);
+assert.strictEqual(
+  established.messages.length,
+  3,
+  'the transcript must survive; only the cursor halves are dropped'
+);
 
 const noCursor={streamId:'stream-e75e', messages:[{role:'user', content:'p'}]};
 _normalizeInflightReplayCursorForReattach(noCursor);

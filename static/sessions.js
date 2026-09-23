@@ -1053,8 +1053,21 @@ function _inflightCanSeedJournalReplay(inflight){
   const anchorScene=inflight.anchorActivityScene;
   if(anchorScene&&Array.isArray(anchorScene.activity_rows)&&anchorScene.activity_rows.length) return true;
   if(Array.isArray(inflight.messages)){
-    return inflight.messages.some((msg)=>{
+    // The transcript copy carries every earlier turn (#7651): in an established
+    // conversation the last assistant row is the PREVIOUS turn's reply, not the
+    // one the cursor belongs to, so it must never authorize a nonzero floor.
+    // Message evidence counts only from a current `_live` assistant standing
+    // after the latest user boundary; anything historical fails closed to zero.
+    const list=inflight.messages;
+    let latestUserIdx=-1;
+    for(let i=list.length-1;i>=0;i--){
+      const row=list[i];
+      if(row&&row.role==='user'){latestUserIdx=i;break;}
+    }
+    return list.some((msg,idx)=>{
       if(!msg||msg.role!=='assistant') return false;
+      if(!msg._live) return false;
+      if(idx<=latestUserIdx) return false;
       const content=msg.content;
       if(typeof content==='string') return Boolean(content.trim());
       if(Array.isArray(content)) return content.length>0;

@@ -754,6 +754,51 @@ def test_state_db_image_projection_suppresses_only_exact_agent_row_id(
         )
 
 
+def test_marked_native_image_mirror_repairs_malformed_sidecar_once():
+    import api.models as models
+
+    timestamp = 850.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    session.messages.append({
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 42,
+        "api_content": [],
+    })
+    state_row = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 42,
+        "api_content": api_content,
+    }
+
+    marked = models._suppress_native_image_display_mirrors(session, [state_row])
+    assert len(marked) == 1
+    assert marked[0]["_webui_unmatched_native_image_mirror"] is True
+
+    for _ in range(2):
+        reconciled = models.reconciled_state_db_messages_for_session(
+            session,
+            state_messages=[state_row],
+        )
+        replay_rows = [
+            message for message in _sanitize_messages_for_agent(reconciled)
+            if message.get("content") == mirror
+        ]
+        assert len(replay_rows) == 1
+        assert replay_rows[0]["api_content"] == api_content
+
+
 def test_unlinked_state_db_image_projection_uses_existing_reconciliation():
     import api.models as models
 

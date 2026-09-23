@@ -9687,7 +9687,7 @@ def _visible_content_compatible(target: dict | None, source: dict | None) -> boo
 
 
 def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
-    """Copy a non-empty internal sidecar without replacing an existing one."""
+    """Copy a valid sidecar unless the target already has a valid one."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return False
     target_role = _message_sidecar_role(target)
@@ -9706,7 +9706,8 @@ def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
             )
         ):
             return False
-    if target.get("api_content") not in (None, ""):
+    target_api_content = target.get("api_content")
+    if isinstance(target_api_content, str) and target_api_content:
         return True
     api_content = source.get("api_content")
     if isinstance(api_content, str) and api_content:

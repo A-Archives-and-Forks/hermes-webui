@@ -428,3 +428,100 @@ process.stdout.write(JSON.stringify({{ lang: _lang }}));
             f"server-saved 'en' must beat both a stale 'ja' storage "
             f"value and an 'en-US' browser hint. Got: {out!r}"
         )
+
+
+# ── 3. Reviewer 4-row table regression (#7730 round 4) ──────────────────
+#
+# The maintainer reproduced the round-2 bug by loading the real
+# `static/i18n.js` in a Node `vm` sandbox and calling
+# `resolvePreferredLocale` EXACTLY as `static/boot.js` calls it:
+#
+#     resolvePreferredLocale(s.language,
+#                            localStorage.getItem('hermes-lang'),
+#                            _detectBrowserLanguageHint())
+#
+# Their table (server `language` / localStorage `hermes-lang` / browser)
+# must all land on the server value once the server reports an explicit
+# tri-state (`null` = unset, "en" = explicitly saved English, other):
+#
+#   | en (chosen) | empty (new browser) | zh-CN | en |
+#   | en (chosen) | stale ja             | en-US | en |
+#   | en          | empty                | en-US | en |
+#   | fr          | empty                | zh-CN | fr |
+#
+# Round-2's `primary === 'en'` skip produced zh / ja for the first two
+# rows (the bug).  Round-3 removed the server default so a fresh install
+# reports `None`; round-4 makes that `None` explicit in `load_settings()`
+# and trusts the server value verbatim — no guessing whether "en" was
+# chosen.  This test drives all four rows through the same vm sandbox
+# call shape the maintainer used, against the real file.
+
+
+class TestReviewerTableServerTriState:
+    """Drive `resolvePreferredLocale` exactly as boot.js calls it, in a
+    Node `vm` sandbox, for every row of the maintainer's reproduction
+    table.  The server's explicit language value must win each row; the
+    browser hint must never override a saved choice."""
+
+    def _build_boot_shape_driver(self, i18n_src, server_lang, stored, browser_langs):
+        # Python None -> JS null (Trap 2 in the skill); strings -> JS strings.
+        js_server = "null" if server_lang is None else json.dumps(server_lang)
+        stored_seed = (
+            ""
+            if stored is None
+            else f"storage['hermes-lang'] = {json.dumps(stored)};"
+        )
+        nav_literal = json.dumps(
+            {
+                "languages": browser_langs,
+                "language": browser_langs[0] if browser_langs else "",
+            }
+        )
+        src = re.sub(r"\nloadLocale\(\);\s*$", "", i18n_src, count=1)
+        call = (
+            f"resolvePreferredLocale({js_server}, "
+            f"localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())"
+        )
+        return f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = {src!r};
+const storage = {{}};
+{stored_seed}
+const ctx = {{
+  localStorage: {{
+    getItem: (k) => Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null,
+    setItem: (k, v) => {{ storage[k] = String(v); }},
+  }},
+  document: {{
+    documentElement: {{ lang: '' }},
+    querySelectorAll: () => [],
+  }},
+  navigator: {nav_literal},
+}};
+vm.createContext(ctx);
+vm.runInContext(src, ctx);
+// Same call shape as static/boot.js:3443-3445.
+const out = vm.runInContext({json.dumps(call)}, ctx);
+process.stdout.write(JSON.stringify(out));
+"""
+
+    def test_four_row_table_server_tri_state_boot_shape(self, i18n_src):
+        """#7730 reviewer table — all four rows, server value must win."""
+        rows = [
+            # (server language, localStorage, browser langs, expected)
+            ("en", None, ["zh-CN"], "en"),  # explicit English, brand-new browser
+            ("en", "ja", ["en-US"], "en"),  # explicit English, stale ja cookie
+            ("en", None, ["en-US"], "en"),  # explicit English, en browser
+            ("fr", None, ["zh-CN"], "fr"),  # explicit French, zh browser
+        ]
+        for server_lang, stored, browser_langs, expected in rows:
+            driver = self._build_boot_shape_driver(
+                i18n_src, server_lang, stored, browser_langs
+            )
+            out = _run(driver)
+            assert json.loads(out) == expected, (
+                f"server={server_lang!r} stored={stored!r} "
+                f"browser={browser_langs!r} -> expected {expected!r}, "
+                f"got {out!r}"
+            )

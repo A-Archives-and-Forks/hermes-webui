@@ -11714,6 +11714,16 @@ def load_settings() -> dict:
             settings["default_model_provider"] = str(model_cfg.get("provider"))
     except Exception:
         logger.debug("Failed to resolve default model provider for settings")
+    # #7622/#7730 (round 4): keep the tri-state signal explicit.  `language`
+    # is intentionally absent from `_SETTINGS_DEFAULTS` (see above), so
+    # without this line a fresh install's returned dict would OMIT the key
+    # entirely and the API payload would carry no `language` field.  Emit an
+    # explicit `None` (serialized as JSON `null`) so the client receives the
+    # three-way signal it trusts: `null` = no preference, "en" = explicitly
+    # saved English, any other code = explicitly chosen locale.  Stored
+    # values (including a legacy English pick written before this change)
+    # win via the merge above and are never touched here.
+    settings.setdefault("language", None)
     return settings
 
 

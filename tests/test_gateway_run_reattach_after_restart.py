@@ -113,7 +113,7 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
     assert captured["post_headers"]["Idempotency-key"] == f"webui-{stream_id}"
     assert captured["persisted_at_events"]["run_id"] == "run_live"
     assert captured["persisted_at_events"]["stream_id"] == stream_id
-    assert captured["persisted_at_events"]["base_url"] == "http://gateway.local"
+    assert "api_key" not in captured["persisted_at_events"]
     saved = json.loads((isolated_sessions / f"{s.session_id}.json").read_text())
     assert saved["gateway_run"] is None
     assert saved["active_stream_id"] is None
@@ -348,16 +348,20 @@ def test_reattach_resolves_gateway_from_the_session_profile(isolated_sessions, m
     assert saved["messages"][-1]["content"] == "answer"
 
 
-def test_reattach_polls_the_gateway_that_accepted_the_run(isolated_sessions, monkeypatch):
-    sid, stream_id = _orphaned_gateway_turn()
-    s = models.Session.load(sid)
-    s.gateway_run = {**s.gateway_run, "base_url": "http://accepted-gateway:8642/"}
-    s.save(touch_updated_at=False)
-    models.SESSIONS.clear()
-    seen = []
-    _poll_until_completed(monkeypatch, seen)
+@pytest.mark.parametrize("code", [401, 403])
+def test_reattach_auth_rejection_fails_fast_with_an_auth_error(isolated_sessions, monkeypatch, code):
+    sid, _stream_id = _orphaned_gateway_turn()
+    calls = []
 
+    def rejected(base_url, api_key, run_id):
+        calls.append(run_id)
+        raise urllib.error.HTTPError("http://gateway.local/v1/runs/x", code, "denied", Message(), io.BytesIO(b""))
+
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", rejected)
     gateway_chat.resume_gateway_runs_after_restart()
     _wait_for_reattach_threads()
 
-    assert {b for b, _k, _r in seen} == {"http://accepted-gateway:8642"}
+    assert len(calls) == 1
+    saved = json.loads((isolated_sessions / f"{sid}.json").read_text())
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
+    assert f"HTTP {code}" in json.dumps(saved["messages"][-1])

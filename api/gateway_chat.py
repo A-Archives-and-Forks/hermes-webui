@@ -895,6 +895,8 @@ def _await_gateway_run_result(
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise RuntimeError("Gateway no longer has this run; its result could not be recovered after the WebUI restart.") from exc
+            if exc.code in (401, 403):
+                raise RuntimeError(f"Gateway rejected the WebUI credentials (HTTP {exc.code}) while reattaching to a run after the restart.") from exc
             failures += 1
             status = None
         except (urllib.error.URLError, OSError, ValueError):
@@ -982,18 +984,15 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
-def _gateway_endpoint_for_reattach(session, run: dict) -> tuple[str, str]:
-    """Resolve the gateway that owns ``run`` using the session's profile, not the process default."""
+def _gateway_endpoint_for_reattach(session) -> tuple[str, str]:
+    """Resolve gateway URL and key together from the session's profile, never the process default."""
     from api import profiles as _profiles
     from api.config import get_config
 
     with _profiles.profile_scope_for_detached_worker(
         getattr(session, "profile", None), "gateway reattach", logger_override=logger,
     ):
-        base_url = _gateway_base_url(get_config())
-        api_key = _gateway_api_key()
-    # The run lives on the gateway that accepted it, even if config changed since.
-    return str(run.get("base_url") or base_url).rstrip("/"), api_key
+        return _gateway_base_url(get_config()), _gateway_api_key()
 
 
 def _resume_gateway_run_for_session(session) -> bool:
@@ -1005,7 +1004,7 @@ def _resume_gateway_run_for_session(session) -> bool:
     if not stream_id or not run_id or run.get("stream_id") != stream_id:
         return False
     sid = session.session_id
-    endpoint = _gateway_endpoint_for_reattach(session, run)
+    endpoint = _gateway_endpoint_for_reattach(session)
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
@@ -1318,7 +1317,6 @@ def _run_gateway_chat_streaming(
                         active_provider=(model_provider or ""),
                         on_run_id=lambda run_id: _record_gateway_run(
                             session_id, stream_id, run_id,
-                            base_url=base_url,
                             regeneration=bool(regeneration),
                             goal_related=bool(goal_related),
                         ),

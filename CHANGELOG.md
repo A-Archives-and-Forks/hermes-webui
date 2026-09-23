@@ -24,6 +24,11 @@
 
 ### Fixed
 
+- **A session's run journal can no longer be written out of order.** The journal writer reserved a
+  sequence number under the per-path lock, released it, and then appended, so two concurrent writers
+  could land sequence N+1 on disk before N and the replay reader would stop at the gap
+  (`replay_noncontiguous`). Sequence allocation and the physical append now happen under the same
+  existing lock. (#7751 by @franksong2702)
 - **Reconnecting to a running session no longer redraws every tool card over and over.** After a
   reconnect restored the live activity scene from the run journal, the client also replayed its older
   cached in-flight tool list on top, so a turn with N tool cards redrew them N times. When the

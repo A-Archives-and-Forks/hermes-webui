@@ -7596,7 +7596,34 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+// Child sessions (delegated subagents) carry no project_id of their own; for
+// project filtering they belong to the nearest ancestor that has one.
+function _sidebarProjectIdForRow(s, rowsById){
+  if(!s) return null;
+  if(s.project_id||!_isChildSession(s)||!rowsById) return s.project_id||null;
+  const seen=new Set([s.session_id]);
+  let parentSid=s.parent_session_id;
+  while(parentSid&&!seen.has(parentSid)){
+    seen.add(parentSid);
+    const parent=rowsById.get(parentSid);
+    if(!parent) break;
+    if(parent.project_id) return parent.project_id;
+    parentSid=parent.parent_session_id;
+  }
+  return null;
+}
+
+function _sidebarRowsById(rows){
+  const byId=new Map();
+  for(const list of rows){
+    if(!Array.isArray(list)) continue;
+    for(const s of list) if(s&&s.session_id&&!byId.has(s.session_id)) byId.set(s.session_id,s);
+  }
+  return byId;
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
+  const rowsById=_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]);
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -7615,10 +7642,11 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     const referenceRaw=isCli ? cliReferenceRaw : webuiReferenceRaw;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
     profileFiltered.push(s);
+    const projectId=_sidebarProjectIdForRow(s, rowsById);
     if(_activeProject===NO_PROJECT_FILTER){
-      if(s.project_id) continue;
+      if(projectId) continue;
     } else if(_activeProject){
-      if(s.project_id!==_activeProject) continue;
+      if(projectId!==_activeProject) continue;
     }
     referenceRaw.push(s);
     if(s.archived){
@@ -7655,13 +7683,15 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // project + source bucket as the render they feed before using them.
 function _scopedSidebarReferenceRows(isCli){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
+  const rowsById=_sidebarRowsById([_sidebarReferenceSessions, typeof _allSessions!=='undefined'?_allSessions:null]);
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
     // Source scope: only references in the same webui/cli bucket as this render.
     if(_isCliSession(s)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
-    if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
-    else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
+    const projectId=_sidebarProjectIdForRow(s, rowsById);
+    if(_activeProject===NO_PROJECT_FILTER){ if(projectId) return false; }
+    else if(_activeProject){ if(projectId!==_activeProject) return false; }
     return true;
   });
 }
@@ -7841,7 +7871,8 @@ function renderSessionListFromCache(){
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
-  const hasUnprojected=profileFiltered.some(s=>!s.project_id);
+  const profileRowsById=_sidebarRowsById([profileFiltered]);
+  const hasUnprojected=profileFiltered.some(s=>!_sidebarProjectIdForRow(s, profileRowsById));
   if(_allProjects.length>0||hasUnprojected){
     const bar=document.createElement('div');
     bar.className='project-bar';

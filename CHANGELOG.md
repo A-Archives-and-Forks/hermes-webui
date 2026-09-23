@@ -24,6 +24,11 @@
 
 ### Fixed
 
+- **`MEDIA:` links wrapped in inline code no longer 404.** Every `MEDIA:` capture site (renderer,
+  streaming parser, TTS stripper, session-media authorization and snapshot capture, seven in all)
+  swallowed the closing backtick of `` `MEDIA:/path` `` into the path, so the file lookup and the
+  session allowlist both missed. Backtick-wrapped refs are now normalized first, while bare paths that
+  genuinely contain a backtick keep their full name. (#7359, #7708 by @happy5318)
 - **A turn's Worklog no longer vanishes when the sidebar reports idle before the final frame.**
   `/api/sessions` could say a session was idle before the chat stream's terminal frame reached the
   page, and three sidebar paths (idle reconciliation, the INFLIGHT purge and optimistic-row

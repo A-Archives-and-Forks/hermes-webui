@@ -10717,6 +10717,86 @@ def merge_session_messages_append_only(
         _STRUCTURED_IDENTITY_MEMO.reset(token)
 
 
+def _project_native_image_payload_conflicts_for_display(
+    sidecar_messages,
+    state_messages,
+    merged_messages,
+):
+    """Project a proven same-row native-image conflict onto its sidecar bubble."""
+    sidecar_messages = list(sidecar_messages or [])
+    state_messages = list(state_messages or [])
+    if not sidecar_messages or not state_messages:
+        return merged_messages
+
+    sidecar_row_id_counts = collections.Counter(
+        row_id
+        for message in sidecar_messages
+        if (row_id := _state_db_row_identity(message)) is not None
+    )
+    state_row_id_counts = collections.Counter(
+        row_id
+        for message in state_messages
+        if (row_id := _state_db_row_identity(message)) is not None
+    )
+    display_conflicts = {}
+    for incoming in state_messages:
+        if (
+            not isinstance(incoming, dict)
+            or incoming.get(_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD) is not True
+        ):
+            continue
+        row_id, row_id_valid = _state_db_row_identity_details(incoming)
+        timestamp, timestamp_valid = _message_exact_timestamp_details(incoming)
+        content = incoming.get("content")
+        if (
+            not row_id_valid
+            or row_id is None
+            or sidecar_row_id_counts[row_id] != 1
+            or state_row_id_counts[row_id] != 1
+            or not timestamp_valid
+            or timestamp is None
+            or str(incoming.get("role") or "").lower() != "user"
+            or not isinstance(content, str)
+        ):
+            continue
+        incoming_api_content = _session_message_api_content_key(incoming)
+        if incoming_api_content is None:
+            continue
+        sidecar_owner = next((
+            message for message in sidecar_messages
+            if isinstance(message, dict)
+            and _state_db_row_identity_details(message) == (row_id, True)
+            and _message_identity_compatible(message, incoming)
+            and message.get("content") == content
+            and _message_exact_timestamp_details(message) == (timestamp, True)
+            and _session_message_api_content_key(message)
+            not in (None, incoming_api_content)
+        ), None)
+        if sidecar_owner is not None:
+            display_conflicts[(row_id, timestamp, content)] = (incoming, sidecar_owner)
+
+    if not display_conflicts:
+        return merged_messages
+    visible_messages = []
+    for message in merged_messages:
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            row_id, row_id_valid = _state_db_row_identity_details(message)
+            timestamp, timestamp_valid = _message_exact_timestamp_details(message)
+            conflict = (
+                display_conflicts.get((row_id, timestamp, message["content"]))
+                if row_id_valid and row_id is not None and timestamp_valid
+                else None
+            )
+            if (
+                conflict is not None
+                and message is not conflict[1]
+                and _message_identity_compatible(message, conflict[0])
+            ):
+                continue
+        visible_messages.append(message)
+    return visible_messages
+
+
 def _merge_session_messages_append_only_impl(
     sidecar_messages: list,
     state_messages: list,
@@ -11538,80 +11618,11 @@ def reconciled_state_db_messages_for_session(
         incoming_provenance="state_db",
     )
     if not prefer_context:
-        # Keep the append-only merge's conflicting provider payloads in model
-        # context. For display only, a marked native-image mirror can share the
-        # existing sidecar bubble when its durable identity, exact timestamp,
-        # and exact visible user content all agree.
-        sidecar_row_id_counts = collections.Counter(
-            row_id
-            for message in local_messages
-            if (row_id := _state_db_row_identity(message)) is not None
+        reconciled_messages = _project_native_image_payload_conflicts_for_display(
+            local_messages,
+            state_messages,
+            reconciled_messages,
         )
-        state_row_id_counts = collections.Counter(
-            row_id
-            for message in state_messages or ()
-            if (row_id := _state_db_row_identity(message)) is not None
-        )
-
-        display_conflicts = {}
-        for incoming in state_messages or ():
-            if (
-                not isinstance(incoming, dict)
-                or incoming.get(_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD) is not True
-            ):
-                continue
-            row_id, row_id_valid = _state_db_row_identity_details(incoming)
-            timestamp, timestamp_valid = _message_exact_timestamp_details(incoming)
-            content = incoming.get("content")
-            if (
-                not row_id_valid
-                or row_id is None
-                or sidecar_row_id_counts[row_id] != 1
-                or state_row_id_counts[row_id] != 1
-                or not timestamp_valid
-                or timestamp is None
-                or str(incoming.get("role") or "").lower() != "user"
-                or not isinstance(content, str)
-            ):
-                continue
-            incoming_api_content = _session_message_api_content_key(incoming)
-            if incoming_api_content is None:
-                continue
-            sidecar_owner = next((
-                message for message in local_messages
-                if isinstance(message, dict)
-                and _state_db_row_identity_details(message) == (row_id, True)
-                and _message_identity_compatible(message, incoming)
-                and message.get("content") == content
-                and _message_exact_timestamp_details(message) == (timestamp, True)
-                and _session_message_api_content_key(message)
-                not in (None, incoming_api_content)
-            ), None)
-            if sidecar_owner is not None:
-                display_conflicts[(row_id, timestamp, content)] = (
-                    incoming,
-                    sidecar_owner,
-                )
-
-        if display_conflicts:
-            visible_messages = []
-            for message in reconciled_messages:
-                if isinstance(message, dict) and isinstance(message.get("content"), str):
-                    row_id, row_id_valid = _state_db_row_identity_details(message)
-                    timestamp, timestamp_valid = _message_exact_timestamp_details(message)
-                    conflict = (
-                        display_conflicts.get((row_id, timestamp, message["content"]))
-                        if row_id_valid and row_id is not None and timestamp_valid
-                        else None
-                    )
-                    if (
-                        conflict is not None
-                        and message is not conflict[1]
-                        and _message_identity_compatible(message, conflict[0])
-                    ):
-                        continue
-                visible_messages.append(message)
-            reconciled_messages = visible_messages
     return _state_db_session_messages_result(
         reconciled_messages,
         state_revision,

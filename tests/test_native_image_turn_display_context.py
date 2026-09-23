@@ -228,6 +228,149 @@ def _write_state_db(path, session_id, rows):
 
 
 @pytest.mark.parametrize("msg_limit", [None, 5])
+def test_get_session_projects_marked_payload_conflict_in_full_and_limited_paths(
+    monkeypatch, tmp_path, msg_limit,
+):
+    import api.config
+    import api.models as models
+    import api.session_ops
+    from api import routes
+
+    session_id = f"native-image-route-{msg_limit}"
+    timestamp = 880.0
+    seed, identity, _ = _settle_image_turn(
+        session_id=session_id,
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in seed.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    sidecar_payload = "SIDE-CAR-PROVIDER-PAYLOAD"
+    state_payload = "STATE-DB-PROVIDER-PAYLOAD"
+    sidecar_attachments = [{
+        "name": "sidecar-owned.png",
+        "mime": "image/png",
+        "is_image": True,
+    }]
+    sidecar_mirror = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 1,
+        "api_content": sidecar_payload,
+        "attachments": sidecar_attachments,
+    }
+    seed.messages.append(dict(sidecar_mirror))
+    seed.context_messages.append(dict(sidecar_mirror))
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, session_id, [(mirror, timestamp, state_payload)])
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    session = models.Session(
+        session_id=session_id,
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=seed.messages,
+        context_messages=seed.context_messages,
+        source_tag="webui",
+        session_source="webui",
+    )
+    session.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS.pop(session_id, None)
+
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_: True)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda *_: {})
+    monkeypatch.setattr(routes, "find_run_summary", lambda *_: None)
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr(api.session_ops, "regeneration_state", lambda _session: ([], []))
+    monkeypatch.setattr(
+        api.session_ops,
+        "regeneration_authority",
+        lambda *_args, **_kwargs: None,
+    )
+    response = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: (
+            response.update(payload=payload, status=status) or payload
+        ),
+    )
+    query = f"session_id={session_id}&resolve_model=0"
+    if msg_limit is not None:
+        query += f"&msg_limit={msg_limit}"
+    routes._handle_session_get(None, SimpleNamespace(path="/api/session", query=query))
+
+    assert response["status"] == 200
+    public_session = response["payload"]["session"]
+    public_messages = public_session["messages"]
+    mirror_rows = [message for message in public_messages if message.get("content") == mirror]
+    assert len(mirror_rows) == 1, f"expected one visible mirror, found {len(mirror_rows)}"
+    assert all("api_content" not in message for message in mirror_rows)
+    assert public_session["message_count"] == 3
+    assert mirror_rows[0]["attachments"] == sidecar_attachments
+
+    state_rows = models.get_state_db_session_messages(session_id)
+    replay_context = models.reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=state_rows,
+    )
+    replay_rows = [
+        message for message in _sanitize_messages_for_agent(replay_context)
+        if message.get("content") == mirror
+    ]
+    assert len(replay_rows) == 2
+    assert {message["api_content"] for message in replay_rows} == {
+        sidecar_payload,
+        state_payload,
+    }
+
+
+def test_limited_conflict_projection_keeps_state_row_when_owner_is_outside_slice():
+    from api import routes
+
+    timestamp = 881.0
+    mirror = "Describe this image [screenshot]"
+    sidecar_slice = [{"role": "user", "content": "Earlier submission", "timestamp": 879.0}]
+    marked_state_row = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 42,
+        "api_content": "STATE-DB-PROVIDER-PAYLOAD",
+        "_webui_unmatched_native_image_mirror": True,
+    }
+    session = SimpleNamespace(
+        session_id="limited-conflict-owner-outside-page",
+        messages=sidecar_slice,
+        context_messages=[],
+    )
+    merged = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        sidecar_slice,
+        [marked_state_row],
+        state_db_signature=None,
+        msg_before=1,
+    )
+    assert any(message.get("content") == "Earlier submission" for message in merged)
+    state_rows = [message for message in merged if message.get("content") == mirror]
+    assert len(state_rows) == 1
+    assert state_rows[0]["api_content"] == marked_state_row["api_content"]
+
+
+@pytest.mark.parametrize("msg_limit", [None, 5])
 @pytest.mark.parametrize("attachment_mode", ["native_image", "text_attachment"])
 def test_get_session_keeps_pending_agent_projection_private_but_in_context(
     monkeypatch, tmp_path, msg_limit, attachment_mode,

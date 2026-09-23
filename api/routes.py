@@ -9304,6 +9304,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     )
     if not state_db_messages:
         return sidecar_messages
+
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
     # newest (recovery / edited-in-place / missing-timestamp cases) is still
@@ -9363,6 +9364,11 @@ def _limited_webui_messages_for_display_with_sidecar(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
+    )
+    merged = _project_native_image_payload_conflicts_for_display(
+        sidecar_messages,
+        state_db_messages,
+        merged,
     )
     if cache_key is not None:
         _state_key = cache_key[4]
@@ -10580,6 +10586,7 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _project_native_image_payload_conflicts_for_display,
     _suppress_native_image_display_mirrors,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
@@ -13325,11 +13332,17 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     state_db_messages,
                 )
+                sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
                 _all_msgs = merge_session_messages_append_only(
-                    _webui_sidecar_lineage_messages_for_display(s),
+                    sidecar_messages,
                     state_db_messages,
                     truncation_watermark=getattr(s, "truncation_watermark", None),
                     truncation_boundary=getattr(s, "truncation_boundary", None),
+                )
+                _all_msgs = _project_native_image_payload_conflicts_for_display(
+                    sidecar_messages,
+                    state_db_messages,
+                    _all_msgs,
                 )
                 _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
         else:

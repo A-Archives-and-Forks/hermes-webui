@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **Context-length lookup keeps the configured base URL for ownerless and underscore-named
+  providers.** The #7535 ownership guard also dropped the global `model.base_url` for a `model:`
+  section with a `base_url` but no `provider`, and for provider IDs written with an underscore
+  (`opencode_go` vs `opencode-go`), so those sessions could resolve the wrong context window. Both
+  now keep the URL, while a different declared owner still does not leak its endpoint.
+  (#7743 by @webtecnica)
 - **A session deleted during a restart no longer produces a spurious recovery warning.** When
   WebUI startup recovery re-attached background processes, a session that had vanished between
   enumeration and rebind raised a `KeyError` that was logged as a warning. It now follows the

@@ -7184,7 +7184,35 @@ def _context_length_lookup_inputs_for_model(
         if not effective_provider:
             effective_provider = _canonical_context_provider(model_cfg.get("provider"))
         if not effective_base_url:
-            effective_base_url = str(model_cfg.get("base_url") or "").strip()
+            # #7535: the global model.base_url may only fill an empty slot when
+            # the session provider IS the configured model.provider owner
+            # (mirror the ownership predicate used for model_cfg's API key in
+            # _context_length_config_api_key_for_provider). A built-in registry
+            # provider (empty base_url by design) must keep the slot empty so
+            # the registry endpoint resolves instead of another provider's URL.
+            #
+            # Two shapes cannot own the slot and therefore cannot conflict, so
+            # they keep master's backfill: a config that declares no provider
+            # at all (the profile-setup path writes model.base_url without one)
+            # and the two spellings of the same built-in id (opencode_go ==
+            # opencode-go), folded through api.config._canonicalise_provider_id
+            # so distinct custom:* slugs stay distinct.
+            _model_cfg_provider = _canonical_context_provider(model_cfg.get("provider"))
+            _owner_provider = _model_cfg_provider
+            _session_provider = effective_provider
+            try:
+                from api.config import _canonicalise_provider_id as _canon_provider_id
+
+                _owner_provider = _canon_provider_id(_owner_provider) or _owner_provider
+                _session_provider = _canon_provider_id(_session_provider) or _session_provider
+            except Exception:
+                pass
+            if (
+                not effective_provider
+                or not _model_cfg_provider
+                or _providers_match_for_context(_owner_provider, _session_provider)
+            ):
+                effective_base_url = str(model_cfg.get("base_url") or "").strip()
 
     custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
     if not isinstance(custom_providers, list):

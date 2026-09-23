@@ -583,6 +583,35 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
         put_gateway_event("approval", {**(head or approval_data), "pending_count": total})
 
 
+def _admit_gateway_run(url_runs, headers, run_body, stream_id) -> str:
+    """POST /v1/runs; the same stream and body return the originally admitted run id."""
+    req = urllib.request.Request(
+        url_runs,
+        data=json.dumps(run_body).encode("utf-8"),
+        # Durable run record on the gateway: GET /v1/runs/{id} survives either side restarting.
+        headers={**headers, "Idempotency-Key": f"webui-{stream_id}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        run_data = json.loads(resp.read(65536))
+    run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
+    if not run_id:
+        raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+    return run_id
+
+
+def _gateway_run_headers(session_id, api_key) -> dict:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-Hermes-Session-Id": session_id,
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+    return headers
+
+
 def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
@@ -594,14 +623,7 @@ def _run_gateway_runs_api_streaming(
     """Submit via POST /v1/runs and relay SSE events including approval."""
     try:
         url_runs = f"{base_url.rstrip('/')}/v1/runs"
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-Hermes-Session-Id": session_id,
-        }
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+        headers = _gateway_run_headers(session_id, api_key)
         message_content: Any = str(msg_text or "")
         if attachments:
             try:
@@ -654,19 +676,11 @@ def _run_gateway_runs_api_streaming(
             run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
         if conversation_history:
             run_body["conversation_history"] = conversation_history
-        req = urllib.request.Request(
-            url_runs,
-            data=json.dumps(run_body).encode("utf-8"),
-            # Durable run record on the gateway: GET /v1/runs/{id} survives either side restarting.
-            headers={**headers, "Idempotency-Key": f"webui-{stream_id}"},
-            method="POST",
-        )
         update_active_run(stream_id, phase="gateway-request")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            run_data = json.loads(resp.read(65536))
-        run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
-        if not run_id:
-            raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+        # Persist the exact body first: a restart before the run id is saved replays this admission.
+        if on_run_id is not None:
+            on_run_id("", request=run_body)
+        run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id)
     except Exception:
         _finish_gateway_run_starting(stream_id)
         raise
@@ -841,14 +855,16 @@ GATEWAY_REATTACH_MAX_POLL_FAILURES = 150
 _REATTACH_SCAN_HEAD_BYTES = 16 * 1024
 
 
-def _record_gateway_run(session_id: str, stream_id: str, run_id: str, **extra) -> None:
-    """Persist the gateway run id on the pending turn so a restarted WebUI can reattach."""
+def _record_gateway_run(session_id: str, stream_id: str, run_id: str, request=None, **extra) -> None:
+    """Persist the run id (or, before admission, the exact request) so a restarted WebUI can reattach."""
     try:
         with _get_session_agent_lock(session_id):
             session = get_session(session_id)
             if not _stream_writeback_is_current(session, stream_id):
                 return
             session.gateway_run = {"run_id": run_id, "stream_id": stream_id, **extra}
+            if not run_id:
+                session.gateway_run["request"] = request
             session.save(touch_updated_at=False)
     except Exception:
         logger.warning("Failed to persist gateway run %s for session %s", run_id, session_id, exc_info=True)
@@ -926,11 +942,8 @@ def resume_gateway_runs_after_restart() -> list[str]:
     Call before serving so stale-pending repair does not mark these turns interrupted.
     """
     from api import models as _models
-    from api.config import get_config
 
     try:
-        if not webui_gateway_chat_enabled(get_config()):
-            return []
         candidates = _sidecars_with_active_stream(_models.SESSION_DIR)
     except Exception:
         logger.warning("gateway reattach: could not scan session sidecars", exc_info=True)
@@ -969,8 +982,8 @@ def _resume_gateway_run_for_session(session) -> bool:
 
     run = (session.gateway_run if session is not None else None) or {}
     stream_id = str(run.get("stream_id") or "")
-    run_id = str(run.get("run_id") or "").strip()
-    if not stream_id or not run_id or session.active_stream_id != stream_id:
+    # A persisted run is the authority whatever the process default backend is.
+    if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
         return False
     sid = session.session_id
     # URL and key come together from the session's profile, never the process default.
@@ -991,7 +1004,7 @@ def _resume_gateway_run_for_session(session) -> bool:
             "model_provider": session.model_provider,
             "goal_related": bool(run.get("goal_related")),
             "regeneration": bool(run.get("regeneration")),
-            "reattach_run_id": run_id,
+            "reattach_run": run,
             "reattach_endpoint": endpoint,
         },
         name=f"gateway-reattach-{stream_id[:12]}",
@@ -1108,7 +1121,7 @@ def _run_gateway_chat_streaming(
     model_provider=None,
     goal_related=False,
     regeneration=False,
-    reattach_run_id=None,
+    reattach_run=None,
     reattach_endpoint=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
@@ -1207,7 +1220,7 @@ def _run_gateway_chat_streaming(
         except Exception:
             _gw_overrides = {}
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
-        _use_runs_api = bool(reattach_run_id) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
+        _use_runs_api = bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
             runs_api_pending_marked = False
@@ -1257,10 +1270,22 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+            record_run = lambda run_id, request=None: _record_gateway_run(
+                session_id, stream_id, run_id, request=request,
+                regeneration=bool(regeneration), goal_related=bool(goal_related),
+            )
             try:
-                if reattach_run_id:
+                if reattach_run:
+                    run_id = str(reattach_run.get("run_id") or "").strip()
+                    if not run_id:
+                        # Crashed between admission and saving the id: the same key returns the original run.
+                        run_id = _admit_gateway_run(
+                            f"{base_url.rstrip('/')}/v1/runs", _gateway_run_headers(session_id, api_key),
+                            reattach_run["request"], stream_id,
+                        )
+                        record_run(run_id)
                     final_text, usage = _await_gateway_run_result(
-                        session_id, stream_id, reattach_run_id, base_url, api_key,
+                        session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event,
                         cancel_event=cancel_event,
                     )
@@ -1274,11 +1299,7 @@ def _run_gateway_chat_streaming(
                         cfg=cfg,
                         session=s,
                         active_provider=(model_provider or ""),
-                        on_run_id=lambda run_id: _record_gateway_run(
-                            session_id, stream_id, run_id,
-                            regeneration=bool(regeneration),
-                            goal_related=bool(goal_related),
-                        ),
+                        on_run_id=record_run,
                     )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(

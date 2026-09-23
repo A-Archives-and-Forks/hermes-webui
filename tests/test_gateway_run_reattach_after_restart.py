@@ -177,15 +177,11 @@ def test_reattach_surfaces_pending_approval_once(isolated_sessions, monkeypatch)
     assert _saved(sid)["messages"][-1]["content"] == "approved and done"
 
 
-@pytest.mark.parametrize("case", ["legacy_backend", "no_gateway_run"])
-def test_nothing_to_reattach_is_left_to_stale_pending_repair(isolated_sessions, monkeypatch, case):
+def test_nothing_to_reattach_is_left_to_stale_pending_repair(isolated_sessions, monkeypatch):
     sid, stream_id = _orphaned_gateway_turn()
-    if case == "legacy_backend":
-        monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND")
-    else:
-        s = models.Session.load(sid)
-        s.gateway_run = None
-        s.save()
+    s = models.Session.load(sid)
+    s.gateway_run = None
+    s.save()
     monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda *a, **k: pytest.fail("must not poll"))
     assert gateway_chat.resume_gateway_runs_after_restart() == []
     assert stream_id not in STREAMS
@@ -269,8 +265,12 @@ def test_reattach_skips_idle_sidecars_without_parsing_them(isolated_sessions, mo
     assert sid in loaded
 
 
-def test_reattach_resolves_gateway_from_the_session_profile(isolated_sessions, monkeypatch):
-    """The process may restart under another default profile; poll the session profile's gateway."""
+@pytest.mark.parametrize("default_backend", ["gateway", "local"])
+def test_reattach_resolves_gateway_from_the_session_profile(isolated_sessions, monkeypatch, default_backend):
+    """The process may restart under another default profile, even a local one; poll the session profile's gateway."""
+    if default_backend == "local":
+        monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND")
+        monkeypatch.delenv("HERMES_WEBUI_GATEWAY_USE_RUNS_API")
     sid, stream_id = _orphaned_gateway_turn()
     s = models.Session.load(sid)
     s.profile = "work"
@@ -295,8 +295,66 @@ def test_reattach_resolves_gateway_from_the_session_profile(isolated_sessions, m
     _wait_for_reattach_threads()
 
     assert scopes == ["work"]
-    assert {(b, k) for b, k, _ in seen} == {("http://work-gateway:8642", "work-key")}
-    assert _saved(sid)["messages"][-1]["content"] == "answer"
+    assert {(b, k, r) for b, k, r in seen} == {("http://work-gateway:8642", "work-key", "run_survivor")}
+    saved = _saved(sid)
+    assert saved["messages"][-1]["content"] == "answer"
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
+
+
+def test_crash_after_admission_before_run_id_saved_replays_the_same_admission(isolated_sessions, monkeypatch):
+    s = new_session()
+    stream_id = "stream-admitted"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "long task"
+    s.pending_attachments = []
+    s.pending_started_at = 1.0
+    s.save()
+    posts = []
+
+    class Crash(BaseException):
+        pass
+
+    def fake_urlopen(req, timeout=None):
+        assert req.get_method() == "POST"
+        posts.append((req.get_header("Idempotency-key"), req.data))
+        return io.BytesIO(b'{"run_id":"run_original","replayed":%s}' % (b"true" if len(posts) > 1 else b"false"))
+
+    real_record = gateway_chat._record_gateway_run
+
+    def record_then_die(session_id, stream_id, run_id, **kw):
+        if run_id:
+            raise Crash  # process killed after the POST response, before the id is saved
+        real_record(session_id, stream_id, run_id, **kw)
+
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gateway_chat, "_record_gateway_run", record_then_die)
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+    with pytest.raises(Crash):
+        gateway_chat._run_gateway_runs_api_streaming(
+            s.session_id, "long task", "test-model", "/tmp", stream_id, "http://gateway.local", "", [], {},
+            put_gateway_event=lambda *a: None, cancel_event=threading.Event(), session=s,
+            on_run_id=lambda run_id, **kw: gateway_chat._record_gateway_run(s.session_id, stream_id, run_id, **kw),
+        )
+    monkeypatch.setattr(gateway_chat, "_record_gateway_run", real_record)
+    models.SESSIONS.clear()
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    ACTIVE_RUNS.pop(stream_id, None)
+    assert _saved(s.session_id)["gateway_run"]["run_id"] == ""
+    seen = _poll_until_completed(monkeypatch)
+
+    assert gateway_chat.resume_gateway_runs_after_restart() == [s.session_id]
+    _wait_for_reattach_threads()
+
+    # Replayed with the same key and byte-identical body, so the gateway returns the original run.
+    assert len(posts) == 2 and posts[0] == posts[1] == (f"webui-{stream_id}", posts[0][1])
+    assert {r for _b, _k, r in seen} == {"run_original"}
+    saved = _saved(s.session_id)
+    assert saved["messages"][-1]["content"] == "answer"
+    assert not any(m.get("_error") for m in saved["messages"])
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
 
 
 @pytest.mark.parametrize("code, message", [

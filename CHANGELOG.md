@@ -33,6 +33,11 @@
   explicitly saved language (including English) still wins, and legacy `settings.json` files that
   already hold `"en"` keep English. Reading the browser language is guarded, so an environment where
   `navigator` throws falls back cleanly. (#7622, #7730 by @happy5318)
+- **The live model list for a custom provider respects its `models:` allowlist, without treating
+  per-model metadata as one.** `/api/models/live` filters a custom provider's live catalog to its
+  configured `models:` when that is a list, or when it is a mapping with `discover_models: false`.
+  A mapping of per-model settings (the shape `hermes setup` writes) keeps the full live catalog, as
+  the Agent does. (#7165 by @happy5318)
 - **`MEDIA:` links wrapped in inline code no longer 404.** Every `MEDIA:` capture site (renderer,
   streaming parser, TTS stripper, session-media authorization and snapshot capture, seven in all)
   swallowed the closing backtick of `` `MEDIA:/path` `` into the path, so the file lookup and the

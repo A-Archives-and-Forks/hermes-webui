@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **A consumed mid-turn `/steer` no longer leaves its out-of-band wrapper in the settled chat (#7600).**
+  A `/steer` reaches the agent as an `[OUT-OF-BAND USER MESSAGE …]` block appended to the turn's
+  last tool result. After the turn settled, that wrapper stayed visible in the chat transcript. The
+  settled-transcript writeback now scrubs the consumed wrapper from the rows it is built from.
+  (#7610 by @webtecnica)
+
 - **The live stream reports which model actually served the turn.** A new additive `runtime_model`
   SSE event carries the model (and provider, when known) that the Agent reported while producing
   output, separately from the model that was requested. It is journaled for replay, is exposed as

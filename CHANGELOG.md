@@ -24,6 +24,11 @@
 
 ### Fixed
 
+- **A first visit now uses the browser's language.** The server stores "no preference" as `null`
+  instead of defaulting to `"en"`, so a first-time visitor gets `navigator.language` while an
+  explicitly saved language (including English) still wins, and legacy `settings.json` files that
+  already hold `"en"` keep English. Reading the browser language is guarded, so an environment where
+  `navigator` throws falls back cleanly. (#7622, #7730 by @happy5318)
 - **`MEDIA:` links wrapped in inline code no longer 404.** Every `MEDIA:` capture site (renderer,
   streaming parser, TTS stripper, session-media authorization and snapshot capture, seven in all)
   swallowed the closing backtick of `` `MEDIA:/path` `` into the path, so the file lookup and the

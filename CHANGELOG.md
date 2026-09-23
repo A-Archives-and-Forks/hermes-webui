@@ -28,6 +28,10 @@
 
 ### Fixed
 
+- **Delegated subagent sessions show inside their parent's project.** With a project selected in the
+  sidebar, subagent sessions disappeared because `state.db` never gives them a `project_id`. Only
+  subagent rows now inherit their parent's project, resolved once per lineage, so forks keep their
+  own "No project" assignment and deep lineages stay fast. (#7765 by @carlotestor)
 - **Saving a cron job with the model picker at "Default" keeps its provider-only pin.** Editing a job
   pinned to a provider with no model (the usual shape for a self-hosted OpenAI-compatible router)
   sent `provider: null` and wiped the pin. The editor now preserves a provider-only pin when the

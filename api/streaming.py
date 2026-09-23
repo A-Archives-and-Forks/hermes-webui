@@ -9791,6 +9791,84 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    def _register_agent_if_current(candidate, cache_signature=None):
+        nonlocal agent
+        # Every constructor, including both credential self-heal branches, must
+        # share the Stop publication edge. CANCEL_FLAGS may already be detached;
+        # the worker-retained event and stream membership remain authoritative.
+        with STREAMS_LOCK:
+            cancelled = cancel_event.is_set() or stream_id not in STREAMS
+            if not cancelled:
+                AGENT_INSTANCES[stream_id] = candidate
+                # Check and publication share one admission, not a check followed
+                # by an unlocked cache/lifecycle write that could undo Stop.
+                if cache_signature is not None:
+                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    with SESSION_AGENT_CACHE_LOCK:
+                        SESSION_AGENT_CACHE[session_id] = (candidate, cache_signature)
+                        SESSION_AGENT_CACHE.move_to_end(session_id)
+                if not ephemeral:
+                    try:
+                        # Pure in-memory bookkeeping; no Agent/provider call.
+                        from api.session_lifecycle import register_agent
+                        register_agent(session_id, candidate)
+                    except Exception:
+                        logger.debug("Lifecycle register_agent failed for session %s", session_id, exc_info=True)
+        if not cancelled:
+            return True
+        # A cache hit is a borrowed reusable object, not this worker's private
+        # candidate. Stop may already have let a successor reuse it. Rejected
+        # cache-hit admission must not interrupt that other turn.
+        if cache_signature is None and not ephemeral:
+            if agent is candidate:
+                agent = None
+            return False
+        # Newly constructed candidates were never published on this failed
+        # admission; they cannot have been borrowed by a successor from us.
+        # No Agent call, session persistence or SSE write under registry locks.
+        try:
+            candidate.interrupt("Cancelled before start")
+        except Exception:
+            logger.debug("Failed to interrupt cancelled candidate agent")
+        return False
+
+    def _agent_can_invoke(candidate):
+        nonlocal agent
+        # Prompt preparation and LRU cleanup can yield after registration. Admit
+        # each invocation again at its point of use; never hold registry locks
+        # across run_conversation or interrupt. A later Stop interrupts the
+        # already-admitted invocation through the registered Agent as usual.
+        from api.config import (
+            SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK,
+            SESSION_WRITEBACK_OWNERS, SESSION_WRITEBACK_OWNERS_LOCK,
+        )
+        with STREAMS_LOCK:
+            current = (not cancel_event.is_set() and stream_id in STREAMS
+                       and AGENT_INSTANCES.get(stream_id) is candidate)
+            if not current:
+                if AGENT_INSTANCES.get(stream_id) is candidate:
+                    AGENT_INSTANCES.pop(stream_id, None)
+                # Agent identity is not turn identity: a successor can reuse the
+                # same cached object. Use the existing cancellation-surviving
+                # ownership record, holding its lock through cache retirement.
+                # Missing ownership also fails closed (successor may have ended).
+                with SESSION_WRITEBACK_OWNERS_LOCK:
+                    if SESSION_WRITEBACK_OWNERS.get(session_id) == stream_id:
+                        with SESSION_AGENT_CACHE_LOCK:
+                            entry = SESSION_AGENT_CACHE.get(session_id)
+                            if entry and entry[0] is candidate:
+                                SESSION_AGENT_CACHE.pop(session_id, None)
+                                # Dirty memory segments keep their original owner.
+                                from api.session_lifecycle import unregister_agent
+                                unregister_agent(session_id)
+        # This invocation never started. Stop owns any required interrupt of the
+        # running Agent; a late duplicate interrupt could hit its new borrower.
+        # Drop our local borrowed handle too: final Steer drain must not reach
+        # the successor through the old worker's fallback `agent` reference.
+        if not current and agent is candidate:
+            agent = None
+        return current
+
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -11013,6 +11091,7 @@ def _run_agent_streaming(
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
+            _cache_new_agent = False
             if ephemeral:
                 agent = _AIAgent(**_agent_kwargs)
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
@@ -11055,14 +11134,6 @@ def _run_agent_streaming(
                                 session_id,
                                 _cached_agent_session_identity(_cached_agent),
                             )
-                    if agent is not None:
-                        # Reopened/cache-hit sessions must register the agent
-                        # so later lifecycle commits can find it.
-                        try:
-                            from api.session_lifecycle import register_agent
-                            register_agent(session_id, agent)
-                        except Exception:
-                            logger.debug("Lifecycle register_agent failed for cached session %s", session_id, exc_info=True)
 
                 if _identity_mismatch_entry is not None:
                     try:
@@ -11132,81 +11203,64 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
-                    # Register the new agent with the memory lifecycle so
-                    # its commit_memory_session() can be found later.
-                    try:
-                        from api.session_lifecycle import register_agent
-                        register_agent(session_id, agent)
-                    except Exception:
-                        logger.debug("Lifecycle register_agent failed for new session %s", session_id, exc_info=True)
-                    _evicted_items = []
-                    # Snapshot the set of session_ids with a LIVE agent worker
-                    # BEFORE taking SESSION_AGENT_CACHE_LOCK, so LRU eviction never
-                    # closes an agent mid-run AND we never nest ACTIVE_RUNS_LOCK
-                    # inside SESSION_AGENT_CACHE_LOCK (avoids any lock-ordering
-                    # deadlock). A cancel/reconnect can drop STREAMS while the
-                    # worker is still unwinding or blocked in a provider call, so
-                    # ACTIVE_RUNS (worker lifecycle) is the authoritative liveness
-                    # signal, not STREAMS. (#3536 review round 2)
-                    _active_sids = set()
-                    try:
-                        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
-                        with ACTIVE_RUNS_LOCK:
-                            for _entry in (ACTIVE_RUNS or {}).values():
-                                _sid = (_entry or {}).get("session_id")
-                                if _sid:
-                                    _active_sids.add(_sid)
-                    except Exception:
-                        _active_sids = set()
-                    with SESSION_AGENT_CACHE_LOCK:
-                        SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
-                        SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
-                        from api.config import SESSION_AGENT_CACHE_MAX
-                        # Evict the oldest INACTIVE entries first. Walk LRU order
-                        # (front = oldest); skip any session with a live run. If
-                        # every over-cap entry is active, leave the cache
-                        # temporarily above cap rather than close a live worker's
-                        # agent — a later insertion/finalization trims it once the
-                        # run ends.
-                        while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
-                            _evictable_sid = None
-                            for _sid in list(SESSION_AGENT_CACHE.keys()):
-                                if _sid not in _active_sids:
-                                    _evictable_sid = _sid
-                                    break
-                            if _evictable_sid is None:
-                                break  # all over-cap entries are active; defer
-                            evicted_entry = SESSION_AGENT_CACHE.pop(_evictable_sid)
-                            _evicted_items.append((_evictable_sid, evicted_entry))
-                    # Commit and close evicted agents outside the cache lock so
-                    # concurrent cache users are not blocked by provider I/O.
-                    for _evicted_sid, _evicted_entry in _evicted_items:
-                        try:
-                            _evicted_agent = _evicted_entry[0] if isinstance(_evicted_entry, tuple) else None
-                            _close_evicted_agent_at_session_boundary(_evicted_sid, _evicted_agent)
-                        except Exception:
-                            logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
-                        logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
-                    logger.debug('[webui] Created new agent for session %s', session_id)
+                    _cache_new_agent = True
 
-            # Stop may already have detached CANCEL_FLAGS while initialization
-            # was in flight. The worker-owned event and stream membership, not
-            # the removable registry entry, fence registration with cancellation.
-            with STREAMS_LOCK:
-                _cancelled_before_start = cancel_event.is_set() or stream_id not in STREAMS
-                if not _cancelled_before_start:
-                    AGENT_INSTANCES[stream_id] = agent
-            if _cancelled_before_start:
-                # Interrupt, persistence and event writes must not hold the
-                # registry lock (the session lock can be held by another caller).
-                try:
-                    agent.interrupt("Cancelled before start")
-                except Exception:
-                    logger.debug("Failed to interrupt agent before start")
+            if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
                 with _agent_lock:
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+
+            # Cache publication is already fenced with Stop above. Keep LRU
+            # eviction and any memory-provider close outside the stream lock.
+            if _cache_new_agent:
+                _evicted_items = []
+                # Snapshot the set of session_ids with a LIVE agent worker
+                # BEFORE taking SESSION_AGENT_CACHE_LOCK, so LRU eviction never
+                # closes an agent mid-run AND we never nest ACTIVE_RUNS_LOCK
+                # inside SESSION_AGENT_CACHE_LOCK (avoids any lock-ordering
+                # deadlock). A cancel/reconnect can drop STREAMS while the
+                # worker is still unwinding or blocked in a provider call, so
+                # ACTIVE_RUNS (worker lifecycle) is the authoritative liveness
+                # signal, not STREAMS. (#3536 review round 2)
+                _active_sids = set()
+                try:
+                    from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
+                    with ACTIVE_RUNS_LOCK:
+                        for _entry in (ACTIVE_RUNS or {}).values():
+                            _sid = (_entry or {}).get("session_id")
+                            if _sid:
+                                _active_sids.add(_sid)
+                except Exception:
+                    _active_sids = set()
+                with SESSION_AGENT_CACHE_LOCK:
+                    from api.config import SESSION_AGENT_CACHE_MAX
+                    # Evict the oldest INACTIVE entries first. Walk LRU order
+                    # (front = oldest); skip any session with a live run. If
+                    # every over-cap entry is active, leave the cache
+                    # temporarily above cap rather than close a live worker's
+                    # agent — a later insertion/finalization trims it once the
+                    # run ends.
+                    while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
+                        _evictable_sid = None
+                        for _sid in list(SESSION_AGENT_CACHE.keys()):
+                            if _sid not in _active_sids:
+                                _evictable_sid = _sid
+                                break
+                        if _evictable_sid is None:
+                            break  # all over-cap entries are active; defer
+                        evicted_entry = SESSION_AGENT_CACHE.pop(_evictable_sid)
+                        _evicted_items.append((_evictable_sid, evicted_entry))
+                # Commit and close evicted agents outside the cache lock so
+                # concurrent cache users are not blocked by provider I/O.
+                for _evicted_sid, _evicted_entry in _evicted_items:
+                    try:
+                        _evicted_agent = _evicted_entry[0] if isinstance(_evicted_entry, tuple) else None
+                        _close_evicted_agent_at_session_boundary(_evicted_sid, _evicted_agent)
+                    except Exception:
+                        logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
+                    logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
+                logger.debug('[webui] Created new agent for session %s', session_id)
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
@@ -11467,6 +11521,11 @@ def _run_agent_streaming(
                 )
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)
+            if not _agent_can_invoke(agent):
+                with _agent_lock:
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                put('cancel', _cancel_event_payload('Cancelled by user'))
+                return
             result = agent.run_conversation(**_run_conversation_kwargs)
             _remember_pending_steer_result(result)
             _active_turn_identity = _resolve_active_turn_authority(
@@ -11949,8 +12008,6 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                             agent = _AIAgent(**_agent_kwargs)
-                            with STREAMS_LOCK:
-                                AGENT_INSTANCES[stream_id] = agent
                             _agent_sig = _compute_agent_cache_signature(
                                 resolved_model,
                                 resolved_api_key,
@@ -11967,10 +12024,11 @@ def _run_agent_streaming(
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
                             )
-                            from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
-                            with _SAC_L:
-                                _SAC[session_id] = (agent, _agent_sig)
-                                _SAC.move_to_end(session_id)
+                            if not _register_agent_if_current(agent, _agent_sig):
+                                # Returned-error settlement already owns _agent_lock.
+                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                put('cancel', _cancel_event_payload('Cancelled by user'))
+                                return
                             # Retry the conversation once with fresh credentials
                             _self_healed = True
                             _token_sent = False
@@ -12003,6 +12061,11 @@ def _run_agent_streaming(
                                 _result_partial_pre_call_context = list(
                                     _heal_context_messages
                                 )
+                                if not _agent_can_invoke(agent):
+                                    # Returned-error settlement already owns the lock.
+                                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                                    return
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
@@ -13301,8 +13364,6 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                     _heal_agent = _AIAgent(**_heal_kwargs)
-                    with STREAMS_LOCK:
-                        AGENT_INSTANCES[stream_id] = _heal_agent
                     _agent_sig = _compute_agent_cache_signature(
                         resolved_model,
                         resolved_api_key,
@@ -13319,10 +13380,11 @@ def _run_agent_streaming(
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
                     )
-                    from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
-                    with _SAC2_L:
-                        _SAC2[session_id] = (_heal_agent, _agent_sig)
-                        _SAC2.move_to_end(session_id)
+                    if not _register_agent_if_current(_heal_agent, _agent_sig):
+                        with _agent_lock:
+                            _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        return
                     # Retry the conversation
                     _token_sent = False
                     try:
@@ -13354,6 +13416,11 @@ def _run_agent_streaming(
                         _result_partial_pre_call_context = list(
                             _heal_context_messages
                         )
+                        if not _agent_can_invoke(_heal_agent):
+                            with _agent_lock:
+                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                            put('cancel', _cancel_event_payload('Cancelled by user'))
+                            return
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         _remember_pending_steer_result(_heal_result)
                         _active_turn_identity = _resolve_active_turn_authority(

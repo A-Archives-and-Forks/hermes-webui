@@ -1107,6 +1107,14 @@ _METADATA_PREFIX_MAX_BYTES = 1024 * 1024
 #: even when the stop key sits at 2 KB.
 _METADATA_PREFIX_FIRST_STAGE_BYTES = 64 * 1024
 
+# Marks a sidecar as written by the CURRENT writer contract, where the
+# persisted `message_count` equals len(messages) by construction (both keys
+# land in the same atomic write). save()'s bounded-prefix shrink check trusts
+# a persisted count ONLY when this marker sits next to it in the file; see
+# _prefix_message_count(). Bump the value whenever the writer contract changes
+# meaning, so counts from an older contract fall back to the full parse.
+_MESSAGE_COUNT_MARKER = 1
+
 
 def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES):
     """Read only the metadata portion before the large arrays.
@@ -1505,6 +1513,16 @@ class Session:
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
         meta['message_count'] = len(self.messages or [])
+        # _mc_v marks this file as written by the current writer contract,
+        # where `message_count` equals len(messages) by construction and both
+        # keys land in the same atomic write. save()'s shrink guard takes the
+        # bounded-prefix shortcut ONLY for marked files; an unmarked count
+        # (a legacy pre-#5854 sidecar, a sidecar materialized by an older
+        # recovery writer, any foreign writer) gets the full parse, so a stale
+        # count from outside this contract can never read a real shrink as a
+        # growth and skip the #1558 backup. One save re-marks the file, so the
+        # fast path still covers steady state.
+        meta['_mc_v'] = _MESSAGE_COUNT_MARKER
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -1517,7 +1535,7 @@ class Session:
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
@@ -1562,8 +1580,11 @@ class Session:
                 #
                 # Every unknown falls through to the full read + parse below: a
                 # legacy (pre-#5854) sidecar whose count is not in the prefix, a
-                # corrupt or truncated prefix, a file with no top-level `messages`
-                # key at all, or metadata alone that overflows the budget.
+                # count written without the current writer's _mc_v marker (an
+                # older writer's count can be stale relative to the messages
+                # array next to it), a corrupt or truncated prefix, a file with
+                # no top-level `messages` key at all, or metadata alone that
+                # overflows the budget.
                 # Fail-open is the contract -- never "assume no shrink".
                 existing_text = None
                 existing_msg_count = _prefix_message_count(self.path)
@@ -4274,6 +4295,9 @@ def _sidecar_stat_signature(path):
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
 
 
+_MESSAGE_COUNT_MARKER = 1
+
+
 def _prefix_message_count(path):
     """The sidecar's own persisted ``message_count``, from a bounded prefix.
 
@@ -4290,11 +4314,20 @@ def _prefix_message_count(path):
     skip the backup. The count is part of the bytes, so any rewrite of them
     rewrites it too.
 
+    Gated on the writer marker (``_mc_v``, review 2026-09-22): a count is only
+    trusted when the SAME write that produced the messages array also vouched
+    for the count. Anything unmarked -- a legacy pre-#5854 sidecar, a sidecar
+    materialized by an older recovery writer whose denormalized count could be
+    stale against its rows, any foreign writer -- returns None and the caller
+    falls back to the full read + parse. After one save by the current writer
+    the file carries the marker and the fast path resumes.
+
     Returns None -- meaning "the caller must fall back to the full read +
-    parse" -- for every shape that does not carry a usable count: a legacy
-    pre-#5854 sidecar (scenes serialized before the count), a file with no
-    top-level ``messages`` key at all, a corrupt or truncated prefix, an
-    unreadable path, or metadata alone that overflows the budget.
+    parse" -- for every shape that does not carry a usable MARKED count: an
+    unmarked or wrong-marker file, a legacy sidecar whose count is not in the
+    prefix, a file with no top-level ``messages`` key at all, a corrupt or
+    truncated prefix, an unreadable path, or metadata alone that overflows the
+    budget.
     """
     try:
         raw = _read_metadata_json_prefix(path)
@@ -4307,6 +4340,8 @@ def _prefix_message_count(path):
     except (json.JSONDecodeError, ValueError):
         return None
     if not isinstance(parsed, dict):
+        return None
+    if parsed.get('_mc_v') != _MESSAGE_COUNT_MARKER:
         return None
     return _parse_nonnegative_int(parsed.get('message_count'))
 

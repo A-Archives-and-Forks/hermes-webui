@@ -233,6 +233,72 @@ def test_file_changed_on_disk_without_a_count_still_backs_up_on_shrink(session_s
     assert len(json.loads(bak.read_text(encoding="utf-8"))["messages"]) == 6
 
 
+def test_unmarked_stale_count_from_a_foreign_writer_still_backs_up_on_shrink(session_store):
+    """A persisted count with no `_mc_v` marker is not trusted.
+
+    The exact shape review (nesquena-hermes, 2026-09-22) pinned: a sidecar
+    materialized by an OLDER writer can carry a count stale against the
+    messages array beside it (the recovery writer used to copy a denormalized
+    state.db count over real rows). Here the foreign file says 2 but really
+    holds 6; a save of 4 must not read that 2 as "the save grows the file" and
+    skip the #1558 backup. The marker gate makes the prefix reader refuse the
+    unmarked count, the full parse sees the real array, and the 6 messages
+    land in the `.bak`. Remove the gate in `_prefix_message_count` and this
+    test fails with no backup written.
+    """
+    s = _make(session_store, "x3", 3)
+    foreign = {"session_id": "x3", "title": "T", "workspace": str(session_store.parent),
+               "model": "glm", "created_at": 1.0, "updated_at": 2.0,
+               "message_count": 2, "messages": _msgs(6)}  # stale count, NO _mc_v
+    s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
+
+    s.messages = _msgs(4)
+    s.save()
+
+    bak = s.path.with_suffix(".json.bak")
+    assert bak.exists(), "an unmarked stale count must not hide the shrink"
+    assert len(json.loads(bak.read_text(encoding="utf-8"))["messages"]) == 6
+    assert len(M.Session.load("x3").messages) == 4
+
+
+def test_wrong_marker_version_still_backs_up_on_shrink(session_store):
+    """A count marked by a DIFFERENT writer contract is equally untrusted."""
+    s = _make(session_store, "x4", 3)
+    foreign = {"session_id": "x4", "title": "T", "workspace": str(session_store.parent),
+               "model": "glm", "created_at": 1.0, "updated_at": 2.0,
+               "_mc_v": M._MESSAGE_COUNT_MARKER + 1,
+               "message_count": 2, "messages": _msgs(6)}
+    s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
+
+    s.messages = _msgs(4)
+    s.save()
+
+    bak = s.path.with_suffix(".json.bak")
+    assert bak.exists(), "a count from another writer version must not hide the shrink"
+    assert len(json.loads(bak.read_text(encoding="utf-8"))["messages"]) == 6
+
+
+def test_first_save_remarks_the_file_and_the_fast_path_resumes(session_store, monkeypatch):
+    """The gate costs one full parse, once. After a save by the current writer
+    the file carries `_mc_v`, and the cheap prefix path is back in service."""
+    s = _make(session_store, "x5", 3)
+    foreign = {"session_id": "x5", "title": "T", "workspace": str(session_store.parent),
+               "model": "glm", "created_at": 1.0, "updated_at": 2.0,
+               "message_count": 2, "messages": _msgs(6)}  # unmarked foreign file
+    s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
+
+    s.messages = _msgs(6)
+    s.save()  # equal-count save; unmarked prefix count ignored, full parse, no shrink
+
+    assert json.loads(s.path.read_text(encoding="utf-8"))["_mc_v"] == M._MESSAGE_COUNT_MARKER
+
+    calls = _spy_full_reads(monkeypatch, s.path)
+    s.messages = _msgs(8)
+    s.save()
+    assert calls["n"] == 0, "a marked file must take the bounded-prefix path again"
+    assert not s.path.with_suffix(".json.bak").exists()
+
+
 def _tool_partial(ts=123):
     """The exact shape the #2592 collapse recognises (copied from its test)."""
     return {"role": "assistant", "content": "", "_partial": True, "timestamp": ts,
@@ -252,6 +318,7 @@ def test_collapse_self_heal_on_load_still_backs_up_the_pre_collapse_array(sessio
     fixture carries the count a real save() would have written."""
     doc = {"session_id": "h1", "title": "T", "workspace": str(session_store.parent),
            "model": "glm", "created_at": 1.0, "updated_at": 2.0,
+           "_mc_v": M._MESSAGE_COUNT_MARKER,
            "message_count": 5,
            "messages": [{"role": "user", "content": "run this"},
                         _tool_partial(), _tool_partial(), _tool_partial(),
@@ -290,7 +357,8 @@ def test_same_length_in_place_rewrite_inside_one_mtime_tick_still_backs_up(sessi
             "model": "glm", "created_at": 1.0, "updated_at": 2.0}
 
     def _render(n):
-        return json.dumps({**base, "message_count": n, "messages": _msgs(n)},
+        return json.dumps({**base, "_mc_v": M._MESSAGE_COUNT_MARKER,
+                           "message_count": n, "messages": _msgs(n)},
                           indent=2, ensure_ascii=False)
 
     width = max(len(_render(2)), len(_render(5)))

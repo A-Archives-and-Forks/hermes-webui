@@ -31,6 +31,11 @@
   and the settled scene was never saved. The cleanup now waits briefly for the pane's own open
   stream, then checks `/api/chat/stream/status` once, and falls back to the existing
   interrupted-stream recovery if that check fails. (#7749 by @franksong2702)
+- **A session's run journal can no longer be written out of order.** The journal writer reserved a
+  sequence number under the per-path lock, released it, and then appended, so two concurrent writers
+  could land sequence N+1 on disk before N and the replay reader would stop at the gap
+  (`replay_noncontiguous`). Sequence allocation and the physical append now happen under the same
+  existing lock. (#7751 by @franksong2702)
 - **A stopped chat can no longer publish or reuse its agent after Stop.** A worker that was
   cancelled could still publish its cached Agent or invoke it after Stop landed, and its late
   cleanup could close or evict the same Agent object a successor turn had just picked up. The initial

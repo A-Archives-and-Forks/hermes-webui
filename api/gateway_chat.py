@@ -839,6 +839,7 @@ _GATEWAY_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", 
 GATEWAY_REATTACH_POLL_INTERVAL = 2.0
 # Consecutive unreachable polls tolerated before the reattached turn is failed (~5 min at 2s).
 GATEWAY_REATTACH_MAX_POLL_FAILURES = 150
+_REATTACH_SCAN_HEAD_BYTES = 16 * 1024
 
 
 def _record_gateway_run(session_id: str, stream_id: str, run_id: str, **extra) -> None:
@@ -945,15 +946,12 @@ def resume_gateway_runs_after_restart() -> list[str]:
     try:
         if not webui_gateway_chat_enabled(get_config()):
             return []
-        entries = json.loads(_models.SESSION_INDEX_FILE.read_bytes())
+        candidates = _sidecars_with_active_stream(_models.SESSION_DIR)
     except Exception:
-        logger.debug("gateway reattach: no readable session index", exc_info=True)
+        logger.warning("gateway reattach: could not scan session sidecars", exc_info=True)
         return []
     resumed: list[str] = []
-    for entry in entries if isinstance(entries, list) else []:
-        if not isinstance(entry, dict) or not entry.get("active_stream_id"):
-            continue
-        sid = str(entry.get("session_id") or "")
+    for sid in candidates:
         try:
             if _resume_gateway_run_for_session(_models.Session.load_metadata_only(sid)):
                 resumed.append(sid)
@@ -962,6 +960,40 @@ def resume_gateway_runs_after_restart() -> list[str]:
     if resumed:
         logger.info("Reattached %d gateway run(s) that outlived the previous WebUI process", len(resumed))
     return resumed
+
+
+def _sidecars_with_active_stream(session_dir) -> list[str]:
+    """Session ids whose sidecar may still carry a pending turn.
+
+    Scans the sidecars rather than the derived index, which can lag a save.
+    A head read skips the common idle case without parsing the file.
+    """
+    ids = []
+    for path in sorted(session_dir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            with path.open("rb") as fp:
+                head = fp.read(_REATTACH_SCAN_HEAD_BYTES)
+        except OSError:
+            continue
+        if b'"active_stream_id": null' not in head:
+            ids.append(path.stem)
+    return ids
+
+
+def _gateway_endpoint_for_reattach(session, run: dict) -> tuple[str, str]:
+    """Resolve the gateway that owns ``run`` using the session's profile, not the process default."""
+    from api import profiles as _profiles
+    from api.config import get_config
+
+    with _profiles.profile_scope_for_detached_worker(
+        getattr(session, "profile", None), "gateway reattach", logger_override=logger,
+    ):
+        base_url = _gateway_base_url(get_config())
+        api_key = _gateway_api_key()
+    # The run lives on the gateway that accepted it, even if config changed since.
+    return str(run.get("base_url") or base_url).rstrip("/"), api_key
 
 
 def _resume_gateway_run_for_session(session) -> bool:
@@ -973,6 +1005,7 @@ def _resume_gateway_run_for_session(session) -> bool:
     if not stream_id or not run_id or run.get("stream_id") != stream_id:
         return False
     sid = session.session_id
+    endpoint = _gateway_endpoint_for_reattach(session, run)
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
@@ -995,6 +1028,7 @@ def _resume_gateway_run_for_session(session) -> bool:
             "goal_related": bool(run.get("goal_related")),
             "regeneration": bool(run.get("regeneration")),
             "reattach_run_id": run_id,
+            "reattach_endpoint": endpoint,
         },
         name=f"gateway-reattach-{stream_id[:12]}",
         daemon=True,
@@ -1111,6 +1145,7 @@ def _run_gateway_chat_streaming(
     goal_related=False,
     regeneration=False,
     reattach_run_id=None,
+    reattach_endpoint=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1197,8 +1232,11 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
-        base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
+        if reattach_endpoint:
+            base_url, api_key = reattach_endpoint
+        else:
+            base_url = _gateway_base_url(cfg)
+            api_key = _gateway_api_key()
         try:
             from api.config import _main_model_request_overrides
             _gw_overrides = _main_model_request_overrides(
@@ -1280,6 +1318,7 @@ def _run_gateway_chat_streaming(
                         active_provider=(model_provider or ""),
                         on_run_id=lambda run_id: _record_gateway_run(
                             session_id, stream_id, run_id,
+                            base_url=base_url,
                             regeneration=bool(regeneration),
                             goal_related=bool(goal_related),
                         ),

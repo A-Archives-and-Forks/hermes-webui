@@ -113,6 +113,7 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
     assert captured["post_headers"]["Idempotency-key"] == f"webui-{stream_id}"
     assert captured["persisted_at_events"]["run_id"] == "run_live"
     assert captured["persisted_at_events"]["stream_id"] == stream_id
+    assert captured["persisted_at_events"]["base_url"] == "http://gateway.local"
     saved = json.loads((isolated_sessions / f"{s.session_id}.json").read_text())
     assert saved["gateway_run"] is None
     assert saved["active_stream_id"] is None
@@ -253,3 +254,110 @@ def test_cancel_still_stops_a_reattached_run(isolated_sessions, monkeypatch):
     assert saved["active_stream_id"] is None
     assert saved["gateway_run"] is None
     assert not any(m.get("content") == "long task" and m.get("role") == "assistant" for m in saved["messages"])
+
+
+def _poll_until_completed(monkeypatch, seen):
+    def fake_status(base_url, api_key, run_id):
+        seen.append((base_url, api_key, run_id))
+        return {"run_id": run_id, "status": "completed", "output": "answer"}
+
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", fake_status)
+
+
+@pytest.mark.parametrize("index_state", ["missing", "stale", "corrupt"])
+def test_reattach_does_not_depend_on_the_session_index(isolated_sessions, monkeypatch, index_state):
+    sid, _stream_id = _orphaned_gateway_turn()
+    index = isolated_sessions / "_index.json"
+    if index_state == "missing":
+        index.unlink(missing_ok=True)
+    elif index_state == "stale":
+        # Sidecar saved, index update lost: the row still shows no active stream.
+        index.write_text(json.dumps([{"session_id": sid, "active_stream_id": None}]))
+    else:
+        index.write_text("{not json")
+    seen = []
+    _poll_until_completed(monkeypatch, seen)
+
+    assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
+    _wait_for_reattach_threads()
+
+    saved = json.loads((isolated_sessions / f"{sid}.json").read_text())
+    assert saved["messages"][-1]["content"] == "answer"
+    assert saved["active_stream_id"] is None
+
+
+def test_reattach_skips_idle_sidecars_without_parsing_them(isolated_sessions, monkeypatch):
+    idle = new_session()
+    idle.messages = [{"role": "user", "content": "x", "timestamp": 1.0}]
+    idle.save()
+    sid, _ = _orphaned_gateway_turn()
+    loaded = []
+    real_load = models.Session.load_metadata_only
+    monkeypatch.setattr(
+        models.Session, "load_metadata_only",
+        classmethod(lambda cls, s, **kw: loaded.append(s) or real_load.__func__(cls, s, **kw)),
+    )
+    _poll_until_completed(monkeypatch, [])
+
+    assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
+    _wait_for_reattach_threads()
+    assert idle.session_id not in loaded
+    assert sid in loaded
+
+
+def test_reattach_resolves_gateway_from_the_session_profile(isolated_sessions, monkeypatch):
+    """The process may restart under another default profile; poll the session profile's gateway."""
+    import contextlib
+    import os
+    from api import profiles
+
+    sid, stream_id = _orphaned_gateway_turn()
+    s = models.Session.load(sid)
+    s.profile = "work"
+    s.save(touch_updated_at=False)
+    models.SESSIONS.clear()
+    scopes = []
+
+    @contextlib.contextmanager
+    def fake_scope(profile_name, purpose="", logger_override=None):
+        scopes.append(profile_name)
+        env = {"work": ("http://work-gateway:8642", "work-key")}.get(profile_name)
+        old = {k: os.environ.get(k) for k in ("HERMES_WEBUI_GATEWAY_BASE_URL", "HERMES_WEBUI_GATEWAY_API_KEY")}
+        if env:
+            os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"], os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] = env
+        try:
+            yield
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "default-key")
+    seen = []
+    _poll_until_completed(monkeypatch, seen)
+
+    assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
+    _wait_for_reattach_threads()
+
+    assert scopes == ["work"]
+    assert {(b, k) for b, k, _ in seen} == {("http://work-gateway:8642", "work-key")}
+    saved = json.loads((isolated_sessions / f"{sid}.json").read_text())
+    assert saved["messages"][-1]["content"] == "answer"
+
+
+def test_reattach_polls_the_gateway_that_accepted_the_run(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn()
+    s = models.Session.load(sid)
+    s.gateway_run = {**s.gateway_run, "base_url": "http://accepted-gateway:8642/"}
+    s.save(touch_updated_at=False)
+    models.SESSIONS.clear()
+    seen = []
+    _poll_until_completed(monkeypatch, seen)
+
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert {b for b, _k, _r in seen} == {"http://accepted-gateway:8642"}

@@ -28,6 +28,11 @@
 
 ### Fixed
 
+- **A first visit now uses the browser's language.** The server stores "no preference" as `null`
+  instead of defaulting to `"en"`, so a first-time visitor gets `navigator.language` while an
+  explicitly saved language (including English) still wins, and legacy `settings.json` files that
+  already hold `"en"` keep English. Reading the browser language is guarded, so an environment where
+  `navigator` throws falls back cleanly. (#7622, #7730 by @happy5318)
 - **The live model list for a custom provider respects its `models:` allowlist, without treating
   per-model metadata as one.** `/api/models/live` filters a custom provider's live catalog to its
   configured `models:` when that is a list, or when it is a mapping with `discover_models: false`.

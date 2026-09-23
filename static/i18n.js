@@ -26983,15 +26983,68 @@ function resolveLocale(lang) {
 
 /**
  * Resolve locale with precedence:
- * 1) primary (typically server setting)
- * 2) fallback (typically localStorage)
- * 3) English
- * @param {string} primary
- * @param {string} fallback
+ *   1) primary     (typically server setting)
+ *   2) fallback    (typically localStorage)
+ *   3) fallback2   (typically browser navigator hint — first-visit only)
+ *   4) 'en'        (final fallback)
+ *
+ * Resolve a language preference to a known LOCALES key, applying a strict
+ * `primary -> fallback -> fallback2 -> 'en'` precedence chain.
+ *
+ * #7622 (round 3): the server no longer injects `"language": "en"` as a
+ * schema default — `load_settings()` reports `None` (the key is absent
+ * from the response) until the user explicitly picks a locale in the
+ * Settings modal.  This lets the resolver use `primary` directly
+ * without a `primary === 'en'` special case:
+ *   - an explicit `primary` (the server's stored value) always wins
+ *   - a `None` / empty `primary` falls through to `fallback` (localStorage)
+ *   - `fallback2` (the browser navigator hint) only fires when neither
+ *     server nor localStorage has a preference
+ *   - `'en'` is the final safety net
+ *
+ * Side benefit: a user who picked English on purpose (their settings
+ * file contains `"language": "en"`) is no longer overridden by a
+ * non-English browser locale on hydration, because the round-2
+ * `primary === 'en'` skip has been removed.
+ *
+ * @param {string|null|undefined} primary   server-stored language
+ * @param {string|null|undefined} fallback  localStorage `hermes-lang`
+ * @param {string|null|undefined} fallback2 browser navigator hint
  * @returns {string}
  */
-function resolvePreferredLocale(primary, fallback) {
-  return resolveLocale(primary) || resolveLocale(fallback) || 'en';
+function resolvePreferredLocale(primary, fallback, fallback2) {
+  return resolveLocale(primary)
+    || resolveLocale(fallback)
+    || resolveLocale(fallback2)
+    || 'en';
+}
+
+/**
+ * Detect the browser's preferred language for first-visit locale
+ * selection.  Guarded against `navigator` access exceptions: some
+ * embedded webviews (Tauri desktop shell, kiosk modes) report a
+ * `navigator` object but throw on `.languages` / `.language` reads.
+ * Callers (loadLocale, boot.js, panels.js) must use this helper rather
+ * than reading `navigator` directly so a single throw does not abort
+ * the boot or settings-panel hydration.
+ *
+ * @returns {string|null} the first entry of `navigator.languages`, or
+ *   `navigator.language`, or `null` when neither is reachable.
+ */
+function _detectBrowserLanguageHint() {
+  try {
+    const nav = (typeof navigator !== 'undefined') ? navigator : null;
+    if (!nav) return null;
+    if (Array.isArray(nav.languages) && nav.languages.length) {
+      return nav.languages[0] || null;
+    }
+    if (typeof nav.language === 'string' && nav.language) {
+      return nav.language;
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
 }
 
 /**
@@ -27029,11 +27082,26 @@ function setLocale(lang) {
 /**
  * Load locale from localStorage (called once at boot, before DOMContentLoaded).
  * Server-persisted preference is applied later in loadSettingsPanel().
+ *
+ * #7622: on the FIRST visit (no stored preference), fall back to the
+ * browser's preferred language (`navigator.languages[0]` /
+ * `navigator.language`) so non-English speakers don't have to dig into
+ * Settings after every fresh install.  This is strictly a first-visit
+ * hint — the moment the user picks a language in Settings (or the
+ * server-side preference is applied via `loadSettingsPanel`), the
+ * stored value takes over and the browser hint is never consulted
+ * again for that browser profile.
  */
 function loadLocale() {
   let stored = null;
   try { stored = localStorage.getItem('hermes-lang'); } catch (_) {}
-  setLocale(resolvePreferredLocale(null, stored));
+  // Only consult the browser hint when no stored preference exists.
+  // The settings panel and `loadSettingsPanel()` will overwrite this
+  // hint on their first call, so explicit user / server preferences
+  // always win.  #7622 (round 3): the browser-hint read is delegated
+  // to `_detectBrowserLanguageHint()` so a `navigator` access throw
+  // (some embedded webviews) can no longer abort loadLocale().
+  setLocale(resolvePreferredLocale(stored, _detectBrowserLanguageHint()));
 }
 
 /**

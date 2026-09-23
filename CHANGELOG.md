@@ -29,6 +29,13 @@
   swallowed the closing backtick of `` `MEDIA:/path` `` into the path, so the file lookup and the
   session allowlist both missed. Backtick-wrapped refs are now normalized first, while bare paths that
   genuinely contain a backtick keep their full name. (#7359, #7708 by @happy5318)
+- **A stopped chat can no longer publish or reuse its agent after Stop.** A worker that was
+  cancelled could still publish its cached Agent or invoke it after Stop landed, and its late
+  cleanup could close or evict the same Agent object a successor turn had just picked up. The initial
+  path and both credential self-heal paths now take one Stop admission, the cancellation event, live
+  stream and exact Agent are rechecked immediately before invocation (no registry lock is held across
+  provider or tool execution), and cache/lifecycle handles are retired only while the surviving owner
+  still matches. (#7748 by @franksong2702)
 - **Reconnecting to a running session no longer redraws every tool card over and over.** After a
   reconnect restored the live activity scene from the run journal, the client also replayed its older
   cached in-flight tool list on top, so a turn with N tool cards redrew them N times. When the

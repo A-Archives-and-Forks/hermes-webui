@@ -8060,7 +8060,13 @@ function _startApprovalFallbackPoll(sid) {
           stopApprovalPollingForSession(sid);
         }
       }
-    } catch(e) { /* ignore poll errors */ }
+    } catch(e) {
+      // Another profile owns this session now (e.g. a different tab switched the shared
+      // profile cookie): every further poll would 409, so stop and leave the card as-is.
+      if (typeof _sessionProfileMismatchFromError === 'function' && _sessionProfileMismatchFromError(e)) {
+        stopApprovalPollingForSession(sid);
+      }
+    }
     finally { _approvalFallbackPollInFlight = false; }
   };
   _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
@@ -9204,6 +9210,12 @@ function _startClarifyFallbackPoll(sid) {
         currentSessionId: currentSid,
         message: msg,
       };
+      // Profile-mismatch 409: the session is owned by another profile under the current
+      // cookie, so polling can never succeed. Stop quietly; the live card stays standing.
+      if (typeof _sessionProfileMismatchFromError === "function" && _sessionProfileMismatchFromError(e)) {
+        stopClarifyPollingForSession(sid);
+        return;
+      }
       // A 404 from the active session domain is a STALE-SESSION signal — e.g.
       // the old profile's session still polling briefly after a profile switch,
       // or a session deleted server-side — NOT a missing clarify endpoint. Stop

@@ -14572,13 +14572,22 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required")
         try:
-            s = get_session(sid)
+            workspace = get_session(sid).workspace
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
+            cli_meta = _lookup_cli_session_metadata(sid)
+            if not cli_meta:
+                return bad(handler, "Session not found", 404)
+            if not cli_meta.get("workspace"):
+                return j(handler, {"git": None})
+            try:
+                workspace = resolve_trusted_workspace(cli_meta["workspace"])
+            except (FileNotFoundError, ValueError):
+                return j(handler, {"git": None})
         from api.workspace_git import GitWorkspaceError, git_status
 
         try:
-            status = git_status(Path(s.workspace))
+            status = git_status(Path(workspace))
         except GitWorkspaceError as e:
             return _git_bad(handler, e)
         totals = status.get("totals") or {}

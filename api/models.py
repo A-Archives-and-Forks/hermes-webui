@@ -11016,6 +11016,11 @@ def _merge_session_messages_append_only_impl(
                         _copy_api_content_sidecar(existing, msg)
                     _merge_session_display_metadata(existing, msg)
                     continue
+            if dedup_key in seen_dedup_keys:
+                _merge_session_display_metadata(
+                    merged_by_dedup_key.get(dedup_key), msg
+                )
+                continue
             if not _insert_state_message_chronologically(merged_messages, msg):
                 merged_messages.append(msg)
             seen_message_keys.add(key)

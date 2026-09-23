@@ -451,8 +451,6 @@ class RunJournalWriter:
         self.session_id = _validate_id(session_id, "session_id")
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
-        self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
-        self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict | None:
         # Live-UI-only telemetry (metering) has no recovery value in the journal:

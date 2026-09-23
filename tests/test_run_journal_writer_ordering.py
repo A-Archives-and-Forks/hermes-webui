@@ -72,3 +72,10 @@ def test_metering_skip_still_does_not_reserve_or_write(tmp_path):
     assert writer.append_sse_event("metering", {"tps": 10}) is None
     assert not (tmp_path / "_run_journal" / "meter_session" / "meter_run.jsonl").exists()
     assert writer.append_sse_event("token", {"text": "kept"})["seq"] == 1
+
+
+def test_unused_writer_does_not_allocate_a_registry_lock(tmp_path):
+    parent = str(tmp_path / run_journal.RUN_JOURNAL_DIR_NAME / "unused_session")
+    writer = run_journal.RunJournalWriter("unused_session", "unused_run", session_dir=tmp_path)
+    assert writer.append_sse_event("metering", {"tps": 10}) is None
+    assert not any(key[0] == parent for key in run_journal._WRITER_LOCKS)

@@ -2105,6 +2105,11 @@ def _active_turn_user_text_matches(message, expected_text):
         actual_text = content
     else:
         return False
+    if (
+        isinstance(content, str)
+        and " ".join(actual_text.split()) == " ".join(expected_text.split())
+    ):
+        return True
     return _submitted_user_text_matches(actual_text, expected_text)
 
 

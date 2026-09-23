@@ -366,28 +366,59 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
-def _branch_markers(row: dict | None) -> tuple[str | None, str | None]:
-    """Return ``(_branched_from, _delegate_from)`` from a row's ``model_config``.
+# Every model_config marker Hermes Agent binds to ``parent_session_id`` in its
+# non-continuation child predicate (``_NON_CONTINUATION_CHILD_FILTER_SQL``):
+# ``_delegate_from`` (delegate_task), ``_branched_from`` (/branch) and
+# ``_reset_from`` (gateway reset children, stamped at creation or durably by
+# ``reopen_session()`` in ``gateway/session_recovery.py``).
+_MODEL_CONFIG_LINEAGE_KEYS = ('_delegate_from', '_branched_from', '_reset_from')
 
-    Hermes Agent stamps explicit branches and delegate/subagent runs in the
-    ``model_config`` JSON column (``_branched_from`` / ``_delegate_from``);
-    ``session_source='fork'`` alone only covers WebUI-created forks. Missing,
-    empty, or unparsable ``model_config`` degrades to ``(None, None)``.
+
+def _branch_markers(row: dict | None) -> tuple[str, dict[str, str]]:
+    """Return ``(state, markers)`` for a row's ``model_config`` lineage identity.
+
+    Hermes Agent stamps explicit branches, delegate/subagent runs and gateway
+    reset children in the ``model_config`` JSON column (see
+    ``_MODEL_CONFIG_LINEAGE_KEYS``); ``session_source='fork'`` alone only
+    covers WebUI-created forks.
+
+    ``state`` is one of:
+
+    - ``'none'``: no ``model_config``, or an object carrying no lineage marker;
+    - ``'markers'``: every non-null marker is a non-empty string, returned by key;
+    - ``'unknown'``: identity evidence exists but cannot be trusted (payload is
+      not JSON, not a JSON object, too deeply nested to decode, or a marker is
+      not a non-empty string). Callers must fail closed on this state and treat
+      the row as a lineage boundary, never as a continuation.
     """
     if not row:
-        return None, None
+        return 'none', {}
     raw = row.get('model_config')
-    if isinstance(raw, dict):
-        config = raw
-    elif isinstance(raw, str) and raw.strip():
+    if raw is None:
+        return 'none', {}
+    if isinstance(raw, (str, bytes, bytearray)):
+        if not raw.strip():
+            return 'none', {}
         try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError):
-            parsed = None
-        config = parsed if isinstance(parsed, dict) else {}
+            config = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):
+            # RecursionError: a valid but pathologically deep payload exceeds
+            # the decoder's recursion limit; it is untrusted identity evidence
+            # like any other undecodable payload, never an escaping crash.
+            return 'unknown', {}
     else:
-        config = {}
-    return config.get('_branched_from'), config.get('_delegate_from')
+        config = raw
+    if not isinstance(config, dict):
+        return 'unknown', {}
+    markers: dict[str, str] = {}
+    for key in _MODEL_CONFIG_LINEAGE_KEYS:
+        value = config.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return 'unknown', {}
+        markers[key] = value.strip()
+    return ('markers', markers) if markers else ('none', {})
 
 
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
@@ -405,27 +436,29 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     conversation; otherwise the tip inherits the root's title/source metadata and
     can disappear under messaging/sidebar policies.
 
-    Explicit branches/delegates never continue: a child whose ``model_config``
-    ``_branched_from`` / ``_delegate_from`` points at this parent is a fork of
-    the conversation and must stay visible. Beyond the bounded tolerance window
-    there is no reliable continuation signal — titles are user-controlled and
-    non-unique, so they are never used to widen the window (#7021 re-gate).
+    Explicit branches/delegates/resets never continue: a child whose
+    ``model_config`` ``_branched_from`` / ``_delegate_from`` / ``_reset_from``
+    points at this parent is a separate conversation and must stay visible.
+    Unparsable or non-string marker evidence fails closed as a boundary.
+    Beyond the bounded tolerance window there is no reliable continuation
+    signal — titles are user-controlled and non-unique, so they are never used
+    to widen the window (#7021 re-gate).
     """
     if not parent or not child:
         return False
     if str(child.get('session_source') or '').strip().lower() == 'fork':
         return False
-    # Real Agent branches/delegates are marked in model_config (not
+    # Real Agent branches/delegates/resets are marked in model_config (not
     # session_source, which only WebUI-created forks carry). The marker must
     # reference THIS parent: compression continuations inherit the rotated
     # agent's model_config verbatim, so presence alone (a delegate's
     # continuation still carries the delegate's own ``_delegate_from``) would
-    # misclassify real continuations.
-    child_branched_from, child_delegate_from = _branch_markers(child)
-    parent_id = parent.get('id')
-    if parent_id and (
-        child_branched_from == parent_id or child_delegate_from == parent_id
-    ):
+    # misclassify real continuations. Untrusted identity evidence fails closed.
+    marker_state, child_markers = _branch_markers(child)
+    if marker_state == 'unknown':
+        return False
+    parent_id = str(parent.get('id') or '').strip()
+    if parent_id and parent_id in child_markers.values():
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()

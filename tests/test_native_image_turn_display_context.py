@@ -338,6 +338,131 @@ def test_get_session_projects_marked_payload_conflict_in_full_and_limited_paths(
     }
 
 
+def test_get_session_projects_parent_only_payload_conflict_without_losing_parent_rows(
+    monkeypatch, tmp_path,
+):
+    import api.config
+    import api.models as models
+    import api.session_ops
+    from api import routes
+
+    session_id = "native-image-lineage-child"
+    parent_id = "native-image-lineage-parent"
+    timestamp = 890.0
+    seed, identity, _ = _settle_image_turn(
+        session_id=session_id,
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in seed.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    sidecar_payload = "PARENT-SIDECAR-PROVIDER-PAYLOAD"
+    state_payload = "CHILD-STATE-DB-PROVIDER-PAYLOAD"
+    sidecar_attachments = [{
+        "name": "parent-owned.png",
+        "mime": "image/png",
+        "is_image": True,
+    }]
+    parent_mirror = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 1,
+        "api_content": sidecar_payload,
+        "attachments": sidecar_attachments,
+    }
+    seed.context_messages.append(dict(parent_mirror))
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, session_id, [(mirror, timestamp, state_payload)])
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    parent = models.Session(
+        session_id=parent_id,
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=[
+            {"role": "user", "content": "Unrelated parent-only row", "timestamp": 870.0},
+            dict(parent_mirror),
+        ],
+        source_tag="webui",
+        session_source="webui",
+        pre_compression_snapshot=False,
+    )
+    parent.save(skip_index=True)
+    session = models.Session(
+        session_id=session_id,
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=seed.messages,
+        context_messages=seed.context_messages,
+        parent_session_id=parent_id,
+        source_tag="webui",
+        session_source="webui",
+    )
+    session.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS.pop(session_id, None)
+        models.SESSIONS.pop(parent_id, None)
+
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_: True)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda *_: {})
+    monkeypatch.setattr(routes, "find_run_summary", lambda *_: None)
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr(api.session_ops, "regeneration_state", lambda _session: ([], []))
+    monkeypatch.setattr(
+        api.session_ops,
+        "regeneration_authority",
+        lambda *_args, **_kwargs: None,
+    )
+    response = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: (
+            response.update(payload=payload, status=status) or payload
+        ),
+    )
+    routes._handle_session_get(
+        None,
+        SimpleNamespace(path="/api/session", query=f"session_id={session_id}&resolve_model=0"),
+    )
+
+    assert response["status"] == 200
+    public_messages = response["payload"]["session"]["messages"]
+    mirror_rows = [message for message in public_messages if message.get("content") == mirror]
+    assert len(mirror_rows) == 1, f"expected one visible mirror, found {len(mirror_rows)}"
+    assert mirror_rows[0]["attachments"] == sidecar_attachments
+    assert "Unrelated parent-only row" in [message.get("content") for message in public_messages]
+    assert all("api_content" not in message for message in mirror_rows)
+
+    state_rows = models.get_state_db_session_messages(session_id)
+    replay_context = models.reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=state_rows,
+    )
+    replay_rows = [
+        message for message in _sanitize_messages_for_agent(replay_context)
+        if message.get("content") == mirror
+    ]
+    assert len(replay_rows) == 2
+    assert {message["api_content"] for message in replay_rows} == {
+        sidecar_payload,
+        state_payload,
+    }
+
+
 def test_limited_conflict_projection_keeps_state_row_when_owner_is_outside_slice():
     from api import routes
 

@@ -13333,18 +13333,22 @@ def _handle_session_get(handler, parsed) -> bool:
                     state_db_messages,
                 )
                 sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
+                projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
+                    s,
+                    sidecar_messages,
+                )
                 _all_msgs = merge_session_messages_append_only(
                     sidecar_messages,
                     state_db_messages,
                     truncation_watermark=getattr(s, "truncation_watermark", None),
                     truncation_boundary=getattr(s, "truncation_boundary", None),
                 )
+                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
                 _all_msgs = _project_native_image_payload_conflicts_for_display(
-                    sidecar_messages,
+                    projection_sidecar_messages,
                     state_db_messages,
                     _all_msgs,
                 )
-                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)

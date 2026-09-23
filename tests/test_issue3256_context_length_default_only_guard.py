@@ -704,3 +704,92 @@ def test_same_provider_session_keeps_global_base_url_backfill():
     assert lookup.base_url == ark_base, (
         "same-owner sessions must keep the model.base_url backfill (#7535 compat)"
     )
+
+
+def test_base_url_only_config_without_provider_keeps_endpoint():
+    """Regression (PR #7743 gate): a ``model`` section that declares
+    ``base_url`` but NO ``provider`` has no owner that could conflict, so any
+    session must still receive the URL — exactly as master did. The profile
+    setup path writes this shape (api/profiles.py), and dropping the URL made
+    the lookup skip the endpoint and silently fall back to 256,000."""
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    only_base_url = "http://127.0.0.1:9/v1"
+    cfg = {
+        "model": {
+            "base_url": only_base_url,
+            "default": "some-model",
+        },
+    }
+
+    for session_provider in ("custom", "openrouter"):
+        lookup = _context_length_lookup_inputs_for_model(
+            "some-model",
+            session_provider,
+            cfg=cfg,
+        )
+
+        assert lookup.provider == session_provider
+        assert lookup.base_url == only_base_url, (
+            f"a config with no declared provider owner cannot conflict with the "
+            f"{session_provider!r} session, so the base_url must survive the "
+            f"ownership guard"
+        )
+
+
+def test_underscore_provider_owner_matches_hyphen_session():
+    """Regression (PR #7743 gate): ``opencode_go`` and ``opencode-go`` are two
+    spellings of the SAME built-in provider, so the owner session must still
+    receive ``model.base_url``. Comparing the ids through the repo's
+    canonicaliser folds the underscore without collapsing distinct
+    ``custom:*`` slugs."""
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    owner_base = "http://127.0.0.1:9/v1"
+    cfg = {
+        "model": {
+            "provider": "opencode_go",
+            "base_url": owner_base,
+            "default": "some-model",
+        },
+    }
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "some-model",
+        "opencode-go",
+        cfg=cfg,
+    )
+
+    assert lookup.provider == "opencode-go"
+    assert lookup.base_url == owner_base, (
+        "opencode_go and opencode-go are the same built-in provider, so the "
+        "owner session must keep the base_url backfill"
+    )
+
+
+def test_underscore_provider_still_blocks_distinct_custom_owner():
+    """Counterpart to test_underscore_provider_owner_matches_hyphen_session:
+    folding underscores must not open the #7535 guard. ``custom:my_box`` and a
+    session on the unrelated built-in ``opencode-go`` are still different
+    providers, so the custom owner's URL stays out of the registry slot."""
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    cfg = {
+        "model": {
+            "provider": "custom:my_box",
+            "base_url": "http://127.0.0.1:9/v1",
+            "default": "some-model",
+        },
+    }
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "some-model",
+        "opencode-go",
+        cfg=cfg,
+    )
+
+    assert lookup.provider == "opencode-go"
+    assert lookup.base_url == "", (
+        "underscore folding must not let a distinct custom provider's "
+        "base_url leak onto another provider's session (#7535 guard)"
+    )

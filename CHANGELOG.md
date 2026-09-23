@@ -24,6 +24,13 @@
 
 ### Fixed
 
+- **Reconnecting to a running session no longer redraws every tool card over and over.** After a
+  reconnect restored the live activity scene from the run journal, the client also replayed its older
+  cached in-flight tool list on top, so a turn with N tool cards redrew them N times. When the
+  journal-backed scene restores successfully the replay is now skipped (newer rows still arrive
+  through the reattached stream); the replay stays for legacy restores and for a failed or
+  unavailable scene. (#7436, @atchisonbrent)
+
 - **A settled assistant answer is no longer shown twice (#2051).** Two client-side paths could put a
   second copy of a finished answer on screen after a turn settled: a stale live-turn node that was
   still treated as live, and a settled rebuild branch that appended a turn instead of replacing it.

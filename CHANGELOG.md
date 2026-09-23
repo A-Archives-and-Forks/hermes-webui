@@ -28,6 +28,10 @@
 
 ### Fixed
 
+- **A stale in-flight projection can no longer reach a gateway watcher after its last subscriber
+  leaves.** Final unsubscribe and queue eviction now invalidate the cache and fence projections that
+  were already in flight, without holding the lock across database reads or SSE writes, so a client
+  that re-subscribes gets a fresh snapshot instead of a stale one. (#7761 by @ruizanthony)
 - **A burst of "session busy" refusals no longer drops a background-task completion.** When
   `start_session_turn()` refused a completion wake-up with a transient 409 (Agent runtime stale,
   process wake-ups paused, or the session busy with another turn), the bridge released the durable

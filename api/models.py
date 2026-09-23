@@ -4095,15 +4095,14 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
                     locked_messages.insert(0, pending_row)
             locked.messages = locked_messages
 
+        display_baseline_count = len(locked_messages)
         merged_messages = reconciled_state_db_messages_for_session(
             locked,
             state_messages=state_messages,
         )
-        # The reconciler is append-only: a genuine state.db advance (output the
-        # lost stream never wrote back) shows up as MORE rows than the sidecar.
-        # A merged length not greater than the sidecar means nothing new to
-        # recover — leave the sidecar untouched rather than rewriting in place.
-        if len(merged_messages) <= locked_count:
+        # The baseline includes any proven WebUI-owned pending display row. Only
+        # a later state.db row is an advance worth committing and clearing pending.
+        if len(merged_messages) <= display_baseline_count:
             return False
         if merged_context is None:
             merged_context = reconciled_state_db_messages_for_session(

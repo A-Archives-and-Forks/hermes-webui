@@ -7622,6 +7622,11 @@ function _sidebarRowsById(rows){
   return byId;
 }
 
+// True when any row resolves to no project, using the filter's own ancestor map.
+function _sidebarHasUnprojectedRows(rows, rowsById){
+  return rows.some(s=>!_sidebarProjectIdForRow(s, rowsById));
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   const rowsById=_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]);
   let cliSessionCount=0;
@@ -7670,6 +7675,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
+    rowsById,
   };
 }
 
@@ -7797,6 +7803,7 @@ function renderSessionListFromCache(){
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
+    rowsById,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
@@ -7871,8 +7878,7 @@ function renderSessionListFromCache(){
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
-  const profileRowsById=_sidebarRowsById([profileFiltered]);
-  const hasUnprojected=profileFiltered.some(s=>!_sidebarProjectIdForRow(s, profileRowsById));
+  const hasUnprojected=_sidebarHasUnprojectedRows(profileFiltered, rowsById);
   if(_allProjects.length>0||hasUnprojected){
     const bar=document.createElement('div');
     bar.className='project-bar';

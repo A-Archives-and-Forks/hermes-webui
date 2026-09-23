@@ -76,7 +76,7 @@ def test_unassigned_chip_only_shown_when_relevant():
     — though that's vanishingly rare).
     """
     js = _js()
-    assert "const hasUnprojected=profileFiltered.some(s=>!_sidebarProjectIdForRow(s, profileRowsById));" in js, (
+    assert "const hasUnprojected=_sidebarHasUnprojectedRows(profileFiltered, rowsById);" in js, (
         "The render function must compute whether unassigned sessions exist"
     )
     assert "if(_allProjects.length>0||hasUnprojected){" in js, (

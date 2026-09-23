@@ -44,7 +44,7 @@ global._sessionSourceFilter = 'webui';
 for (const fn of ['_isSessionLocallyStreaming','_hasPendingUserMessageSignal','_isSessionEffectivelyStreaming',
   '_isChildSession','_isForkWithResolvableParent','_sessionLineageKey','_sidebarLineageKeyForRow',
   '_collapseSessionLineageForSidebar','_attachChildSessionsToSidebarRows','_sessionAttentionState',
-  '_sidebarRowHasVisibleMessages','_sidebarProjectIdForRow','_sidebarRowsById',
+  '_sidebarRowHasVisibleMessages','_sidebarProjectIdForRow','_sidebarRowsById','_sidebarHasUnprojectedRows',
   '_partitionSidebarSessionRows','_scopedSidebarReferenceRows','_renderSidebarRowsFromRawSessions']) {
   eval.call(global, extractFunc(fn));
 }
@@ -115,4 +115,18 @@ console.log(JSON.stringify({raw: rows.raw, scoped}));
 
 
 def test_unassigned_chip_ignores_subagents_of_project_parents():
-    assert "const hasUnprojected=profileFiltered.some(s=>!_sidebarProjectIdForRow(s, profileRowsById));" in SESSIONS_JS
+    out = _run("console.log(JSON.stringify(_sidebarHasUnprojectedRows([parent, child], _sidebarRowsById([[parent, child]]))));")
+    assert out is False
+
+
+def test_unassigned_chip_uses_reference_parent():
+    """A child whose project parent is only a reference row is not unassigned."""
+    out = _run("""
+global._sidebarReferenceSessions = [parent];
+global._activeProject = null;
+const part = _partitionSidebarSessionRows([child], null);
+console.log(JSON.stringify({has: _sidebarHasUnprojectedRows(part.profileFiltered, part.rowsById),
+  unassigned: render(NO_PROJECT_FILTER, [child]).raw}));
+""")
+    assert out["unassigned"] == []
+    assert out["has"] is False

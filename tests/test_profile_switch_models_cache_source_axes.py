@@ -118,6 +118,24 @@ def test_switch_after_removing_env_key_rejects_snapshot(two_profiles):
     assert _switch_to_demo_and_fetch(two_profiles)["default_model"] == "fresh-model"
 
 
+def test_switch_after_export_prefix_rejects_snapshot(two_profiles):
+    """`export KEY=` is key `export KEY` to the profile .env loaders, so the provider key is gone."""
+    env_file = two_profiles.demo_home / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-old\n", encoding="utf-8")
+    _save_demo_snapshot(two_profiles)
+    env_file.write_text("export DEEPSEEK_API_KEY=sk-old\n", encoding="utf-8")
+    assert _switch_to_demo_and_fetch(two_profiles)["default_model"] == "fresh-model"
+
+
+def test_env_fingerprint_keys_match_provider_env_loader(two_profiles):
+    from api.providers import _load_env_file
+
+    env_file = two_profiles.demo_home / ".env"
+    env_file.write_text("export A=1\nB='x'\nC=\n# D=1\n", encoding="utf-8")
+    loaded = sorted(k for k, v in _load_env_file(env_file).items() if v)
+    assert two_profiles.cfg._models_cache_env_fingerprint(env_file)["present_keys"] == loaded
+
+
 def test_env_value_rotation_keeps_snapshot_and_fingerprint_has_no_secret(two_profiles):
     env_file = two_profiles.demo_home / ".env"
     env_file.write_text("DEEPSEEK_API_KEY=sk-secret-one\n", encoding="utf-8")

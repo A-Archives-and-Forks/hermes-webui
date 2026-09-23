@@ -7918,28 +7918,15 @@ def _models_cache_env_fingerprint(path: Path) -> dict:
     Credential presence decides which providers are detected; values are
     never recorded, so rotating a key keeps the snapshot.
     """
+    # Same parser provider detection uses, so the key names match exactly.
+    from api.providers import _load_env_file
+
     p = Path(path).expanduser()
     fp: dict = {"path": str(p)}
-    try:
-        text = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    if not p.exists():
         fp["missing"] = True
         return fp
-    except OSError:
-        st = p.stat()
-        fp["mtime_ns"], fp["size"] = st.st_mtime_ns, st.st_size
-        return fp
-    keys = set()
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        if v.strip().strip('"').strip("'"):
-            keys.add(k.strip())
-    fp["present_keys"] = sorted(keys)
+    fp["present_keys"] = sorted(k for k, v in _load_env_file(p).items() if v)
     return fp
 
 

@@ -2567,12 +2567,18 @@ def _transcript_already_advanced_past_pending(session) -> bool:
     prose row ("Let me check the logs first.") followed by tool rows that
     were never followed by a final answer in the transcript passes the
     predicate as a "completed" turn, but the stream may have died mid-
-    tool and the run journal was never marked done. 9/22 re-gate: also
-    require durable same-stream terminal evidence — the run journal
-    must report ``completed`` (a ``done`` or ``stream_end`` event) for
-    the pending stream id. Without it, fall through to the normal
-    journal-recovery path so the partial output is replayed and the
-    interruption is marked.
+    tool and the run journal was never marked done. 9/23 re-gate: also
+    require durable same-stream terminal evidence. The run journal
+    cannot supply that evidence on this path — the caller in
+    ``_apply_core_sync_or_error_marker`` already returns early whenever
+    the run journal reports ``completed`` for the stream, so the branch
+    that reaches this predicate can never observe that state (which is
+    why the previous run-journal gate was unreachable dead code). The
+    evidence therefore has to come from the turn journal, which records
+    the exact-stream ``completed`` event for the pending turn
+    (``_turn_journal_records_completion``). Without it, fall through to
+    the normal journal-recovery path so the partial output is replayed
+    and the interruption is marked.
 
     The suppression is therefore deliberately conservative: whenever the
     turn's identity, its completion, or its durable terminal evidence
@@ -2596,14 +2602,19 @@ def _transcript_already_advanced_past_pending(session) -> bool:
             continue
         # Found the pending turn's own user row at ``idx``. A genuine
         # final answer inside that turn's boundary is necessary but not
-        # sufficient: the run journal must also have a same-stream
-        # terminal ``completed`` event, otherwise unflagged interim
-        # prose ("Let me check the logs first.") followed by tool rows
-        # can be mistaken for a finished turn.
+        # sufficient: durable same-stream terminal evidence must also
+        # exist, otherwise unflagged interim prose
+        # ("Let me check the logs first.") followed by tool rows can be
+        # mistaken for a finished turn.
         if not _pending_turn_has_final_assistant_answer(messages, idx):
             continue
         stream_id = getattr(session, 'active_stream_id', None)
-        if _run_journal_terminal_state(session, stream_id) != 'completed':
+        # The turn journal — not the run journal — carries the
+        # completion evidence that is still observable here: the caller
+        # (``_apply_core_sync_or_error_marker``) already consumed the
+        # run-journal ``completed`` state on its own early return, so a
+        # run-journal gate at this depth can never fire.
+        if not _turn_journal_records_completion(session, stream_id):
             # No durable same-stream terminal evidence — the turn may
             # have died mid-tool. Fall through to the journal-recovery
             # path instead of suppressing it.
@@ -2811,6 +2822,54 @@ def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
     ):
         return None
     return str(terminal.get('terminal_state') or '') or None
+
+
+def _turn_journal_records_completion(session, stream_id: str | None) -> bool:
+    """Return True when the crash-safe turn journal proves the turn for
+    ``stream_id`` reached its terminal ``completed`` state.
+
+    The turn journal is written per stream/turn id by the exact-stream
+    workers and by :mod:`api.routes` on submission, so a ``completed``
+    event for the *pending stream id* is completion evidence that
+    survives a run-journal write failure: the run journal only reaches
+    ``done`` / ``stream_end`` on its own write path, and a process that
+    dies between the turn journal write and the run-journal terminal
+    append leaves the run journal without terminal state while the turn
+    journal still records that the turn actually finished.
+
+    Bound strictly to ``stream_id`` — a ``completed`` turn belonging to
+    another stream of the same session never settles this one — and to
+    the latest turn recorded for that stream, so a turn that was
+    cancelled or crashed (``interrupted``) keeps recovery active even
+    when an earlier turn of the same stream completed normally.
+    """
+    if not stream_id:
+        return False
+    try:
+        from api.turn_journal import (
+            derive_turn_journal_states,
+            read_turn_journal,
+        )
+        journal = read_turn_journal(session.session_id)
+        states, _ = derive_turn_journal_states(journal.get('events') or [])
+    except Exception:
+        return False
+    latest: tuple[float, str, dict] | None = None
+    for turn_id, event in states.items():
+        if str(event.get('stream_id') or '') != str(stream_id):
+            continue
+        try:
+            created_at = float(event.get('created_at') or 0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        # ``>=`` on both elements keeps the winner deterministic when two
+        # turns of the same stream share a ``created_at``.
+        candidate = (created_at, turn_id, event)
+        if latest is None or candidate[:2] >= latest[:2]:
+            latest = candidate
+    if latest is None:
+        return False
+    return latest[2].get('event') == 'completed'
 
 
 def _recoverable_unsaved_gateway_terminal_error(

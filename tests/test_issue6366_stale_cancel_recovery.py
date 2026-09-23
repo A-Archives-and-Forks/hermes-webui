@@ -54,13 +54,17 @@ import pytest
 
 import api.models as models
 from api.models import (
+    SESSIONS,
     Session,
     _apply_core_sync_or_error_marker,
     _pending_turn_has_final_assistant_answer,
+    _run_journal_terminal_state,
     _transcript_already_advanced_past_pending,
     _transcript_user_row_is_pending_turn,
+    _turn_journal_records_completion,
 )
 from api.run_journal import append_run_event
+from api.turn_journal import append_turn_journal_event_for_stream
 
 
 @pytest.fixture(autouse=True)
@@ -69,9 +73,9 @@ def _isolate_session_state(tmp_path, monkeypatch):
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
-    models.SESSIONS.clear()
+    SESSIONS.clear()
     yield
-    models.SESSIONS.clear()
+    SESSIONS.clear()
 
 
 class _FakeSession:
@@ -323,6 +327,11 @@ def test_advances_past_pending_when_user_matched_and_settled_assistant_follows()
         attachments=[{"name": "a.png"}],
     )
     _write_journal(s.session_id, "stream-a", [("done", {})])
+    _write_turn_journal(
+        s.session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
     assert _transcript_already_advanced_past_pending(s) is True
 
 
@@ -457,6 +466,11 @@ def test_advances_past_pending_with_unrelated_intervening_rows():
         attachments=[],
     )
     _write_journal(s.session_id, "stream-a", [("done", {})])
+    _write_turn_journal(
+        s.session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
     assert _transcript_already_advanced_past_pending(s) is True
 
 
@@ -485,6 +499,11 @@ def test_helper_is_pure_read_idempotent():
         attachments=[],
     )
     _write_journal(s.session_id, "stream-a", [("done", {})])
+    _write_turn_journal(
+        s.session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
     first = _transcript_already_advanced_past_pending(s)
     second = _transcript_already_advanced_past_pending(s)
     assert first is True
@@ -556,6 +575,11 @@ def test_advances_past_pending_with_exact_token_match():
         attachments=[{"name": "a.png"}],
     )
     _write_journal(s.session_id, "stream-a", [("done", {})])
+    _write_turn_journal(
+        s.session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
     assert _transcript_already_advanced_past_pending(s) is True
 
 
@@ -689,7 +713,279 @@ def test_does_advance_when_journal_marked_done_after_interim_prose():
         started_at=222.5,
     )
     _write_journal(s.session_id, "stream-a", [("done", {})])
+    _write_turn_journal(
+        s.session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
     assert _transcript_already_advanced_past_pending(s) is True
+
+
+# ── turn-journal completion evidence (9/23 re-gate) ───────────────────
+#
+# The suppression predicate used to require a *run-journal* terminal
+# ``completed`` state. Its caller in ``_apply_core_sync_or_error_marker``
+# already returns early on that same condition, so by the time the
+# predicate ran the run-journal branch could never be true and the
+# predicate could never suppress anything. The completion evidence
+# therefore has to come from the turn journal — the crash-safe journal
+# that records the exact-stream ``completed`` event for the pending turn.
+
+
+_TURN_JOURNAL_CLOCK = {"tick": 0}
+
+
+def _write_turn_journal(session_id, stream_id, events):
+    """Append events to the turn journal for ``stream_id``, reusing the
+    stream's turn id exactly like ``append_turn_journal_event_for_stream``
+    does in production.
+
+    ``created_at`` is taken from a module-level monotonic clock so events
+    appended across several calls — and across turn ids — keep a strict
+    ordering; a per-call sequence would hand the same timestamp to events
+    of different turns, leaving the derived "latest turn per stream"
+    ambiguous.
+    """
+    written = []
+    for event_name, payload in events:
+        _TURN_JOURNAL_CLOCK["tick"] += 1
+        written.append(
+            append_turn_journal_event_for_stream(
+                session_id,
+                stream_id,
+                {
+                    "event": event_name,
+                    "created_at": 1_700_000_000.0 + _TURN_JOURNAL_CLOCK["tick"],
+                    **payload,
+                },
+            )
+        )
+    return written
+
+
+def test_turn_journal_helper_reports_completed_for_matching_stream():
+    """The helper reads the turn journal and reports completion only for
+    the stream whose ``completed`` event was recorded."""
+    session_id = "issue6366_turn_journal_helper"
+    _write_turn_journal(
+        session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
+    probe = _FakeSession(
+        pending="hello world",
+        messages=[],
+        stream_id="stream-a",
+        started_at=222.5,
+        session_id=session_id,
+    )
+    assert _turn_journal_records_completion(probe, "stream-a") is True
+    assert _turn_journal_records_completion(probe, "stream-b") is False
+
+
+def test_turn_journal_helper_rejects_interrupted_turn():
+    """An ``interrupted`` turn is not a completed turn, even when the
+    journal also carries an earlier ``completed`` event for another
+    turn of the same stream."""
+    session_id = "issue6366_turn_journal_interrupted"
+    _write_turn_journal(
+        session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
+    _write_turn_journal(
+        session_id,
+        "stream-a",
+        [("submitted", {}), ("interrupted", {"reason": "cancelled"})],
+    )
+    probe = _FakeSession(
+        pending="hello world",
+        messages=[],
+        stream_id="stream-a",
+        started_at=222.5,
+        session_id=session_id,
+    )
+    assert _turn_journal_records_completion(probe, "stream-a") is False
+
+
+def test_advances_past_pending_from_turn_journal_without_run_journal_terminal():
+    """9/23 re-gate root case: the run journal never wrote a terminal
+    event (the stream died before ``done``/``stream_end`` reached it),
+    but the turn journal recorded the exact-stream ``completed`` event.
+
+    The transcript alone proves the turn produced a genuine final
+    answer, and the turn journal proves the turn reached its terminal
+    state, so the recovery path must suppress the duplicate recovered
+    user row + journal clone + interruption marker.
+    """
+    session_id = "issue6366_turn_journal_completed"
+    s = _FakeSession(
+        pending="hello world",
+        messages=[
+            {
+                "role": "user",
+                "content": "hello world",
+                "timestamp": 222,
+                "_source": "webui",
+                "attachments": [{"name": "a.png"}],
+                "_active_turn_token": "stream-a:222.5",
+            },
+            {"role": "assistant", "content": "answer", "timestamp": 223},
+        ],
+        stream_id="stream-a",
+        started_at=222.5,
+        source="webui",
+        attachments=[{"name": "a.png"}],
+        session_id=session_id,
+    )
+    # The run journal holds visible progress but NO terminal event.
+    _write_journal(
+        session_id,
+        "stream-a",
+        [
+            ("token", {"text": "answer"}),
+        ],
+    )
+    # The turn journal has the exact-stream completion event.
+    _write_turn_journal(
+        session_id,
+        "stream-a",
+        [("submitted", {}), ("completed", {})],
+    )
+    assert _run_journal_terminal_state(s, "stream-a") != "completed"
+    assert _turn_journal_records_completion(s, "stream-a") is True
+    assert _transcript_already_advanced_past_pending(s) is True
+
+
+def test_full_recovery_suppresses_duplicates_on_turn_journal_completion(tmp_path):
+    """Full-path 9/23 re-gate regression: the run journal never wrote a
+    terminal state, but the turn journal recorded the exact-stream
+    ``completed`` event. Recovery must clear the stale pending state
+    without appending the recovered user row, the journal clone, or the
+    interruption marker after the valid final answer."""
+    session_id = "issue6366_full_recovery_turn_journal_completed"
+    stream_id = "stream-turn-journal-completed"
+    started_at = 1_700_002_100.5
+
+    session = Session(
+        session_id=session_id,
+        title="Completed per turn journal, silent run journal",
+        messages=[
+            {
+                "role": "user",
+                "content": "summarise the diff",
+                "timestamp": int(started_at),
+                "_source": "webui",
+                "attachments": [],
+                "_active_turn_token": f"{stream_id}:{started_at:.17g}",
+            },
+            {"role": "assistant", "content": "The diff adds a guard."},
+        ],
+        context_messages=[
+            {"role": "user", "content": "summarise the diff"},
+            {"role": "assistant", "content": "The diff adds a guard."},
+        ],
+        pending_user_message="summarise the diff",
+        pending_started_at=started_at,
+        pending_user_source="webui",
+        pending_attachments=[],
+        active_stream_id=stream_id,
+    )
+    # The run journal has visible progress but no terminal event, so the
+    # line-3671 early return cannot fire and the suppression predicate
+    # is now the only gate that can keep the transcript clean.
+    _write_journal(
+        session_id,
+        stream_id,
+        [("token", {"text": "The diff adds a guard."})],
+    )
+    # The turn journal recorded the exact-stream terminal completion.
+    _write_turn_journal(
+        session_id,
+        stream_id,
+        [("submitted", {}), ("completed", {})],
+    )
+    before = json.dumps(session.messages, ensure_ascii=False)
+
+    assert _apply_core_sync_or_error_marker(
+        session,
+        tmp_path / "missing-core-transcript.json",
+        stream_id_for_recheck=stream_id,
+    ) is True
+
+    # Nothing was appended after the valid final answer.
+    assert json.dumps(session.messages, ensure_ascii=False) == before
+    assert not any(
+        message.get("_recovered") or message.get("_recovered_from_run_journal")
+        for message in session.messages
+    )
+    assert not any(message.get("_error") for message in session.messages)
+    # The stale pending state was cleared.
+    assert session.pending_user_message is None
+    assert session.active_stream_id is None
+    assert session.pending_started_at is None
+    assert session.pending_user_source is None
+    assert session.pending_attachments == []
+
+
+def test_full_recovery_appends_rows_on_turn_journal_completion_loss(tmp_path):
+    """Mirror control: when neither the run journal nor the turn journal
+    has terminal completion evidence, the same transcript shape must
+    still recover — the suppression must not widen to cover a turn whose
+    completion can no longer be proven."""
+    session_id = "issue6366_full_recovery_no_turn_journal_completion"
+    stream_id = "stream-no-turn-journal-completion"
+    started_at = 1_700_002_200.5
+
+    session = Session(
+        session_id=session_id,
+        title="Silent run journal, no turn journal completion",
+        messages=[
+            {
+                "role": "user",
+                "content": "summarise the diff",
+                "timestamp": int(started_at),
+                "_source": "webui",
+                "attachments": [],
+                "_active_turn_token": f"{stream_id}:{started_at:.17g}",
+            },
+            {"role": "assistant", "content": "The diff adds a guard."},
+        ],
+        context_messages=[
+            {"role": "user", "content": "summarise the diff"},
+        ],
+        pending_user_message="summarise the diff",
+        pending_started_at=started_at,
+        pending_user_source="webui",
+        pending_attachments=[],
+        active_stream_id=stream_id,
+    )
+    # Neither journal carries terminal completion evidence.
+    _write_journal(
+        session_id,
+        stream_id,
+        [("token", {"text": "The diff adds a guard."})],
+    )
+    before = json.dumps(session.messages, ensure_ascii=False)
+
+    assert _apply_core_sync_or_error_marker(
+        session,
+        tmp_path / "missing-core-transcript.json",
+        stream_id_for_recheck=stream_id,
+    ) is True
+
+    # Recovery ran: the journal replay is visible again and the turn is
+    # marked interrupted instead of being silently declared finished.
+    assert json.dumps(session.messages, ensure_ascii=False) != before
+    assert any(
+        message.get("_recovered_from_run_journal")
+        and "The diff adds a guard." in str(message.get("content", ""))
+        for message in session.messages
+    )
+    assert any(
+        message.get("_error") and message.get("type") == "interrupted"
+        for message in session.messages
+    )
 
 
 # ── full _apply_core_sync_or_error_marker recovery cases ────────────────

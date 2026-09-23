@@ -28,6 +28,11 @@
 
 ### Fixed
 
+- **Delegated subagent sessions show inside their parent's project.** With a project selected in the
+  sidebar, subagent sessions disappeared because `state.db` never gives them a `project_id`. Only
+  subagent rows now inherit their parent's project, resolved once per lineage, so forks keep their
+  own "No project" assignment and deep lineages stay fast. (#7765 by @carlotestor)
+
 - **The live stream reports which model actually served the turn.** A new additive `runtime_model`
   SSE event carries the model (and provider, when known) that the Agent reported while producing
   output, separately from the model that was requested. It is journaled for replay, is exposed as

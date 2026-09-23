@@ -1268,6 +1268,36 @@ def _strip_sidebar_heavy_metadata(row: dict) -> dict:
     return row
 
 
+def _validated_webui_pending_user_timestamp_identity(session, value):
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    stream_id = getattr(session, 'active_stream_id', None)
+    source = str(getattr(session, 'pending_user_source', '') or '').strip().lower()
+    if (
+        not isinstance(stream_id, str)
+        or not stream_id
+        or value[0] != stream_id
+        or not isinstance(getattr(session, 'pending_user_message', None), str)
+        or not getattr(session, 'pending_user_message', None)
+        or source not in {'webui', 'fork'}
+    ):
+        return None
+    pending_timestamp, pending_valid = _message_exact_timestamp_details(
+        {'timestamp': getattr(session, 'pending_started_at', None)}
+    )
+    identity_timestamp, identity_valid = _message_exact_timestamp_details(
+        {'timestamp': value[1]}
+    )
+    if (
+        not pending_valid
+        or not identity_valid
+        or pending_timestamp is None
+        or pending_timestamp != identity_timestamp
+    ):
+        return None
+    return (stream_id, pending_timestamp)
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1370,6 +1400,11 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self._webui_pending_user_timestamp_identity = (
+            _validated_webui_pending_user_timestamp_identity(
+                self, kwargs.get('_webui_pending_user_timestamp_identity')
+            )
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1467,6 +1502,11 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        self._webui_pending_user_timestamp_identity = (
+            _validated_webui_pending_user_timestamp_identity(
+                self, getattr(self, '_webui_pending_user_timestamp_identity', None)
+            )
+        )
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1477,6 +1517,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            '_webui_pending_user_timestamp_identity',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -9237,8 +9278,32 @@ def _suppress_native_image_display_mirrors(
     state_messages,
     *,
     suppress_api_content=True,
+    suppress_pending_turn=True,
 ):
-    """Drop exact Agent image projections backed by one token-paired WebUI turn."""
+    """Drop proven pending Agent rows and native-image mirrors from display."""
+    if not state_messages:
+        return state_messages
+
+    if suppress_pending_turn:
+        identity = _validated_webui_pending_user_timestamp_identity(
+            session,
+            getattr(session, "_webui_pending_user_timestamp_identity", None),
+        )
+        if identity is not None:
+            # A matching timestamp is an Agent handoff identity only because
+            # the live worker recorded that this exact value was passed via
+            # persist_user_timestamp. If rows collide on it, hide the whole
+            # ambiguous bucket from display; model context retains every row.
+            pending_timestamp = identity[1]
+            state_messages = [
+                message for message in state_messages
+                if not (
+                    isinstance(message, dict)
+                    and str(message.get("role") or "").lower() == "user"
+                    and _message_exact_timestamp(message) == pending_timestamp
+                )
+            ]
+
     display_messages = getattr(session, "messages", None) or []
     context_messages = getattr(session, "context_messages", None) or []
     if not display_messages or not context_messages or not state_messages:
@@ -11012,13 +11077,14 @@ def _merge_session_messages_append_only_impl(
                     and incoming_api_content is not None
                     and existing_api_content != incoming_api_content
                 ):
-                    # The unique durable row ID makes state.db authoritative
-                    # for this marked native-image mirror's provider payload.
-                    existing["api_content"] = incoming_api_content
-                elif existing_api_content is None and incoming_api_content is not None:
-                    _copy_api_content_sidecar(existing, msg)
-                _merge_session_display_metadata(existing, msg)
-                continue
+                    # Row identity does not establish which provider payload is
+                    # newer. Fall through so both conflicting versions survive.
+                    pass
+                else:
+                    if existing_api_content is None and incoming_api_content is not None:
+                        _copy_api_content_sidecar(existing, msg)
+                    _merge_session_display_metadata(existing, msg)
+                    continue
             if dedup_key in seen_dedup_keys:
                 duplicate = merged_by_dedup_key.get(dedup_key)
                 duplicate_row_id, duplicate_row_id_valid = (
@@ -11418,6 +11484,7 @@ def reconciled_state_db_messages_for_session(
         session,
         state_messages,
         suppress_api_content=not using_context_messages,
+        suppress_pending_turn=not prefer_context,
     )
     if prefer_context and local_messages:
         if using_context_messages:

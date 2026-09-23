@@ -79,6 +79,7 @@ from api.models import (
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
+    _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -9139,6 +9140,7 @@ def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
 def _build_run_conversation_kwargs(
     callable_obj,
     *,
+    session=None,
     user_message,
     system_message,
     conversation_history,
@@ -9172,6 +9174,45 @@ def _build_run_conversation_kwargs(
         "conversation_history_revision",
         conversation_history_revision,
     )
+    if session is not None:
+        try:
+            timestamp_parameter = inspect.signature(callable_obj).parameters.get(
+                "persist_user_timestamp"
+            )
+        except (TypeError, ValueError):
+            timestamp_parameter = None
+        has_timestamp_contract = (
+            timestamp_parameter is not None
+            and timestamp_parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+        )
+        session_id = getattr(session, "session_id", None)
+        save = getattr(session, "save", None)
+        lock = (
+            _get_session_agent_lock(session_id)
+            if callable(save) and session_id
+            else contextlib.nullcontext()
+        )
+        with lock:
+            candidate = (
+                _validated_webui_pending_user_timestamp_identity(
+                    session,
+                    (
+                        getattr(session, "active_stream_id", None),
+                        kwargs.get("persist_user_timestamp"),
+                    ),
+                )
+                if has_timestamp_contract
+                else None
+            )
+            # A retry using an older/opaque Agent must revoke earlier proof;
+            # row identity cannot be carried across a changed invocation contract.
+            identity = candidate
+            previous = getattr(session, "_webui_pending_user_timestamp_identity", None)
+            session._webui_pending_user_timestamp_identity = identity
+            if callable(save) and session_id and previous != identity:
+                # Persist the proof while holding the session mutation lock,
+                # before run_conversation can write this turn to state.db.
+                save(touch_updated_at=False, skip_index=True)
     return kwargs
 
 
@@ -11724,6 +11765,7 @@ def _run_agent_streaming(
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
+                session=s,
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_agent(
@@ -12303,6 +12345,7 @@ def _run_agent_streaming(
                                 ) = _refresh_context_and_revision_from_state_db()
                                 _heal_kwargs = _build_run_conversation_kwargs(
                                     agent.run_conversation,
+                                    session=s,
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_agent(
@@ -13654,6 +13697,7 @@ def _run_agent_streaming(
                         ) = _refresh_context_and_revision_from_state_db()
                         _heal_kwargs2 = _build_run_conversation_kwargs(
                             _heal_agent.run_conversation,
+                            session=s,
                             user_message=user_message,
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_agent(

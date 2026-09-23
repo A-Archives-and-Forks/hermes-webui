@@ -13479,7 +13479,7 @@ def _handle_session_get(handler, parsed) -> bool:
             "tool_calls": _session_tool_calls,
             "active_stream_id": getattr(s, "active_stream_id", None),
             "pending_user_message": getattr(s, "pending_user_message", None),
-            "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
+            "pending_attachments": getattr(s, "pending_attachments", []) if (load_messages or getattr(s, "pending_user_message", None)) else [],
             "pending_started_at": getattr(s, "pending_started_at", None),
             "pending_user_source": getattr(s, "pending_user_source", None),
             "context_length": _persisted_cl,
@@ -22984,6 +22984,7 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = effective_source
+    s._webui_pending_user_timestamp_identity = None
     if retained_user is not None:
         from api.process_event_utils import build_active_turn_token
 

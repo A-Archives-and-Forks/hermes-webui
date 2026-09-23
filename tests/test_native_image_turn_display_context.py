@@ -1,7 +1,11 @@
 """Native-image turns keep model context private from the visible transcript."""
 
 import json
+import shutil
 import sqlite3
+import subprocess
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +27,21 @@ IMAGE_A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAA
 IMAGE_B = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC"
 RECALL_NOTE = "Recall note: the sample is neutral."
 PLUGIN_NOTE = "Pre-call note: summarize visible details only."
+
+
+def _js_function_source(src, name):
+    start = src.find(f"function {name}(")
+    assert start != -1, f"{name} not found"
+    brace = src.find("{", start)
+    depth = 0
+    for index in range(brace, len(src)):
+        if src[index] == "{":
+            depth += 1
+        elif src[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:index + 1]
+    raise AssertionError(f"{name} body unterminated")
 
 
 def _native_user_content(text, image_url, extra_text=()):
@@ -206,6 +225,368 @@ def _write_state_db(path, session_id, rows):
                 for content, timestamp, api_content in rows
             ],
         )
+
+
+@pytest.mark.parametrize("msg_limit", [None, 5])
+@pytest.mark.parametrize("attachment_mode", ["native_image", "text_attachment"])
+def test_get_session_keeps_pending_agent_projection_private_but_in_context(
+    monkeypatch, tmp_path, msg_limit, attachment_mode,
+):
+    import api.config
+    import api.models as models
+    import api.session_ops
+    from api import routes
+
+    timestamp = time.time()
+    stream_id = "pending-webui-stream"
+    session_id = f"pending-display-{attachment_mode}-{'full' if msg_limit is None else 'limited'}"
+    prompt = "Recall note: I authored this literal text."
+    attachments = [
+        {"name": "sample.png" if attachment_mode == "native_image" else "sample.txt",
+         "mime": "image/png" if attachment_mode == "native_image" else "text/plain",
+         "is_image": attachment_mode == "native_image"}
+    ]
+    if attachment_mode == "native_image":
+        agent_content = _native_user_content(
+            prompt, IMAGE_A, (RECALL_NOTE, PLUGIN_NOTE),
+        )
+        stored_content = "\x00json:" + json.dumps(agent_content)
+        api_content = json.dumps(agent_content)
+    else:
+        agent_content = f"{prompt}\n\n{RECALL_NOTE}\n\n{PLUGIN_NOTE}"
+        stored_content = agent_content
+        api_content = None
+
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+            "content TEXT, timestamp REAL, active INTEGER DEFAULT 1, api_content TEXT)"
+        )
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    session = models.Session(
+        session_id=session_id,
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=[],
+        context_messages=[],
+        active_stream_id=stream_id,
+        pending_user_message=prompt,
+        pending_attachments=attachments,
+        pending_started_at=timestamp,
+        pending_user_source="webui",
+        source_tag="webui",
+        session_source="webui",
+    )
+    session.save(skip_index=True)
+
+    def agent_run(user_message, persist_user_timestamp=None, **_kwargs):
+        assert user_message == prompt
+        assert persist_user_timestamp == timestamp
+        persisted = models.Session.load(session_id)
+        assert persisted._webui_pending_user_timestamp_identity == (stream_id, timestamp)
+        with sqlite3.connect(db_path) as conn:
+            conn.executemany(
+                "INSERT INTO messages (id, session_id, role, content, timestamp, api_content) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (1, session_id, "user", "A preserved prior turn", timestamp - 2, None),
+                    (2, session_id, "user", stored_content, timestamp, api_content),
+                    (3, session_id, "user", "A distinct later user row", timestamp + 2, None),
+                    (4, "other-profile-session", "user", stored_content, timestamp, api_content),
+                ],
+            )
+
+    from api.streaming import _build_run_conversation_kwargs
+
+    run_kwargs = _build_run_conversation_kwargs(
+        agent_run,
+        session=session,
+        user_message=prompt,
+        system_message="system",
+        conversation_history=[],
+        conversation_history_revision=None,
+        task_id=session_id,
+        persist_user_message=prompt,
+        persist_user_timestamp=timestamp,
+    )
+    agent_run(**run_kwargs)
+    # A cold Session.load restores only the proof persisted before the Agent
+    # wrote its pending user row.
+    session = models.Session.load(session_id)
+    assert session._webui_pending_user_timestamp_identity == (stream_id, timestamp)
+
+    response = {}
+    # Simulate a WebUI process restart: no stream or worker remains, but the
+    # pending timestamp is inside the existing stale-repair grace window.
+    monkeypatch.setattr(routes, "STREAMS", {})
+    monkeypatch.setattr(api.config, "ACTIVE_RUNS", {})
+    with models.LOCK:
+        models.SESSIONS.pop(session_id, None)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda *_args: {})
+    monkeypatch.setattr(routes, "find_run_summary", lambda *_args: None)
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr(api.session_ops, "regeneration_state", lambda _session: ([], []))
+    monkeypatch.setattr(api.session_ops, "regeneration_authority", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: (
+            response.update(payload=payload, status=status) or payload
+        ),
+    )
+    query = f"session_id={session_id}&resolve_model=0"
+    if msg_limit is not None:
+        query += f"&msg_limit={msg_limit}"
+    routes._handle_session_get(
+        None,
+        SimpleNamespace(path="/api/session", query=query),
+    )
+
+    assert response["status"] == 200
+    public_session = response["payload"]["session"]
+    public_messages = public_session["messages"]
+    assert public_session["active_stream_id"] == stream_id
+    assert public_session["pending_user_message"] == prompt
+    assert public_session["pending_attachments"] == attachments
+    assert prompt in json.dumps(public_session)
+    assert "_webui_pending_user_timestamp_identity" not in json.dumps(public_session)
+    assert RECALL_NOTE not in json.dumps(public_session)
+    assert PLUGIN_NOTE not in json.dumps(public_session)
+    assert all(
+        RECALL_NOTE not in json.dumps(message)
+        and PLUGIN_NOTE not in json.dumps(message)
+        for message in public_messages
+    )
+    assert any(message.get("content") == "A preserved prior turn" for message in public_messages)
+    assert any(message.get("content") == "A distinct later user row" for message in public_messages)
+    assert not any(message.get("session_id") == "other-profile-session" for message in public_messages)
+
+    state_rows = models.get_state_db_session_messages(session_id)
+    context = models.reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=state_rows,
+    )
+    active_context_rows = [
+        message for message in context
+        if message.get("role") == "user" and message.get("timestamp") == timestamp
+    ]
+    assert len(active_context_rows) == 1
+    assert RECALL_NOTE in json.dumps(active_context_rows[0]["content"])
+    assert PLUGIN_NOTE in json.dumps(active_context_rows[0]["content"])
+    if attachment_mode == "native_image":
+        assert any(
+            part.get("type") == "image_url"
+            for part in active_context_rows[0]["content"]
+        )
+    replay_rows = _sanitize_messages_for_agent(context)
+    assert sum(
+        RECALL_NOTE in json.dumps(message)
+        and PLUGIN_NOTE in json.dumps(message)
+        for message in replay_rows
+    ) == 1
+    assert RECALL_NOTE in json.dumps(replay_rows)
+    assert PLUGIN_NOTE in json.dumps(replay_rows)
+    assert not session.messages and not session.context_messages
+
+    # A metadata-only poll may arrive after the full load. It must not erase
+    # the pending attachment from the browser's session state.
+    response.clear()
+    routes._handle_session_get(
+        None,
+        SimpleNamespace(
+            path="/api/session",
+            query=f"session_id={session_id}&resolve_model=0&messages=0",
+        ),
+    )
+    metadata = response["payload"]["session"]
+    assert metadata["pending_user_message"] == prompt
+    assert metadata["pending_attachments"] == attachments
+    assert RECALL_NOTE not in json.dumps(metadata)
+    assert PLUGIN_NOTE not in json.dumps(metadata)
+
+    next_session = models.Session.load(session_id)
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "deferred")
+    routes._prepare_chat_start_session_for_stream(
+        next_session,
+        msg="A separate next turn",
+        attachments=[],
+        workspace="/fixture",
+        model="fixture-model",
+        model_provider=None,
+        stream_id="next-webui-stream",
+        started_at=timestamp + 1,
+    )
+    assert next_session._webui_pending_user_timestamp_identity is None
+    assert models.Session.load(session_id)._webui_pending_user_timestamp_identity is None
+
+
+def test_pending_row_identity_requires_timestamp_handoff_to_active_agent():
+    from api.models import _suppress_native_image_display_mirrors
+    from api.streaming import _build_run_conversation_kwargs
+
+    def modern_run(user_message, persist_user_timestamp=None):
+        return None
+
+    def legacy_run(user_message):
+        return None
+
+    def opaque_run(user_message, **kwargs):
+        return None
+
+    timestamp = 1700000000.125
+    session = SimpleNamespace(
+        active_stream_id="stream-identity",
+        pending_started_at=timestamp,
+        pending_user_message="prompt",
+        pending_user_source="webui",
+    )
+    kwargs = {
+        "session": session,
+        "user_message": "prompt",
+        "system_message": "system",
+        "conversation_history": [],
+        "conversation_history_revision": None,
+        "task_id": "session",
+        "persist_user_message": "prompt",
+        "persist_user_timestamp": timestamp,
+    }
+    modern = _build_run_conversation_kwargs(modern_run, **kwargs)
+    assert modern["persist_user_timestamp"] == timestamp
+    assert session._webui_pending_user_timestamp_identity == (
+        "stream-identity", timestamp,
+    )
+    rebuilt = _build_run_conversation_kwargs(modern_run, **kwargs)
+    assert rebuilt["persist_user_timestamp"] == timestamp
+    assert session._webui_pending_user_timestamp_identity == (
+        "stream-identity", timestamp,
+    )
+    # Credential-heal fallback can replace the callable mid-turn. Proof from
+    # the first invocation must not authorize rows from an older Agent.
+    fallback = _build_run_conversation_kwargs(legacy_run, **kwargs)
+    assert "persist_user_timestamp" not in fallback
+    assert session._webui_pending_user_timestamp_identity is None
+
+    legacy_session = SimpleNamespace(
+        active_stream_id="stream-identity",
+        pending_started_at=timestamp,
+        pending_user_message="prompt",
+        pending_user_source="webui",
+    )
+    legacy = _build_run_conversation_kwargs(
+        legacy_run, **{**kwargs, "session": legacy_session}
+    )
+    assert "persist_user_timestamp" not in legacy
+    assert legacy_session._webui_pending_user_timestamp_identity is None
+    opaque = _build_run_conversation_kwargs(
+        opaque_run, **{**kwargs, "session": legacy_session}
+    )
+    assert "persist_user_timestamp" in opaque
+    assert legacy_session._webui_pending_user_timestamp_identity is None
+    row = {"role": "user", "content": "Agent-only memory", "timestamp": timestamp}
+    assert _suppress_native_image_display_mirrors(legacy_session, [row]) == [row]
+
+    for field, value in (
+        ("active_stream_id", "another-stream"),
+        ("pending_user_source", "cli"),
+        ("pending_started_at", timestamp + 1),
+        ("pending_user_message", None),
+    ):
+        mismatched = SimpleNamespace(
+            active_stream_id="stream-identity",
+            pending_started_at=timestamp,
+            pending_user_message="prompt",
+            pending_user_source="webui",
+            _webui_pending_user_timestamp_identity=("stream-identity", timestamp),
+        )
+        setattr(mismatched, field, value)
+        assert _suppress_native_image_display_mirrors(mismatched, [row]) == [row]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_clean_pending_get_payload_renders_submitted_prompt_and_attachment():
+    root = Path(__file__).resolve().parents[1]
+    ui_js = (root / "static" / "ui.js").read_text(encoding="utf-8")
+    sessions_js = (root / "static" / "sessions.js").read_text(encoding="utf-8")
+    helpers = "\n".join(
+        [
+            *[
+                _js_function_source(sessions_js, name)
+                for name in (
+                    "_messageComparableText",
+                    "_stripAttachedFilesMarker",
+                    "_stripForcedSkillEnvelope",
+                    "_normalizeUserTranscriptText",
+                    "_sameTranscriptMessage",
+                    "_currentTailUserMessage",
+                    "_hasCurrentTailUserDuplicate",
+                    "_mergePendingSessionMessage",
+                )
+            ],
+            *[
+                _js_function_source(ui_js, name)
+                for name in (
+                    "_pendingCurrentTailUserMessage",
+                    "_messageTimestampSeconds",
+                    "_activeTurnTokenMatches",
+                    "_pendingActiveTurnUserMessage",
+                    "getPendingSessionMessage",
+                )
+            ],
+        ]
+    )
+    payload = {
+        "session_id": "pending-display-session",
+        "active_stream_id": "pending-webui-stream",
+        "pending_started_at": 1700000000.125,
+        "pending_user_source": "webui",
+        "pending_user_message": "Recall note: I authored this literal text.",
+        "pending_attachments": [{"name": "literal-note.txt", "mime": "text/plain"}],
+        "messages": [],
+    }
+    assert "_mergePendingSessionMessage(S.session,S.messages)" in sessions_js
+    assert "_mergePendingSessionMessage(data.session, S.messages)" in ui_js
+    assert "await refreshSession();" in ui_js
+    script = f"""
+{helpers}
+const session={json.dumps(payload)};
+const messages=session.messages;
+const inserted=_mergePendingSessionMessage(session,messages);
+const duplicate=_mergePendingSessionMessage(session,messages);
+process.stdout.write(JSON.stringify({{inserted,duplicate,messages}}));
+"""
+    completed = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    result = json.loads(completed.stdout)
+    assert result["inserted"] is True
+    assert result["duplicate"] is False
+    assert result["messages"] == [
+        {
+            "role": "user",
+            "content": "Recall note: I authored this literal text.",
+            "attachments": [{"name": "literal-note.txt", "mime": "text/plain"}],
+            "_ts": 1700000000.125,
+            "_pending": True,
+            "_source": "webui",
+        }
+    ]
 
 
 def test_settlement_reload_and_next_turn_keep_one_clean_bubble_and_rich_context(
@@ -801,7 +1182,16 @@ def test_marked_native_image_mirror_repairs_malformed_sidecar_once():
         assert replay_rows[0]["api_content"] == api_content
 
 
-def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery():
+@pytest.mark.parametrize(
+    ("sidecar_payload", "state_payload"),
+    [
+        ("OLDER-SIDECAR-BYTES", "NEWER-DB-BYTES"),
+        ("NEWER-SIDECAR-BYTES", "OLDER-DB-BYTES"),
+    ],
+)
+def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery(
+    sidecar_payload, state_payload,
+):
     import api.models as models
 
     timestamp = 860.0
@@ -814,19 +1204,21 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery():
         if message.get("_active_turn_token") == identity["token"]
     )
     mirror = _durable_agent_content(context_user["content"])
-    session.messages.append({
+    sidecar_mirror_row = {
         "role": "user",
         "content": mirror,
         "timestamp": timestamp,
         "_state_db_row_id": 42,
-        "api_content": "OLD-PROVIDER-BYTES",
-    })
+        "api_content": sidecar_payload,
+    }
+    session.messages.append(dict(sidecar_mirror_row))
+    session.context_messages.append(dict(sidecar_mirror_row))
     state_row = {
         "role": "user",
         "content": mirror,
         "timestamp": timestamp,
         "_state_db_row_id": 42,
-        "api_content": "NEW-PROVIDER-BYTES",
+        "api_content": state_payload,
     }
     marked = models._suppress_native_image_display_mirrors(session, [state_row])
     assert marked[0]["_webui_unmatched_native_image_mirror"] is True
@@ -851,15 +1243,19 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery():
             message for message in context
             if message.get("_state_db_row_id") == 42
         ]
-        assert len(display_row_42) == 1
-        assert display_row_42[0]["api_content"] == "NEW-PROVIDER-BYTES"
-        assert len(context_row_42) == 1
-        assert context_row_42[0]["api_content"] == "NEW-PROVIDER-BYTES"
+        assert len(display_row_42) == 2
+        assert {message["api_content"] for message in display_row_42} == {
+            sidecar_payload, state_payload,
+        }
+        assert len(context_row_42) == 2
+        assert {message["api_content"] for message in context_row_42} == {
+            sidecar_payload, state_payload,
+        }
 
         public = public_session_projection({"messages": display})["messages"]
         public_mirrors = [message for message in public if message.get("content") == mirror]
-        assert len(public_mirrors) == 1
-        assert "api_content" not in public_mirrors[0]
+        assert len(public_mirrors) == 2
+        assert all("api_content" not in message for message in public_mirrors)
         display_image_turn = next(
             message for message in display
             if message.get("_active_turn_token") == identity["token"]
@@ -873,8 +1269,22 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery():
 
         replay = _sanitize_messages_for_agent(context)
         replay_row_42 = [message for message in replay if message.get("content") == mirror]
-        assert len(replay_row_42) == 1
-        assert replay_row_42[0]["api_content"] == "NEW-PROVIDER-BYTES"
+        assert len(replay_row_42) == 2
+        assert {message["api_content"] for message in replay_row_42} == {
+            sidecar_payload, state_payload,
+        }
+        live_row_42 = [
+            message for message in session.messages
+            if message.get("_state_db_row_id") == 42
+        ]
+        if first_public is None:
+            assert len(live_row_42) == 1
+            assert live_row_42[0]["api_content"] == sidecar_payload
+        else:
+            assert len(live_row_42) == 2
+            assert {message["api_content"] for message in live_row_42} == {
+                sidecar_payload, state_payload,
+            }
         replay_image_turn = next(
             message for message in replay
             if isinstance(message.get("content"), list)

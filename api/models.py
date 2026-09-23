@@ -2563,11 +2563,23 @@ def _transcript_already_advanced_past_pending(session) -> bool:
     recovery active, because that is precisely the interrupted-turn shape
     the recovery path exists for.
 
+    The transcript heuristic alone is not durable: an unflagged interim
+    prose row ("Let me check the logs first.") followed by tool rows that
+    were never followed by a final answer in the transcript passes the
+    predicate as a "completed" turn, but the stream may have died mid-
+    tool and the run journal was never marked done. 9/22 re-gate: also
+    require durable same-stream terminal evidence — the run journal
+    must report ``completed`` (a ``done`` or ``stream_end`` event) for
+    the pending stream id. Without it, fall through to the normal
+    journal-recovery path so the partial output is replayed and the
+    interruption is marked.
+
     The suppression is therefore deliberately conservative: whenever the
-    turn's identity or its completion cannot be positively proven, this
-    helper returns False and the prompt is recovered instead of discarded.
-    A false negative leaves a visible cosmetic duplicate; a false positive
-    silently destroys a prompt or a response.
+    turn's identity, its completion, or its durable terminal evidence
+    cannot be positively proven, this helper returns False and the
+    prompt is recovered instead of discarded. A false negative leaves a
+    visible cosmetic duplicate; a false positive silently destroys a
+    prompt or a response.
 
     Idempotent: this is a pure read that does not mutate the session.
     Running recovery twice therefore produces the same outcome.
@@ -2582,10 +2594,21 @@ def _transcript_already_advanced_past_pending(session) -> bool:
     for idx, message in enumerate(messages):
         if not _transcript_user_row_is_pending_turn(message, session, pending_token):
             continue
-        # Found the pending turn's own user row at ``idx``. Only a genuine
-        # final answer inside that turn's boundary proves the transcript
-        # advanced past it.
-        return _pending_turn_has_final_assistant_answer(messages, idx)
+        # Found the pending turn's own user row at ``idx``. A genuine
+        # final answer inside that turn's boundary is necessary but not
+        # sufficient: the run journal must also have a same-stream
+        # terminal ``completed`` event, otherwise unflagged interim
+        # prose ("Let me check the logs first.") followed by tool rows
+        # can be mistaken for a finished turn.
+        if not _pending_turn_has_final_assistant_answer(messages, idx):
+            continue
+        stream_id = getattr(session, 'active_stream_id', None)
+        if _run_journal_terminal_state(session, stream_id) != 'completed':
+            # No durable same-stream terminal evidence — the turn may
+            # have died mid-tool. Fall through to the journal-recovery
+            # path instead of suppressing it.
+            return False
+        return True
     return False
 
 

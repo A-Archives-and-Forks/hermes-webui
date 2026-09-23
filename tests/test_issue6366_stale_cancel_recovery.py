@@ -87,7 +87,9 @@ class _FakeSession:
         started_at=None,
         source=None,
         attachments=None,
+        session_id="fake-session-6366",
     ):
+        self.session_id = session_id
         self.pending_user_message = pending
         self.messages = list(messages or [])
         self.active_stream_id = stream_id
@@ -299,7 +301,9 @@ def test_advances_past_pending_when_user_matched_and_settled_assistant_follows()
     """Canonical bug shape: a stale pending turn's user row sits at
     an older index, and a newer settled assistant row follows.
     Recovery must not append duplicate rows after the assistant.
-    Identity comes from the pending stream's own active-turn token."""
+    Identity comes from the pending stream's own active-turn token;
+    the journal is marked ``done`` (terminal_state ``completed``) so
+    the suppression gate is satisfied."""
     s = _FakeSession(
         pending="hello world",
         messages=[
@@ -318,6 +322,7 @@ def test_advances_past_pending_when_user_matched_and_settled_assistant_follows()
         source="webui",
         attachments=[{"name": "a.png"}],
     )
+    _write_journal(s.session_id, "stream-a", [("done", {})])
     assert _transcript_already_advanced_past_pending(s) is True
 
 
@@ -430,7 +435,8 @@ def test_does_not_advance_when_no_messages():
 def test_advances_past_pending_with_unrelated_intervening_rows():
     """The pending turn's user row followed by a tool row and THEN a final
     answer counts as a real advance. The helper scans past non-assistant
-    roles correctly."""
+    roles correctly, and the journal is marked ``done`` so the durable
+    terminal evidence gate is satisfied."""
     s = _FakeSession(
         pending="hello world",
         messages=[
@@ -450,13 +456,16 @@ def test_advances_past_pending_with_unrelated_intervening_rows():
         source="webui",
         attachments=[],
     )
+    _write_journal(s.session_id, "stream-a", [("done", {})])
     assert _transcript_already_advanced_past_pending(s) is True
 
 
 def test_helper_is_pure_read_idempotent():
     """Idempotence: running the helper twice on the same session
     state returns the same result. The helper does not mutate the
-    session, so recovery is automatically safe to run twice."""
+    session, so recovery is automatically safe to run twice. Journal
+    is marked ``done`` so the durable terminal evidence gate passes
+    on both invocations."""
     s = _FakeSession(
         pending="hello world",
         messages=[
@@ -475,9 +484,11 @@ def test_helper_is_pure_read_idempotent():
         source="webui",
         attachments=[],
     )
+    _write_journal(s.session_id, "stream-a", [("done", {})])
     first = _transcript_already_advanced_past_pending(s)
     second = _transcript_already_advanced_past_pending(s)
-    assert first == second is True
+    assert first is True
+    assert second is True
     # And the session state was not mutated.
     assert s.pending_user_message == "hello world"
     assert len(s.messages) == 2
@@ -544,6 +555,7 @@ def test_advances_past_pending_with_exact_token_match():
         source="webui",
         attachments=[{"name": "a.png"}],
     )
+    _write_journal(s.session_id, "stream-a", [("done", {})])
     assert _transcript_already_advanced_past_pending(s) is True
 
 
@@ -592,6 +604,92 @@ def test_does_not_advance_when_tool_execution_was_interrupted():
         started_at=222.5,
     )
     assert _transcript_already_advanced_past_pending(s) is False
+
+
+def test_does_not_advance_when_unflagged_interim_prose_precedes_tools():
+    """9/22 re-gate regression: an unflagged interim prose row
+    ("Let me check the logs first.") followed by tool rows passes the
+    transcript predicate (``_pending_turn_has_final_assistant_answer``
+    returns True at the first visible assistant row), but the run
+    journal was never marked ``done`` — the stream may have died mid-
+    tool. Without durable same-stream terminal evidence the suppression
+    gate must stay closed, so ``_transcript_already_advanced_past_pending``
+    returns False and the recovery path is free to run."""
+    s = _FakeSession(
+        pending="check the failing test",
+        messages=[
+            {
+                "role": "user",
+                "content": "check the failing test",
+                "timestamp": 222,
+                "_active_turn_token": "stream-a:222.5",
+            },
+            # The bug shape: an unflagged assistant row with visible
+            # text and no tool_calls. The transcript heuristic accepts
+            # this as a final answer (it carries visible text and has
+            # no _partial / _error / _recovered marker), but the row
+            # is actually pre-final interim prose that the repository
+            # journals as ``interim_assistant`` while the model
+            # decides what tool to call. The tool_calls that
+            # produced the following tool rows live on a *later* row
+            # in the original stream — the journal has not yet
+            # recorded them because the WebUI process died.
+            {
+                "role": "assistant",
+                "content": "Let me check the logs first.",
+            },
+            # The stream then ran tools before dying. The transcript
+            # therefore has tool rows after the unflagged prose.
+            {"role": "tool", "tool_call_id": "call_1", "content": "log tail"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "log grep"},
+        ],
+        stream_id="stream-a",
+        started_at=222.5,
+    )
+    # The journal has tokens and an interim_assistant checkpoint, but
+    # no ``done`` / ``stream_end`` — the run is still mid-tool from
+    # the journal's point of view.
+    _write_journal(
+        s.session_id, "stream-a",
+        [
+            ("token", {"text": "Let me check the logs first."}),
+            ("interim_assistant", {"text": "Let me check the logs first."}),
+            ("tool", {"name": "terminal", "tid": "call_1", "preview": "tail -n 50"}),
+            ("tool_complete", {"name": "terminal", "tid": "call_1", "preview": "log tail"}),
+            ("tool", {"name": "terminal", "tid": "call_2", "preview": "grep ERROR"}),
+        ],
+    )
+    assert _transcript_already_advanced_past_pending(s) is False
+
+
+def test_does_advance_when_journal_marked_done_after_interim_prose():
+    """Companion positive control: when the run journal IS marked
+    ``done`` (terminal_state ``completed``) for the same stream, the
+    suppression gate opens even though the transcript carries the
+    unflagged interim prose + tool shape. Without the journal evidence
+    the predicate would still hold the gate closed, so this case pins
+    the boundary between the two new branches."""
+    s = _FakeSession(
+        pending="check the failing test",
+        messages=[
+            {
+                "role": "user",
+                "content": "check the failing test",
+                "timestamp": 222,
+                "_active_turn_token": "stream-a:222.5",
+            },
+            {
+                "role": "assistant",
+                "content": "Let me check the logs first.",
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "log tail"},
+            {"role": "assistant", "content": "The logs show a stale lock.", "timestamp": 223},
+        ],
+        stream_id="stream-a",
+        started_at=222.5,
+    )
+    _write_journal(s.session_id, "stream-a", [("done", {})])
+    assert _transcript_already_advanced_past_pending(s) is True
 
 
 # ── full _apply_core_sync_or_error_marker recovery cases ────────────────
@@ -846,8 +944,9 @@ def test_full_recovery_runs_journal_replay_for_non_final_tails(tmp_path, tail_ro
 
 def test_full_recovery_suppresses_duplicates_only_for_genuine_final_answer(tmp_path):
     """Positive control for the suppression branch: when the pending turn's
-    own user row is followed by a genuine final answer, the repair clears
-    the stale pending state and appends nothing.
+    own user row is followed by a genuine final answer AND the run journal
+    has the same-stream ``done`` event (durable terminal evidence), the
+    repair clears the stale pending state and appends nothing.
     """
     session_id = "issue6366_suppression_control"
     stream_id = "stream-stale-cancelled"
@@ -873,7 +972,12 @@ def test_full_recovery_suppresses_duplicates_only_for_genuine_final_answer(tmp_p
         pending_started_at=started_at,
         active_stream_id=stream_id,
     )
-    _write_journal(session_id, stream_id, [("token", {"text": "stale partial text"})])
+    # Same-stream durable terminal evidence — the run journal was marked
+    # ``done`` (terminal_state ``completed``) so the suppression gate
+    # opens and the transcript-only advance is accepted as terminal.
+    # No visible token events are written so the line-3648 path's
+    # ``_append_journaled_partial_output`` has nothing to append.
+    _write_journal(session_id, stream_id, [("done", {})])
     before = json.dumps(session.messages, ensure_ascii=False)
 
     assert _apply_core_sync_or_error_marker(
@@ -895,3 +999,130 @@ def test_full_recovery_suppresses_duplicates_only_for_genuine_final_answer(tmp_p
     assert session.pending_started_at is None
     assert session.pending_user_source is None
     assert session.pending_attachments == []
+
+
+def test_full_recovery_runs_journal_replay_for_unflagged_interim_prose(tmp_path):
+    """9/22 re-gate regression, end-to-end: the durable transcript
+    already advanced past the pending turn into an unflagged interim
+    prose row followed by tool rows, but the run journal was never
+    marked ``done``. Before the fix,
+    ``_transcript_already_advanced_past_pending`` returned True at the
+    first visible assistant row, ``_apply_core_sync_or_error_marker``
+    cleared the pending state, and the user saw a half-finished turn
+    with the journal's partial output and the interruption marker
+    both suppressed. The fix requires durable same-stream terminal
+    evidence (``done`` / ``stream_end`` → ``completed``) before
+    suppressing recovery, so the run journal is replayed and the
+    ``interrupted`` marker is appended for this unflagged-prose
+    shape.
+    """
+    session_id = "issue6366_unflagged_interim_prose"
+    stream_id = "stream-unflagged-interim"
+    started_at = 1_700_001_200.75
+
+    session = Session(
+        session_id=session_id,
+        title="Unflagged interim prose followed by tool rows",
+        messages=[
+            {
+                "role": "user",
+                "content": "check the failing test",
+                "timestamp": int(started_at),
+                "_active_turn_token": f"{stream_id}:{started_at:.17g}",
+            },
+            # The bug shape: an unflagged assistant row that the
+            # transcript heuristic accepts as a "final answer" because
+            # it carries visible text and no _partial / _error /
+            # _recovered / _recovered_from_run_journal hint. The
+            # stream had just started talking about what it was about
+            # to do, then ran tools. The tool_calls that produced the
+            # following tool rows live on a later row in the original
+            # stream — the WebUI process died before the tool-call
+            # assistant row was committed, so the transcript currently
+            # shows just the pre-final prose followed by tool result
+            # rows.
+            {
+                "role": "assistant",
+                "content": "Let me check the logs first.",
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "log tail"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "log grep"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "check the failing test"},
+        ],
+        pending_user_message="check the failing test",
+        pending_started_at=started_at,
+        active_stream_id=stream_id,
+    )
+    # The run journal has visible progress — the unflagged prose was
+    # emitted as a token, the run was checkpointed as interim_assistant,
+    # and one of the tool rows finished. Crucially there is no
+    # ``done`` / ``stream_end`` event: the stream died mid-tool, so
+    # the journal has no durable terminal evidence.
+    _write_journal(
+        session_id, stream_id,
+        [
+            ("reasoning", {"text": "Reading the assertion first."}),
+            ("token", {"text": "Let me check the logs first."}),
+            ("interim_assistant", {"text": "checkpoint"}),
+            (
+                "tool",
+                {
+                    "name": "terminal",
+                    "tid": "call_1",
+                    "preview": "tail -n 50",
+                    "args": {"command": "tail -n 50"},
+                },
+            ),
+            (
+                "tool_complete",
+                {
+                    "name": "terminal",
+                    "tid": "call_1",
+                    "preview": "log tail",
+                    "duration": 0.05,
+                },
+            ),
+        ],
+    )
+    before = json.dumps(session.messages, ensure_ascii=False)
+
+    assert _apply_core_sync_or_error_marker(
+        session,
+        tmp_path / "missing-core-transcript.json",
+        stream_id_for_recheck=stream_id,
+    ) is True
+
+    # Recovery actually appended rows rather than clearing pending
+    # state only.
+    assert json.dumps(session.messages, ensure_ascii=False) != before
+    # The journal's visible partial output is back in the transcript:
+    # the "Let me check the logs first." prose that was emitted over
+    # SSE before the WebUI process died is now visible again.
+    assert any(
+        message.get("_recovered_from_run_journal")
+        and "Let me check the logs first." in str(message.get("content", ""))
+        for message in session.messages
+    )
+    # And the interrupted turn is marked, so the user can see the
+    # stream was cut off rather than presented with a half-finished
+    # turn that looks complete.
+    interrupted_marker = next(
+        (
+            message
+            for message in session.messages
+            if message.get("_error") and message.get("type") == "interrupted"
+        ),
+        None,
+    )
+    assert interrupted_marker is not None
+    assert "partial output above was recovered" in str(
+        interrupted_marker.get("content", ""),
+    )
+    # Pending state was cleared (recovery always clears it) and no
+    # duplicate user row was appended ahead of the journal replay —
+    # the original user row is still the first message.
+    assert session.messages[0]["content"] == "check the failing test"
+    assert session.pending_user_message is None
+    assert session.active_stream_id is None

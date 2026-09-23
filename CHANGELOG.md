@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **A cancelled or recovered turn no longer duplicates an answer that was already saved (#6366).**
+  When a completed assistant turn had been persisted and a later cancel/recovery path ran for the
+  same pending turn, recovery could append a duplicate user turn plus a `_partial` clone of the
+  journal. Recovery now stops once the transcript has already advanced past the pending turn.
+  (#7682 by @happy5318)
+
 - **The live stream reports which model actually served the turn.** A new additive `runtime_model`
   SSE event carries the model (and provider, when known) that the Agent reported while producing
   output, separately from the model that was requested. It is journaled for replay, is exposed as

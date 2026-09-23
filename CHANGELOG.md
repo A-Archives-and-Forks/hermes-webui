@@ -28,6 +28,11 @@
 
 ### Fixed
 
+- **Saving a cron job with the model picker at "Default" keeps its provider-only pin.** Editing a job
+  pinned to a provider with no model (the usual shape for a self-hosted OpenAI-compatible router)
+  sent `provider: null` and wiped the pin. The editor now preserves a provider-only pin when the
+  model picker is left at Default. (#7779 by @cushingw)
+
 - **The live stream reports which model actually served the turn.** A new additive `runtime_model`
   SSE event carries the model (and provider, when known) that the Agent reported while producing
   output, separately from the model that was requested. It is journaled for replay, is exposed as

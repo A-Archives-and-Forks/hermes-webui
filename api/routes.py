@@ -21891,6 +21891,19 @@ def _handle_live_models(handler, parsed):
                 list) would be collapsed to a single model.  Only an explicit
                 ``models`` allowlist expresses "show exactly these models".
 
+                An auto-discovered catalog is NOT an allowlist: when Hermes
+                persisted discovery results back into config (``models: {...}``
+                plus ``models_discovered: true``), that mapping is a snapshot
+                of what the gateway exposed at discovery time.  Gating on it
+                would permanently pin the live catalog to the first-discovery
+                set, silently dropping any model the user pulls in later
+                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+                is the shared predicate the ``/api/models`` path already uses;
+                when it says "discovered", return no allowlist and let the
+                live probe win.  An explicit ``discover_models: false`` opt-out
+                re-pins the catalog (the predicate accounts for it), so a
+                hand-pinned discovered mapping still filters.
+
                 The plural value is decoded through ``_parse_config_string_list()``
                 because ``hermes config set`` / JSON-mode editor saves persist
                 lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
@@ -21900,6 +21913,10 @@ def _handle_live_models(handler, parsed):
                 with the full upstream catalog — the same class of bug as the
                 ``skills.disabled`` regression (#7120 / #7134).
                 """
+                from api.config import _provider_models_are_discovered_catalog
+
+                if _provider_models_are_discovered_catalog(_cp):
+                    return []
                 _ids = []
                 _models = _cp.get("models")
                 # Serialized shapes only: ``hermes config set`` / JSON-mode

@@ -14,6 +14,9 @@ Covered shapes:
   * malformed serialized ``models``            → safe, treated as scalar name
   * allowlisted model absent from live catalog → appended
   * live probe failure                         → falls back to config ids
+  * ``models_discovered: true`` catalog        → live catalog NOT gated (discovery
+                                                 metadata is not an allowlist)
+  * discovered + ``discover_models: false``    → still pinned (explicit opt-out)
 """
 
 import io
@@ -251,3 +254,91 @@ def test_empty_allowlist_is_treated_as_not_configured(monkeypatch, models_value)
         "never collapse the picker to zero models"
     )
     assert _ids(payload), "picker must never be emptied by an empty allowlist"
+
+
+def test_models_discovered_catalog_is_not_an_allowlist(monkeypatch):
+    """``models_discovered: true`` marks ``models:`` as discovery metadata (#7165).
+
+    Hermes persists *discovery results* back into config as ``models: {...}``
+    plus ``models_discovered: true``. That mapping is a snapshot of what the
+    gateway exposed at discovery time — NOT a hand-curated allowlist. Treating
+    it as one permanently pins the live catalog to the first-discovery set, so
+    a model the user later pulls into LM Studio / Ollama is silently dropped
+    from ``/api/models/live`` (the exact regression the gate reproduced: merge
+    base returned ``saved-a``, ``saved-b`` AND ``new-live-c``; the pinned head
+    dropped ``new-live-c``).
+    """
+    import api.routes as routes
+
+    provider = dict(
+        _BASE_PROVIDER,
+        models={
+            "saved-a": {"context_length": 128000},
+            "saved-b": {"context_length": 32000},
+        },
+        models_discovered=True,
+    )
+    payload, requested = _run_live_models(
+        monkeypatch,
+        routes,
+        provider,
+        catalog=["saved-a", "saved-b", "new-live-c"],
+    )
+
+    assert requested, "live /v1/models probe was never attempted"
+    assert _ids(payload) == ["saved-a", "saved-b", "new-live-c"], (
+        "a discovered catalog must not gate the live probe — models that "
+        "appear upstream after discovery (new-live-c) must reach the picker"
+    )
+
+
+def test_discovered_catalog_with_discover_models_false_still_pins(monkeypatch):
+    """``discover_models: false`` re-pins a discovered catalog (control).
+
+    The explicit opt-out wins over ``models_discovered: true`` — same rule as
+    the ``/api/models`` catalog path (`api.config._provider_discover_allowed`).
+    Filtering to the configured set must survive the discovered-catalog fix.
+    """
+    import api.routes as routes
+
+    provider = dict(
+        _BASE_PROVIDER,
+        models={
+            "saved-a": {"context_length": 128000},
+            "saved-b": {"context_length": 32000},
+        },
+        models_discovered=True,
+        discover_models=False,
+    )
+    payload, _ = _run_live_models(
+        monkeypatch,
+        routes,
+        provider,
+        catalog=["saved-a", "saved-b", "new-live-c"],
+    )
+
+    assert _ids(payload) == ["saved-a", "saved-b"]
+
+
+def test_discovered_catalog_probe_failure_falls_back_to_saved_models(monkeypatch):
+    """Discovered + failed probe → saved models, not an empty picker (control).
+
+    Releasing the allowlist must not empty the fallback: when the live probe
+    fails, the previously discovered ``models:`` mapping is still the best
+    answer and must be served from ``_config_ids``.
+    """
+    import api.routes as routes
+
+    provider = dict(
+        _BASE_PROVIDER,
+        models={
+            "saved-a": {"context_length": 128000},
+            "saved-b": {"context_length": 32000},
+        },
+        models_discovered=True,
+    )
+    payload, _ = _run_live_models(
+        monkeypatch, routes, provider, catalog=[], fail=True
+    )
+
+    assert _ids(payload) == ["saved-a", "saved-b"]

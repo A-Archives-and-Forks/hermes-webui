@@ -3431,24 +3431,18 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
-      // #7622 (round 2): the settings payload's `s.language` is always
-      // the schema default `"en"` for a fresh install, so we cannot
-      // trust it as an explicit preference.  Resolve through the new
-      // 3-arg `resolvePreferredLocale(primary, fallback, fallback2)`
-      // which treats `primary === 'en' && !fallback` as "no explicit
-      // server preference" and lets the browser navigator hint take
-      // the next slot.  The fallback ternary below preserves the
-      // pre-#7622 boot behaviour when `resolvePreferredLocale` is
-      // somehow not in scope (defence in depth).
-      const _stored=localStorage.getItem('hermes-lang');
-      const _browserHint=(typeof navigator!=='undefined')
-        ? (Array.isArray(navigator.languages)&&navigator.languages.length
-            ? navigator.languages[0]
-            : (typeof navigator.language==='string'?navigator.language:null))
-        : null;
+      // #7622 (round 3): the settings payload's `s.language` is
+      // absent (None) for a fresh install, so an explicit non-empty
+      // value is the user's genuine saved choice.  The browser
+      // navigator hint is now read via the guarded
+      // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+      // a throwing `navigator` accessor in some embedded webviews
+      // can no longer abort this branch and reset loaded preferences.
+      // The fallback ternary preserves the pre-#7622 boot behaviour
+      // when neither helper is in scope (defence in depth).
       const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(s.language, _stored, _browserHint)
-        : (s.language || _stored || _browserHint || 'en');
+        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
+        : (s.language || localStorage.getItem('hermes-lang') || 'en');
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }

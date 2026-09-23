@@ -26988,36 +26988,63 @@ function resolveLocale(lang) {
  *   3) fallback2   (typically browser navigator hint — first-visit only)
  *   4) 'en'        (final fallback)
  *
- * #7622 (round 2): the server's schema default `"language": "en"` is NOT
- * an explicit user / server preference — it's the field's default value
- * from a fresh settings file.  Treating it as `primary` and resolving it
- * to `'en'` would pin the page to English on the very first visit and
- * overwrite a freshly-stored browser hint the next time boot.js or
- * panels.js hydrates the settings payload.  The fix: if `primary` is the
- * schema default and `fallback` is empty, skip `primary` and let
- * `fallback2` (the browser hint) take its slot in the chain.
+ * Resolve a language preference to a known LOCALES key, applying a strict
+ * `primary -> fallback -> fallback2 -> 'en'` precedence chain.
  *
- * @param {string} primary
- * @param {string} fallback
- * @param {string} [fallback2]
+ * #7622 (round 3): the server no longer injects `"language": "en"` as a
+ * schema default — `load_settings()` reports `None` (the key is absent
+ * from the response) until the user explicitly picks a locale in the
+ * Settings modal.  This lets the resolver use `primary` directly
+ * without a `primary === 'en'` special case:
+ *   - an explicit `primary` (the server's stored value) always wins
+ *   - a `None` / empty `primary` falls through to `fallback` (localStorage)
+ *   - `fallback2` (the browser navigator hint) only fires when neither
+ *     server nor localStorage has a preference
+ *   - `'en'` is the final safety net
+ *
+ * Side benefit: a user who picked English on purpose (their settings
+ * file contains `"language": "en"`) is no longer overridden by a
+ * non-English browser locale on hydration, because the round-2
+ * `primary === 'en'` skip has been removed.
+ *
+ * @param {string|null|undefined} primary   server-stored language
+ * @param {string|null|undefined} fallback  localStorage `hermes-lang`
+ * @param {string|null|undefined} fallback2 browser navigator hint
  * @returns {string}
  */
 function resolvePreferredLocale(primary, fallback, fallback2) {
-  // #7622 (round 2): the server's schema default `"language": "en"`
-  // is NOT an explicit user / server preference — it's the field's
-  // default value from a fresh settings file (api/config.py:11804).
-  // Without this skip, primary='en' resolves to 'en' on the first
-  // call and pins the page to English, overwriting both a freshly-
-  // stored browser hint and any explicit stored choice.  Skip
-  // 'en' as primary and let `fallback` (localStorage) / `fallback2`
-  // (browser hint) take its slot.  Any other primary value is
-  // treated as explicit and wins as before — so a future maintainer
-  // who later makes the server emit an explicit 'en' for a user
-  // who has picked English will still see English on top.
-  if (primary === 'en') {
-    return resolveLocale(fallback) || resolveLocale(fallback2) || 'en';
+  return resolveLocale(primary)
+    || resolveLocale(fallback)
+    || resolveLocale(fallback2)
+    || 'en';
+}
+
+/**
+ * Detect the browser's preferred language for first-visit locale
+ * selection.  Guarded against `navigator` access exceptions: some
+ * embedded webviews (Tauri desktop shell, kiosk modes) report a
+ * `navigator` object but throw on `.languages` / `.language` reads.
+ * Callers (loadLocale, boot.js, panels.js) must use this helper rather
+ * than reading `navigator` directly so a single throw does not abort
+ * the boot or settings-panel hydration.
+ *
+ * @returns {string|null} the first entry of `navigator.languages`, or
+ *   `navigator.language`, or `null` when neither is reachable.
+ */
+function _detectBrowserLanguageHint() {
+  try {
+    const nav = (typeof navigator !== 'undefined') ? navigator : null;
+    if (!nav) return null;
+    if (Array.isArray(nav.languages) && nav.languages.length) {
+      return nav.languages[0] || null;
+    }
+    if (typeof nav.language === 'string' && nav.language) {
+      return nav.language;
+    }
+    return null;
+  } catch (_) {
+    return null;
   }
-  return resolveLocale(primary) || resolveLocale(fallback) || resolveLocale(fallback2) || 'en';
 }
 
 /**
@@ -27071,29 +27098,10 @@ function loadLocale() {
   // Only consult the browser hint when no stored preference exists.
   // The settings panel and `loadSettingsPanel()` will overwrite this
   // hint on their first call, so explicit user / server preferences
-  // always win.
-  let browserHint = null;
-  if (!stored) {
-    try {
-      const nav = (typeof navigator !== 'undefined') ? navigator : null;
-      if (nav) {
-        // `navigator.languages` is the ordered preference list (Chrome
-        // / Firefox); `navigator.language` is the single primary.  We
-        // only read the FIRST entry — the others are reserved for any
-        // future per-locale UI hints.
-        if (Array.isArray(nav.languages) && nav.languages.length) {
-          browserHint = nav.languages[0] || null;
-        } else if (typeof nav.language === 'string' && nav.language) {
-          browserHint = nav.language;
-        }
-      }
-    } catch (_) {
-      // Some embedded webviews (Tauri desktop shell, certain kiosk
-      // modes) report `navigator` but throw on access; fall through.
-      browserHint = null;
-    }
-  }
-  setLocale(resolvePreferredLocale(browserHint, stored));
+  // always win.  #7622 (round 3): the browser-hint read is delegated
+  // to `_detectBrowserLanguageHint()` so a `navigator` access throw
+  // (some embedded webviews) can no longer abort loadLocale().
+  setLocale(resolvePreferredLocale(stored, _detectBrowserLanguageHint()));
 }
 
 /**

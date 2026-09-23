@@ -11468,7 +11468,13 @@ _SETTINGS_DEFAULTS = {
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
     "composer_control_order": [],  # user-defined composer footer control order; invalid/duplicate keys are ignored
-    "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
+    # #7622 (round 3): language is intentionally absent from the defaults so
+    # `load_settings()` reports `None` for a fresh install.  This lets the
+    # client distinguish "no preference" from an explicit saved choice,
+    # so a user who genuinely picked English (and has `language: "en"`
+    # persisted on disk) is no longer overridden by the browser hint on
+    # their first hydration.  When a user picks a locale in the Settings
+    # modal the value is written here and the field is set explicitly.
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
@@ -11715,6 +11721,15 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
     "simplified_tool_calling",
+} | {
+    # #7622 (round 3): `language` is intentionally absent from
+    # `_SETTINGS_DEFAULTS` so a fresh install returns `None` for
+    # `settings["language"]` and the client can distinguish "no
+    # preference" from an explicit saved choice.  But the user
+    # MUST still be able to pick a locale in the Settings modal,
+    # so we add it back to the explicit allow-list here.  The
+    # existing BCP-47 validation at save-time still applies.
+    "language",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},

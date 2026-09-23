@@ -278,25 +278,34 @@ class TestInitialLocaleFromBrowserHint:
         )
 
 
-# ── 2. Cross-file test for the composed resolver (#7622 round 2) ─────────
+# ── 2. Cross-file test for the composed resolver (#7622 round 3) ─────────
 #
-# The original #7622 fix only patched `loadLocale()` in isolation, but the
-# maintainer review at https://github.com/nesquena/hermes-webui/pull/7730
-# flagged that boot.js and panels.js subsequently call
-# `resolvePreferredLocale(settings.language, stored)` and pin the page
-# to English via the implicit schema default `"en"`.  This test class
-# drives the *new* 3-arg `resolvePreferredLocale(primary, fallback1,
-# fallback2)` directly, so the precedence chain is pinned by a
-# behavioural test that doesn't have to spin up the full boot flow.
+# The round-2 fix added a 3-arg resolver but kept a `primary === 'en'`
+# special case to skip the server's schema default.  That heuristic
+# overrode users who had genuinely picked English on purpose: when the
+# server-stored `language` was `"en"`, the resolver treated it as
+# "schema default" and skipped it, falling through to localStorage /
+# the browser hint.  The round-3 fix drops the schema default at the
+# source (`api/config.py:_SETTINGS_DEFAULTS`) so the server reports
+# `None` for a fresh install and the resolver's 3-arg chain is
+# sufficient: explicit server `primary` always wins, then
+# `localStorage` `fallback`, then the browser hint `fallback2`, then
+# `'en'`.
 #
-# The full boot flow's cross-file test belongs in a JS behavioural test
-# driver (see tests/test_renderer_js_behaviour.py) — out of scope for
-# this PR per the test plan in the PR body.
+# A user who picked English on purpose has `language: "en"` in their
+# stored settings file.  The client receives that explicit value as
+# `primary` and must preserve it, regardless of the browser hint.  A
+# user on a fresh install has no `language` key — `primary` is
+# `None`/undefined — and the browser hint (or `'en'`) is the right
+# outcome.  These two cases must not be conflated.
 
 
 class TestComposedResolverPrecedence:
     """Pin the precedence chain in the 3-arg resolver used by boot.js
-    (settings hydration) and panels.js (settings modal)."""
+    (settings hydration) and panels.js (settings modal).  Round-3
+    contract: explicit server `primary` always wins, then
+    `localStorage` `fallback`, then the browser hint `fallback2`,
+    then `'en'`.  No `primary === 'en'` skip."""
 
     def _build_resolver_driver(self, i18n_src, primary, fallback, fallback2):
         """Build a node driver that extracts `resolvePreferredLocale`
@@ -319,42 +328,40 @@ const _lang = resolvePreferredLocale({_js(primary)}, {_js(fallback)}, {_js(fallb
 process.stdout.write(JSON.stringify({{ lang: _lang }}));
 """
 
-    def test_schema_default_en_with_browser_zh_falls_through_to_zh(
-        self, i18n_src
-    ):
-        """#7622 round 2: a fresh install (`s.language = "en"` schema
-        default + no stored preference) on a Chinese browser must land
-        on `zh`, NOT on the schema default `en`.  The composed resolver
-        is what boot.js / panels.js now call.
+    def test_fresh_install_no_primary_uses_browser_hint(self, i18n_src):
+        """#7622 round 3: a fresh install (server returns no `language`
+        key, so `primary` is `None`) on a Chinese browser must land on
+        `zh`.  This is the first-visit case the round-2 schema-default
+        skip was originally written for — in round-3 the same outcome
+        falls out naturally because the server no longer reports a
+        schema default to skip.
         """
-        driver = self._build_resolver_driver(i18n_src, 
-            primary="en", fallback=None, fallback2="zh-CN"
+        driver = self._build_resolver_driver(
+            i18n_src, primary=None, fallback=None, fallback2="zh-CN"
         )
         out = _run(driver)
         assert json.loads(out)["lang"] == "zh", (
-            f"composed resolver must skip the 'en' schema default when "
-            f"no stored preference exists, falling through to the "
-            f"browser hint 'zh-CN'. Got: {out!r}"
+            f"fresh install + zh-CN browser must default to 'zh' via "
+            f"the browser hint. Got: {out!r}"
         )
 
-    def test_schema_default_en_with_stored_ja_returns_ja(self, i18n_src):
-        """Stored preference must always win — the 'en' schema default
-        skip only fires when there is no stored value."""
-        driver = self._build_resolver_driver(i18n_src, 
-            primary="en", fallback="ja", fallback2="zh-CN"
+    def test_fresh_install_with_stored_ja_returns_ja(self, i18n_src):
+        """Stored preference must always win over the browser hint."""
+        driver = self._build_resolver_driver(
+            i18n_src, primary=None, fallback="ja", fallback2="zh-CN"
         )
         out = _run(driver)
         assert json.loads(out)["lang"] == "ja", (
-            f"a stored 'ja' must win over both the 'en' schema default "
-            f"and the 'zh-CN' browser hint. Got: {out!r}"
+            f"a stored 'ja' must win over the browser hint 'zh-CN'. "
+            f"Got: {out!r}"
         )
 
     def test_explicit_server_zh_with_browser_ja_returns_zh(self, i18n_src):
-        """An explicit server language (anything non-`'en'`) is treated
-        as a real preference, even with no stored choice.  It must
-        win over the browser hint."""
-        driver = self._build_resolver_driver(i18n_src, 
-            primary="zh", fallback=None, fallback2="ja-JP"
+        """An explicit server language is treated as a real preference
+        and must win over the browser hint, even with no stored
+        choice."""
+        driver = self._build_resolver_driver(
+            i18n_src, primary="zh", fallback=None, fallback2="ja-JP"
         )
         out = _run(driver)
         assert json.loads(out)["lang"] == "zh", (
@@ -366,8 +373,8 @@ process.stdout.write(JSON.stringify({{ lang: _lang }}));
         self, i18n_src
     ):
         """Server explicit > stored > browser > 'en'."""
-        driver = self._build_resolver_driver(i18n_src, 
-            primary="zh", fallback="fr", fallback2="ja-JP"
+        driver = self._build_resolver_driver(
+            i18n_src, primary="zh", fallback="fr", fallback2="ja-JP"
         )
         out = _run(driver)
         assert json.loads(out)["lang"] == "zh", (
@@ -375,30 +382,49 @@ process.stdout.write(JSON.stringify({{ lang: _lang }}));
             f"browser 'ja-JP'. Got: {out!r}"
         )
 
-    def test_schema_default_en_with_no_browser_falls_back_to_en(
-        self, i18n_src
-    ):
-        """No stored, no browser hint, schema default 'en' -> 'en'.
-        This is the unchanged fallback path."""
-        driver = self._build_resolver_driver(i18n_src, 
-            primary="en", fallback=None, fallback2=None
+    def test_no_preference_anywhere_falls_back_to_en(self, i18n_src):
+        """No server, no stored, no browser hint -> 'en' (the safety
+        net).  Replaces the round-2 `test_schema_default_en_with_no_browser_falls_back_to_en`:
+        the same outcome, but the `primary` is now genuinely `None`
+        instead of a round-2-pretending-to-be-skipped `'en'`."""
+        driver = self._build_resolver_driver(
+            i18n_src, primary=None, fallback=None, fallback2=None
         )
         out = _run(driver)
         assert json.loads(out)["lang"] == "en", (
             f"no preference at all must default to 'en'. Got: {out!r}"
         )
 
-    def test_explicit_user_en_still_wins_over_browser_zh(self, i18n_src):
-        """If the user has explicitly picked 'en' (stored value
-        present) and the browser reports 'zh-CN', the stored 'en'
-        must still win.  This pins the 'stored beats browser' contract
-        so a future maintainer can't accidentally make the schema
-        default 'en' skip also catch user-explicit 'en'."""
-        driver = self._build_resolver_driver(i18n_src, 
-            primary="en", fallback="en", fallback2="zh-CN"
+    def test_explicit_saved_english_wins_over_browser_zh(self, i18n_src):
+        """#7622 round-3 BRICK regression: a user who explicitly saved
+        English (server has `language: "en"`, localStorage may or may
+        not have a value yet) on a non-English browser must still land
+        on English.  This is the case the round-2
+        `primary === 'en'` skip overrode.
+
+        Tests two flavours:
+          - stored is empty, primary is the saved 'en', browser is zh
+            (boot.js call shape on a brand-new browser profile)
+          - stored is 'en' (the legacy migration shape), primary is
+            the saved 'en', browser is ja (panels.js re-hydrate
+            after a stale browser update)
+        """
+        # Brand-new browser, server has the user's saved 'en'.
+        driver = self._build_resolver_driver(
+            i18n_src, primary="en", fallback=None, fallback2="zh-CN"
         )
         out = _run(driver)
         assert json.loads(out)["lang"] == "en", (
-            f"explicit user 'en' (stored) must win over browser "
-            f"'zh-CN'. Got: {out!r}"
+            f"server-saved 'en' must beat a zh-CN browser hint. "
+            f"Got: {out!r}"
+        )
+
+        # Stale browser, server still has the user's saved 'en'.
+        driver = self._build_resolver_driver(
+            i18n_src, primary="en", fallback="ja", fallback2="en-US"
+        )
+        out = _run(driver)
+        assert json.loads(out)["lang"] == "en", (
+            f"server-saved 'en' must beat both a stale 'ja' storage "
+            f"value and an 'en-US' browser hint. Got: {out!r}"
         )

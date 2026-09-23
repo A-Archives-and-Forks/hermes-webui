@@ -28,6 +28,10 @@
 
 ### Fixed
 
+- **Saving a cron job with the model picker at "Default" keeps its provider-only pin.** Editing a job
+  pinned to a provider with no model (the usual shape for a self-hosted OpenAI-compatible router)
+  sent `provider: null` and wiped the pin. The editor now preserves a provider-only pin when the
+  model picker is left at Default. (#7779 by @cushingw)
 - **A consumed mid-turn `/steer` no longer leaves its out-of-band wrapper in the settled chat (#7600).**
   A `/steer` reaches the agent as an `[OUT-OF-BAND USER MESSAGE …]` block appended to the turn's
   last tool result. After the turn settled, that wrapper stayed visible in the chat transcript. The

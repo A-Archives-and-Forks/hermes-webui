@@ -2623,6 +2623,7 @@ def create_profile_api(name: str, clone_from: str = None,
         model_provider=model_provider,
     )
 
+    _drop_profile_models_cache(name)
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
     _SKILLS_STATS_CACHE.clear()
@@ -2649,6 +2650,16 @@ def create_profile_api(name: str, clone_from: str = None,
         'enabled_skills': 0,
         'total_skills': 0,
     }
+
+
+def _drop_profile_models_cache(name: str) -> None:
+    """A deleted or new profile must never inherit a same-name models snapshot."""
+    try:
+        from api.config import delete_profile_models_cache
+
+        delete_profile_models_cache(name)
+    except Exception:
+        logger.debug("Failed to drop models cache for profile %s", name, exc_info=True)
 
 
 def delete_profile_api(name: str) -> dict:
@@ -2684,6 +2695,7 @@ def delete_profile_api(name: str) -> dict:
         else:
             raise ValueError(f"Profile '{name}' does not exist.")
 
+    _drop_profile_models_cache(name)
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
     _invalidate_list_profiles_cache()

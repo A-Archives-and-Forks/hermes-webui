@@ -20,7 +20,7 @@ which the #7556 review flagged as an undocumented runtime contract.
   `_sync_models_cache_provenance()` must run at every site that publishes or
   invalidates the snapshot, so the tuple can never tear.
 
-## The three source axes
+## The five source axes
 
 `_models_cache_source_fingerprint()` is the single chokepoint. A cache is served
 only when every axis matches the value recorded in the cache — the disk reader
@@ -31,6 +31,8 @@ the fingerprint captured at publish time.
 | --- | --- | --- |
 | `config_yaml` | stat identity: `mtime_ns` + size (`_models_cache_file_fingerprint`) | The file is rewritten only on deliberate user edits, and any edit can change the provider/model set, so the cheap conservative identity wins. |
 | `auth_json` | content hash with a volatile-key deny-list (`_auth_store_semantic_fingerprint`, `_AUTH_FINGERPRINT_VOLATILE_KEYS`) | The credential store is rewritten roughly every 14 minutes by credential-pool / OAuth refresh; none of those rotating fields feed `detected_providers` or the returned catalog, and stat identity made the 24h cache churn on every refresh (RCA `t_d127953d` / `t_16551f61`). |
+| `env` | sorted **names** of non-empty keys in the active profile's `.env` (`_models_cache_env_fingerprint`); values are never recorded | Env credentials decide `detected_providers`. Adding or removing a key changes the catalog; rotating a value does not. |
+| `plugins` | `[dir, name, version]` for each model-provider plugin in the active profile home (`_models_cache_plugin_fingerprint`): every dir under `plugins/model-providers/`, plus flat `plugins/<dir>` entries whose `plugin.yaml` declares `kind: model-provider` | Plugin providers feed the catalog through `api/plugin_providers.py`. Installing, removing, or upgrading one must invalidate the catalog. The discovery rules match `providers._scan_home_layer`. |
 | `catalog` | baked-in provider catalog sha256 (`_PROVIDER_MODELS` + `_PROVIDER_DISPLAY`) plus the Codex local catalog (`_codex_models_cache_fingerprint`, `_CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS`) | A restart after a catalog change must not keep serving a persisted payload for up to 24h (#2443). Codex rewrites `~/.codex/models_cache.json` on its own timer, bumping `mtime_ns` and size while models, `etag`, and `client_version` stay identical, so the Codex axis hashes **content** with only the refresh timestamps (`fetched_at`, `updated_at`) removed (#7540, #7556). |
 
 ## Invariant: deny-lists are one-directional
@@ -99,14 +101,21 @@ keeps this mode. `delete_disk=False` is for when the sources have **not**
 changed and the caller only needs the next request to re-resolve *which*
 profile's catalog to serve.
 
-`POST /api/profile/switch` uses `delete_disk=False`. The disk cache is already
-keyed per profile (`_get_models_cache_path()`), and a stale or wrong-profile
-snapshot is rejected on read by `_is_loadable_disk_cache()` via the source
-fingerprint above, so deleting it on a switch bought no correctness — it only
-forced a full cold rebuild (live provider `fetch_models` calls, several seconds)
-on every switch. Because this mode leans entirely on the fingerprint check, it
-is safe only while that check stays the single gate for serving a disk snapshot
-(change-protocol items 1 and 4).
+`POST /api/profile/switch` uses `delete_disk=False`. The disk cache is keyed
+per profile (`_get_models_cache_path()`), and `_is_loadable_disk_cache()`
+rejects any snapshot whose source fingerprint no longer matches. The fingerprint
+covers every profile-local input to the catalog: `config.yaml`, `auth.json`,
+the `.env` key names, and the model-provider plugins. A switch therefore reuses
+the snapshot only when none of those inputs changed, and skips the full cold
+rebuild (live provider `fetch_models` calls). This mode depends on the
+fingerprint being the only gate for serving a disk snapshot (change-protocol
+items 1 and 4). A new catalog input must be added as an axis before anything
+can rely on this mode.
+
+A profile's snapshot is not stored in its home, so deleting the home leaves the
+file behind. `delete_profile_api()` and `create_profile_api()` both unlink
+`models_cache.<name>.json` (`delete_profile_models_cache()`), so a profile that
+is recreated with the same name never inherits the old catalog.
 
 ## Change protocol
 
@@ -136,6 +145,15 @@ visibility change, any catalog field, any unknown field — still invalidate.
 `delete_disk=False` keeps the disk file and the next `get_available_models()`
 reloads it without a live rebuild, the default still unlinks it, and the
 executed `/api/profile/switch` route passes `delete_disk=False`.
+
+`tests/test_profile_switch_models_cache_source_axes.py` covers the safety side
+of that mode. It saves a real snapshot, changes one source in the target
+profile, runs the switch, and asserts a fresh rebuild for each of these cases:
+adding or removing a `.env` key, installing a plugin (in either location),
+removing a plugin, bumping a plugin's version, and deleting then recreating the
+profile. Two tests pin the speed-up: with unchanged sources, and after rotating
+a `.env` value, the switch still reuses the snapshot, and no secret value is
+written to disk.
 
 ## References
 

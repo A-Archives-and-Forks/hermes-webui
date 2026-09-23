@@ -7603,23 +7603,34 @@ def _get_models_cache_path() -> Path:
     ``_models_cache_path`` to an isolated tmp file).
     """
     try:
-        from api.profiles import get_active_profile_name, _is_root_profile
+        from api.profiles import get_active_profile_name
 
-        name = (get_active_profile_name() or "").strip()
-        if not name or _is_root_profile(name):
-            return _models_cache_path
-        # Defensive filename sanitization: the cookie-derived profile name is
-        # already validated by _PROFILE_ID_RE at the request boundary, but keep
-        # the on-disk filename safe regardless of how the name was resolved.
-        safe = re.sub(r"[^a-z0-9_-]", "_", name.lower())[:64]
-        if not safe:
-            return _models_cache_path
-        # Splice the profile into the default filename: models_cache.json →
-        # models_cache.<safe>.json, keeping the default's parent dir + suffix.
-        base = _models_cache_path
-        return base.with_name(f"{base.stem}.{safe}{base.suffix}")
+        return _models_cache_path_for_profile(get_active_profile_name())
     except Exception:
         return _models_cache_path
+
+
+def _models_cache_path_for_profile(name: str | None) -> Path:
+    """Return the /api/models disk-cache path owned by profile *name*."""
+    from api.profiles import _is_root_profile
+
+    name = (name or "").strip()
+    if not name or _is_root_profile(name):
+        return _models_cache_path
+    # Keep the on-disk filename safe regardless of how the name was resolved.
+    safe = re.sub(r"[^a-z0-9_-]", "_", name.lower())[:64]
+    if not safe:
+        return _models_cache_path
+    base = _models_cache_path
+    return base.with_name(f"{base.stem}.{safe}{base.suffix}")
+
+
+def delete_profile_models_cache(name: str) -> None:
+    """Unlink profile *name*'s models disk snapshot (profile delete/create)."""
+    try:
+        os.unlink(str(_models_cache_path_for_profile(name)))
+    except (OSError, ValueError):
+        pass
 
 
 def _get_auth_store_path() -> Path:
@@ -7892,6 +7903,88 @@ def _auth_store_semantic_fingerprint(path: Path) -> dict:
     return fp
 
 
+def _active_profile_home() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        return _gah()
+    except ImportError:
+        return _DEFAULT_HERMES_HOME
+
+
+def _models_cache_env_fingerprint(path: Path) -> dict:
+    """Return the sorted names of non-empty keys in a profile ``.env``.
+
+    Credential presence decides which providers are detected; values are
+    never recorded, so rotating a key keeps the snapshot.
+    """
+    p = Path(path).expanduser()
+    fp: dict = {"path": str(p)}
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        fp["missing"] = True
+        return fp
+    except OSError:
+        st = p.stat()
+        fp["mtime_ns"], fp["size"] = st.st_mtime_ns, st.st_size
+        return fp
+    keys = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if v.strip().strip('"').strip("'"):
+            keys.add(k.strip())
+    fp["present_keys"] = sorted(keys)
+    return fp
+
+
+def _plugin_manifest_fields(plugin_dir: Path) -> dict | None:
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest = plugin_dir / filename
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        fields = {}
+        for line in text.splitlines():
+            key, sep, value = line.partition(":")
+            if sep and not line[:1].isspace() and key.strip() in ("name", "kind", "version"):
+                fields[key.strip()] = value.strip().strip("\"'")
+        return fields
+    return None
+
+
+def _models_cache_plugin_fingerprint(home: Path) -> list:
+    """Return ``[dir, name, version]`` for the profile's model-provider plugins.
+
+    Mirrors providers' discovery: every dir under ``plugins/model-providers/``
+    plus flat ``plugins/<dir>`` entries whose manifest declares that kind.
+    """
+    found = []
+    plugins_root = Path(home).expanduser() / "plugins"
+    for base, flat in ((plugins_root / "model-providers", False), (plugins_root, True)):
+        try:
+            children = sorted(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name.startswith(("_", ".")):
+                continue
+            if flat and child.name == "model-providers":
+                continue
+            fields = _plugin_manifest_fields(child)
+            if flat and (fields or {}).get("kind") != "model-provider":
+                continue
+            fields = fields or {}
+            found.append([str(child.relative_to(plugins_root)), fields.get("name", ""), fields.get("version", "")])
+    return found
+
+
 def _models_cache_source_fingerprint() -> dict:
     """Return the current config/auth/catalog fingerprint for /api/models cache.
 
@@ -7903,9 +7996,12 @@ def _models_cache_source_fingerprint() -> dict:
     mtime/size fingerprint because it is only rewritten on deliberate user
     edits (which can change anything) and does not churn on a timer.
     """
+    home = _active_profile_home()
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
+        "env": _models_cache_env_fingerprint(home / ".env"),
+        "plugins": _models_cache_plugin_fingerprint(home),
         "catalog": _models_cache_catalog_fingerprint(),
     }
 
@@ -8181,12 +8277,11 @@ def invalidate_models_cache(*, delete_disk: bool = True):
     cache rebuild runs.
 
     ``delete_disk=False`` drops only the in-memory snapshot and leaves the
-    per-profile disk cache in place. Use it when the *sources* have not
-    changed and the caller merely needs the next request to re-resolve which
-    profile's catalog to serve (e.g. a per-client profile switch): the disk
-    cache is already keyed per profile and guarded by
-    _models_cache_source_fingerprint(), so a stale snapshot is rejected on
-    read without paying for a full rebuild (live provider fetches).
+    per-profile disk cache in place. Use it when the caller only needs the
+    next request to re-resolve which profile's catalog to serve (e.g. a
+    per-client profile switch). The snapshot is reused only while
+    _models_cache_source_fingerprint() (config, auth, .env key names,
+    provider plugins, catalog) still matches.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv

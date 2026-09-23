@@ -5,9 +5,9 @@
 deleted the on-disk ``models_cache.<profile>.json`` — a test-isolation
 behaviour — which forced a full cold rebuild (live provider ``fetch_models``
 HTTPS calls, ~490k deepcopy calls) on every switch even though no source had
-changed. The disk cache is already keyed per profile and rejected on read when
-``_models_cache_source_fingerprint()`` differs, so deleting it buys no
-correctness on the switch path and only costs seconds of latency.
+changed. The disk cache is keyed per profile and rejected on read when
+``_models_cache_source_fingerprint()`` differs; the source changes that must
+still force a rebuild are covered in test_profile_switch_models_cache_source_axes.py.
 
 The switch route now uses ``invalidate_models_cache(delete_disk=False)``.
 """

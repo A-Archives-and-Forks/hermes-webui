@@ -291,6 +291,13 @@ class TestLiveModelsCustomProviderFallback:
                     "model": "gpt-5.5",
                     "models": {"gpt-5.5-mini": {}},
                     "base_url": "https://right.codes/codex/v1",
+                    # dict-shaped ``models`` is per-model metadata (Agent setup
+                    # flow) and only narrows the live catalog when discovery is
+                    # explicitly off — the new #7165 contract. This test still
+                    # wants provider-scoping (no sibling leak), so pin the
+                    # catalog via ``discover_models: false`` instead of relying
+                    # on the removed dict-as-allowlist behavior.
+                    "discover_models": False,
                 },
                 {
                     "name": "infini-ai",

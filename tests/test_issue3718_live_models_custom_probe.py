@@ -14,8 +14,12 @@ Covered shapes:
   * malformed serialized ``models``            → safe, treated as scalar name
   * allowlisted model absent from live catalog → appended
   * live probe failure                         → falls back to config ids
+  * dict-shaped ``models`` (Agent setup)       → live catalog NOT gated (per-model
+                                                metadata, not an allowlist)
+  * dict-shaped ``models`` + ``discover_models:
+    false``                                    → pinned to dict keys (explicit opt-out)
   * ``models_discovered: true`` catalog        → live catalog NOT gated (discovery
-                                                 metadata is not an allowlist)
+                                                metadata is not an allowlist)
   * discovered + ``discover_models: false``    → still pinned (explicit opt-out)
 """
 
@@ -116,7 +120,6 @@ _BASE_PROVIDER = {
         pytest.param(["chat-a", "chat-b"], id="native-list"),
         pytest.param('["chat-a","chat-b"]', id="json-array-string"),
         pytest.param("['chat-a', 'chat-b']", id="python-literal-string"),
-        pytest.param({"chat-a": {}, "chat-b": {}}, id="mapping-metadata"),
         pytest.param(
             [{"id": "chat-a"}, {"model": "chat-b"}], id="list-of-dicts"
         ),
@@ -141,6 +144,57 @@ def test_allowlist_filters_live_catalog(monkeypatch, models_value):
     assert _ids(payload) == ["chat-a", "chat-b"]
     assert "image-gen-1" not in _ids(payload)
     assert "audio-tts-1" not in _ids(payload)
+
+
+def test_dict_models_without_discover_false_does_not_gate(monkeypatch):
+    """A dict-shaped ``models`` is per-model metadata — NOT an allowlist (#7165).
+
+    Hermes Agent's setup flow and ``hermes_cli/model_switch.py::_save_custom_provider``
+    persist per-model metadata as a mapping, e.g. ``{chat-a: {context_length: 128000}}``.
+    Treating its keys as an allowlist would collapse the live picker to the saved
+    default while the CLI live-probe shows the full catalog.  Without an explicit
+    ``discover_models: false`` opt-out the dict must NOT gate — full live catalog wins.
+    """
+    import api.routes as routes
+
+    provider = dict(
+        _BASE_PROVIDER,
+        models={"chat-a": {"context_length": 128000}, "chat-b": {"context_length": 32000}},
+    )
+    payload, requested = _run_live_models(
+        monkeypatch, routes, provider, catalog=_LIVE_CATALOG
+    )
+
+    assert requested, "live /v1/models probe was never attempted"
+    assert _ids(payload) == _LIVE_CATALOG, (
+        "dict-shaped models is per-model metadata, not an allowlist — the "
+        "full live catalog must be surfaced"
+    )
+
+
+def test_dict_models_with_discover_false_pins_to_keys(monkeypatch):
+    """``discover_models: false`` opts a dict-shaped ``models`` into an allowlist.
+
+    The explicit opt-out (bool ``False`` or the string forms ``"false"``/``"no"``/``"0"``)
+    means the dict keys are a hand-pinned allowlist and must filter the live catalog.
+    """
+    import api.routes as routes
+
+    for discover in (False, "false", "no", "0"):
+        provider = dict(
+            _BASE_PROVIDER,
+            models={"chat-a": {"context_length": 128000}, "chat-b": {"context_length": 32000}},
+            discover_models=discover,
+        )
+        payload, requested = _run_live_models(
+            monkeypatch, routes, provider, catalog=_LIVE_CATALOG
+        )
+        assert requested, "live /v1/models probe was never attempted"
+        assert _ids(payload) == ["chat-a", "chat-b"], (
+            f"discover_models={discover!r} must pin the dict keys as the allowlist"
+        )
+        assert "image-gen-1" not in _ids(payload)
+        assert "audio-tts-1" not in _ids(payload)
 
 
 def test_singular_model_only_does_not_gate_live_catalog(monkeypatch):

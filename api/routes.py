@@ -21882,6 +21882,21 @@ def _handle_live_models(handler, parsed):
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
 
+            def _custom_provider_models_discover_is_false(_cp):
+                """True when ``discover_models`` is an explicit ``false`` opt-out.
+
+                Mirrors ``api.config._provider_discover_allowed`` / Hermes
+                Agent ``model_switch_providers._discover_flag``: ``discover_models``
+                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
+                (case-insensitive) mean False.  Used to decide whether a
+                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
+                when discovery is off) rather than per-model metadata.
+                """
+                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
+                if isinstance(_discover, str):
+                    return _discover.strip().lower() in {"false", "no", "0"}
+                return not bool(_discover)
+
             def _custom_provider_allowlist_ids(_cp):
                 """Plural ``models`` list only — the explicit allowlist signal.
 
@@ -21902,7 +21917,18 @@ def _handle_live_models(handler, parsed):
                 when it says "discovered", return no allowlist and let the
                 live probe win.  An explicit ``discover_models: false`` opt-out
                 re-pins the catalog (the predicate accounts for it), so a
-                hand-pinned discovered mapping still filters.
+                hand-pinned discovered catalog still filters.
+
+                A dict-shaped ``models`` mapping that is NOT marked discovered is
+                *per-model metadata* written by the Hermes Agent setup flow
+                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+                not a catalog narrow: treating its keys as an allowlist would
+                collapse the live picker to the single saved default (keyless
+                Ollama) while the CLI live-probe shows the full catalog.  Only an
+                explicit ``discover_models: false`` opts into treating the dict
+                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+                shapes remain plain allowlists.
 
                 The plural value is decoded through ``_parse_config_string_list()``
                 because ``hermes config set`` / JSON-mode editor saves persist
@@ -21929,6 +21955,13 @@ def _handle_live_models(handler, parsed):
                 if isinstance(_models, str):
                     _models = _parse_config_string_list(_models)
                 if isinstance(_models, dict):
+                    # A dict-shaped ``models`` is per-model metadata written by
+                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+                    # ``discover_models: false`` opt-out treats the dict keys as a
+                    # pinned allowlist; otherwise return the empty allowlist so the
+                    # live probe returns the full catalog.
+                    if not _custom_provider_models_discover_is_false(_cp):
+                        return []
                     for _mid in _models:
                         if isinstance(_mid, str) and _mid.strip():
                             _ids.append(_mid.strip())

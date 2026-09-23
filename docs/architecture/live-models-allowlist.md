@@ -41,7 +41,9 @@ For a custom provider the handler consults these signals:
    catalog expresses "show exactly these models". The live catalog is
    intersected with it, then any allowlisted model missing from the live
    response is appended (so an allowlisted-but-offline model stays
-   selectable). This is the #7165 filter.
+   selectable). This is the #7165 filter. Only **list** and **string**
+   (serialized) shapes are plain allowlists — see "Dict-shaped `models:`"
+   below.
 
 3. **Singular `model:` → never gates.**
    The singular field is sticky/default metadata (the model to preselect),
@@ -62,6 +64,30 @@ is a `str`; native `dict` / `list` values are walked directly so dict *entries*
 keep their `id|model|name` metadata (the decoder stringifies members). A
 dict-only parser drops serialized allowlists to "no allowlist" and floods the
 picker — the same bug class as `skills.disabled` (#7120 / #7134).
+
+### Dict-shaped `models:`
+
+A dict-shaped `models:` mapping (e.g. `{chat-a: {context_length: 128000}}`)
+is *per-model metadata* written by the Hermes Agent setup flow —
+`hermes_cli/model_switch.py::_save_custom_provider` and the setup wizard —
+**not** a catalog narrow. Treating its keys as an allowlist would collapse the
+live picker to the single saved default (keyless Ollama) while the CLI
+live-probe shows the full catalog. So a dict is **never** a plain allowlist:
+
+- without an explicit `discover_models: false`, a dict-shaped `models:`
+  contributes **no allowlist** and the full live catalog is returned;
+- with `discover_models: false` (bool `False` or the string forms
+  `"false"`/`"no"`/`"0"`, case-insensitive — mirroring
+  `model_switch_providers.py:557`), the dict **keys** are honored as a pinned
+  allowlist.
+
+This complements the discovered-catalog rule: `models_discovered: true`
+without the opt-out is already ignored (signal 1). The dict guard covers the
+Agent-setup shape that is *not* flagged discovered.
+
+If someone later "fixes" the dict shape back into an always-allowlist, the
+regression test `test_dict_models_without_discover_false_does_not_gate` fails
+and forces the trade-off to be re-argued.
 
 ### Empty allowlist semantics
 
@@ -87,7 +113,8 @@ models on a transient probe failure instead of emptying the picker.
 
 - `tests/test_issue3718_live_models_custom_probe.py` — real-handler
   (`_handle_live_models`) coverage of every signal above: plural list /
-  JSON-array-string / Python-literal / mapping / list-of-dicts filtering,
+  JSON-array-string / Python-literal / list-of-dicts filtering, dict-shaped
+  `models:` (not gated) and dict + `discover_models: false` (pinned),
   singular passthrough, malformed safety, discovered-catalog passthrough,
   `discover_models: false` pinning, and both fallback branches.
 - `tests/test_issue7404_models_discovered_not_allowlist.py` — the

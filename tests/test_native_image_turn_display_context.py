@@ -433,11 +433,23 @@ def test_get_session_projects_parent_only_payload_conflict_without_losing_parent
             response.update(payload=payload, status=status) or payload
         ),
     )
+    original_get_session = routes.get_session
+    parent_loads = []
+
+    def get_session_with_fresh_parent(requested_id, metadata_only=False):
+        if requested_id == parent_id:
+            parent_session = models.Session.load(parent_id)
+            parent_loads.append(parent_session)
+            return parent_session
+        return original_get_session(requested_id, metadata_only=metadata_only)
+
+    monkeypatch.setattr(routes, "get_session", get_session_with_fresh_parent)
     routes._handle_session_get(
         None,
         SimpleNamespace(path="/api/session", query=f"session_id={session_id}&resolve_model=0"),
     )
 
+    assert len(parent_loads) == 1
     assert response["status"] == 200
     public_messages = response["payload"]["session"]["messages"]
     mirror_rows = [message for message in public_messages if message.get("content") == mirror]
@@ -452,6 +464,9 @@ def test_get_session_projects_parent_only_payload_conflict_without_losing_parent
         prefer_context=True,
         state_messages=state_rows,
     )
+    assert "Unrelated parent-only row" not in [
+        message.get("content") for message in replay_context
+    ]
     replay_rows = [
         message for message in _sanitize_messages_for_agent(replay_context)
         if message.get("content") == mirror

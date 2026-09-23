@@ -10065,7 +10065,35 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
 
 
 
-def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
+_LINEAGE_PARENT_SESSION_UNSET = object()
+
+
+def _webui_lineage_parent_session_for_display(session):
+    """Load the immediate parent only for display-eligible continuations."""
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id:
+        return None
+    if (
+        str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
+        and str(getattr(session, "compression_recovery_action", "") or "").strip()
+    ):
+        return None
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+    if source == "fork" or relationship == "child_session":
+        return None
+    try:
+        return get_session(parent_id, metadata_only=False)
+    except Exception:
+        return None
+
+
+def _merged_webui_lineage_messages_for_display(
+    session,
+    messages=None,
+    *,
+    parent_session=_LINEAGE_PARENT_SESSION_UNSET,
+) -> list:
     """Include immediate parent-only rows when a WebUI continuation sidecar is partial.
 
     Compression/continuation sessions should render as one conversation. Most
@@ -10076,23 +10104,9 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     subset of their parent.
     """
     primary_messages = list(messages if messages is not None else (getattr(session, "messages", []) or []))
-    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
-    if not parent_id:
-        return primary_messages
-    if (
-        str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
-        and str(getattr(session, "compression_recovery_action", "") or "").strip()
-    ):
-        return primary_messages
-    source = str(getattr(session, "session_source", "") or "").strip().lower()
-    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
-    if source == "fork" or relationship == "child_session":
-        return primary_messages
-    try:
-        parent = get_session(parent_id, metadata_only=False)
-    except Exception:
-        return primary_messages
-    parent_messages = list(getattr(parent, "messages", []) or [])
+    if parent_session is _LINEAGE_PARENT_SESSION_UNSET:
+        parent_session = _webui_lineage_parent_session_for_display(session)
+    parent_messages = list(getattr(parent_session, "messages", []) or [])
     if not parent_messages:
         return primary_messages
     if _messages_start_with_visible_prefix(primary_messages, parent_messages):
@@ -10572,7 +10586,6 @@ from api.models import (
     new_session,
     all_sessions,
     title_from,
-    _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
@@ -13333,9 +13346,11 @@ def _handle_session_get(handler, parsed) -> bool:
                     state_db_messages,
                 )
                 sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
+                lineage_parent = _webui_lineage_parent_session_for_display(s)
                 projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
                     s,
                     sidecar_messages,
+                    parent_session=lineage_parent,
                 )
                 _all_msgs = merge_session_messages_append_only(
                     sidecar_messages,
@@ -13343,7 +13358,11 @@ def _handle_session_get(handler, parsed) -> bool:
                     truncation_watermark=getattr(s, "truncation_watermark", None),
                     truncation_boundary=getattr(s, "truncation_boundary", None),
                 )
-                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
+                _all_msgs = _merged_webui_lineage_messages_for_display(
+                    s,
+                    _all_msgs,
+                    parent_session=lineage_parent,
+                )
                 _all_msgs = _project_native_image_payload_conflicts_for_display(
                     projection_sidecar_messages,
                     state_db_messages,

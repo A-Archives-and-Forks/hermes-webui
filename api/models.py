@@ -4033,6 +4033,68 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         )
         if not state_messages:
             return False
+
+        # The Agent row is intentionally hidden from display while the saved
+        # handoff proof is active. Materialize the exact WebUI-owned prompt
+        # before reconciling that row away, so clearing pending state cannot
+        # erase the only durable copy of the submitted text/attachments.
+        pending_identity = _validated_webui_pending_user_timestamp_identity(
+            locked,
+            getattr(locked, '_webui_pending_user_timestamp_identity', None),
+        )
+        # When a legacy sidecar has no explicit context_messages, the shared
+        # context reconciler falls back to messages. Capture that model-facing
+        # merge before adding the display-only WebUI owner row below.
+        merged_context = (
+            reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
+            if pending_identity is not None
+            else None
+        )
+        if pending_identity is not None:
+            pending_timestamp = pending_identity[1]
+            pending_text = locked.pending_user_message
+            pending_source = getattr(locked, 'pending_user_source', None) or 'webui'
+            pending_attachments = list(getattr(locked, 'pending_attachments', None) or [])
+            pending_row = {
+                'role': 'user',
+                'content': pending_text,
+                'timestamp': pending_timestamp,
+            }
+            stamp_message_source(pending_row, pending_source)
+            if str(pending_source or '').strip().lower() == 'fork':
+                pending_row['_fork_child_turn'] = locked.session_id
+            if pending_attachments:
+                pending_row['attachments'] = pending_attachments
+
+            existing_pending = next((
+                message for message in locked_messages
+                if isinstance(message, dict)
+                and (
+                    _message_exact_timestamp_details(message)
+                    == (pending_timestamp, True)
+                    and (message.get('_source') or 'webui') == pending_source
+                    and _message_matches_pending_text(message, pending_text)
+                )
+            ), None)
+            if existing_pending is not None:
+                # A prior eager checkpoint already owns this exact proved turn;
+                # refresh it from the still-authoritative pending fields.
+                existing_pending.update(pending_row)
+                if pending_attachments:
+                    existing_pending['attachments'] = pending_attachments
+                else:
+                    existing_pending.pop('attachments', None)
+            else:
+                # The proof makes this submitted row authoritative even if a
+                # clock adjustment places it before the surviving sidecar tail.
+                if not _insert_state_message_chronologically(locked_messages, pending_row):
+                    locked_messages.insert(0, pending_row)
+            locked.messages = locked_messages
+
         merged_messages = reconciled_state_db_messages_for_session(
             locked,
             state_messages=state_messages,
@@ -4043,11 +4105,12 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         # recover — leave the sidecar untouched rather than rewriting in place.
         if len(merged_messages) <= locked_count:
             return False
-        merged_context = reconciled_state_db_messages_for_session(
-            locked,
-            prefer_context=True,
-            state_messages=state_messages,
-        )
+        if merged_context is None:
+            merged_context = reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
 
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent
@@ -10787,12 +10850,15 @@ def _project_native_image_payload_conflicts_for_display(
                 if row_id_valid and row_id is not None and timestamp_valid
                 else None
             )
-            if (
-                conflict is not None
-                and message is not conflict[1]
-                and _message_identity_compatible(message, conflict[0])
-            ):
-                continue
+            if conflict is not None and _message_identity_compatible(message, conflict[0]):
+                incoming, sidecar_owner = conflict
+                is_sidecar_owner = (
+                    _message_identity_compatible(message, sidecar_owner)
+                    and _session_message_api_content_key(message)
+                    == _session_message_api_content_key(sidecar_owner)
+                )
+                if not is_sidecar_owner:
+                    continue
         visible_messages.append(message)
     return visible_messages
 

@@ -183,7 +183,12 @@ and 5; it does not mark every run-state boundary implemented.
    native-image and scalar text-attachment rows, and never changes model
    context. If multiple user rows share that timestamp, omit the whole
    ambiguous display bucket until the turn settles; keep all rows in model
-   context. Do not identify the row by its text.
+   context. Do not identify the row by its text. If a stream dies before
+   settlement, state.db self-heal must save the submitted prompt and attachments
+   as a visible sidecar row before clearing pending metadata; the Agent row
+   remains available in model context. A partial continuation must use one
+   consistent parent snapshot when projecting a conflicting provider payload
+   onto its sidecar-owned display row.
    Match settled native-image scalar projections only with trusted turn and
    durable-row identity, never the marker alone. A durable row ID proves row
    identity, not provider-payload freshness: when the sidecar and state.db have

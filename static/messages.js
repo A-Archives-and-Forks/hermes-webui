@@ -8063,13 +8063,15 @@ function _startApprovalFallbackPoll(sid) {
     } catch(e) {
       // Another profile owns this session now (e.g. a different tab switched the shared
       // profile cookie): every further poll would 409, so stop and leave the card as-is.
-      if (typeof _sessionProfileMismatchFromError === 'function' && _sessionProfileMismatchFromError(e)) {
-        stopApprovalPollingForSession(sid);
+      // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
+      if (typeof _sessionProfileMismatchFromError === 'function' && _sessionProfileMismatchFromError(e)
+          && _approvalPollTimer === pollTimer) {
+        stopApprovalPolling();
       }
     }
-    finally { _approvalFallbackPollInFlight = false; }
+    finally { if (_approvalPollTimer === pollTimer) _approvalFallbackPollInFlight = false; }
   };
-  _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
+  const pollTimer = _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
   _tick();
 }
 
@@ -9212,8 +9214,9 @@ function _startClarifyFallbackPoll(sid) {
       };
       // Profile-mismatch 409: the session is owned by another profile under the current
       // cookie, so polling can never succeed. Stop quietly; the live card stays standing.
+      // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
       if (typeof _sessionProfileMismatchFromError === "function" && _sessionProfileMismatchFromError(e)) {
-        stopClarifyPollingForSession(sid);
+        if (_clarifyFallbackTimer === pollTimer) stopClarifyPolling();
         return;
       }
       // A 404 from the active session domain is a STALE-SESSION signal — e.g.
@@ -9264,10 +9267,10 @@ function _startClarifyFallbackPoll(sid) {
         console.warn("[clarify] pending poll failed", logDetails);
       }
     } finally {
-      _clarifyFallbackPollInFlight = false;
+      if (_clarifyFallbackTimer === pollTimer) _clarifyFallbackPollInFlight = false;
     }
   };
-  _clarifyFallbackTimer = setInterval(_tick, 3000);
+  const pollTimer = _clarifyFallbackTimer = setInterval(_tick, 3000);
   _tick();
 }
 

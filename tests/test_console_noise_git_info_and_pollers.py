@@ -209,3 +209,50 @@ def test_clarify_poll_still_warns_on_unexpected_errors():
 def test_pwa_startup_is_not_preloaded_next_to_its_own_blocking_script():
     assert '<script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>' in INDEX_HTML
     assert 'rel="preload" href="static/pwa-startup.js' not in INDEX_HTML
+
+
+def _run_stale_replacement(start_fn, stop_fn, polling_var):
+    """Poller A's request is in flight; a same-session refresh replaces it with
+    poller B; then A's request fails with a profile-mismatch 409."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    fns = [
+        _extract_fn(SESSIONS_JS, "_sessionProfileMismatchFromError"),
+        _extract_fn(MESSAGES_JS, start_fn),
+        _extract_fn(MESSAGES_JS, stop_fn),
+    ]
+    harness = _HARNESS.replace("STATUS", "409").replace("BODY", json.dumps(_MISMATCH))
+    harness = harness.replace("async function api(){", "var pending = [];\nasync function api(){\n  if (pending) return new Promise((_, rej) => pending.push(rej));")
+    script = harness + "\n".join(fns) + f"""
+(async () => {{
+  {start_fn}('sid1');              // poller A: first request hangs
+  {stop_fn}();                     // same-session refresh
+  {polling_var} = 'sid1';          // startApprovalPolling() sets this before the fallback poll
+  {start_fn}('sid1');              // poller B: its request hangs too
+  const timerB = {"_approvalPollTimer" if "Approval" in start_fn else "_clarifyFallbackTimer"};
+  const e = new Error('Session belongs to a different profile');
+  e.status = 409; e.body = JSON.stringify({json.dumps(_MISMATCH)});
+  pending[0](e);                   // late 409 for poller A
+  await new Promise(r => setTimeout(r, 0));
+  process.stdout.write(JSON.stringify({{
+    polling: {polling_var},
+    timerAlive: {"_approvalPollTimer" if "Approval" in start_fn else "_clarifyFallbackTimer"} === timerB,
+    inFlight: {"_approvalFallbackPollInFlight" if "Approval" in start_fn else "_clarifyFallbackPollInFlight"},
+  }}));
+}})();
+"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.parametrize("start_fn,stop_fn,polling_var", [
+    ("_startApprovalFallbackPoll", "stopApprovalPolling", "_approvalPollingSessionId"),
+    ("_startClarifyFallbackPoll", "stopClarifyPolling", "_clarifyPollingSessionId"),
+])
+def test_stale_profile_mismatch_does_not_stop_replacement_poller(start_fn, stop_fn, polling_var):
+    r = _run_stale_replacement(start_fn, stop_fn, polling_var)
+    assert r["polling"] == "sid1", "a late 409 from a replaced poller must not stop its successor"
+    assert r["timerAlive"] is True
+    assert r["inFlight"] is True, "the successor's in-flight guard must not be cleared by the stale request"

@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **The live stream reports which model actually served the turn.** A new additive `runtime_model`
+  SSE event carries the model (and provider, when known) that the Agent reported while producing
+  output, separately from the model that was requested. It is journaled for replay, is exposed as
+  `runtime_journal_snapshot.runtime_model`, never falls back to the configured selection when
+  unknown, and never changes the model requested for the next turn. Existing clients ignore it.
+  (#7767 by @ruizanthony)
 - **Reconnecting to a new turn no longer resumes from the previous turn's replay cursor.** A new
   turn copies the full transcript into the in-flight state, so the previous turn's assistant reply
   could seed the replay floor and the reattached stream skipped the current reply's early events.

@@ -4067,6 +4067,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "tool_calls": tool_calls,
         "last_assistant_text": assistant_text,
         "last_reasoning_text": reasoning_text,
+        "runtime_model": runtime_model_from_events(session_id, stream_id, events),
         "activity_burst_anchors": activity_burst_anchors,
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,
@@ -10867,6 +10868,7 @@ from api.streaming import (
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
+    runtime_model_from_events,
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     _summary_from_events,
     bound_run_journal_snapshot_args,

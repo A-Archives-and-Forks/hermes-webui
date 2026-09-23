@@ -631,3 +631,76 @@ def test_sse_done_path_broadened_to_any_model_window_mismatch():
     assert "_model_matches_configured_default as _mmcd_cc" not in _STREAMING_SRC, (
         "the old default-only save matcher (_mmcd_cc) must be removed (#4618)"
     )
+
+
+# --- #7535: provider-ownership guard on the global model.base_url backfill ---
+# Same family as #3256: a global value scoped to its owner must not leak onto
+# sessions owned by a different provider.
+
+
+def test_builtin_provider_lookup_does_not_inherit_other_providers_base_url():
+    """#7535: a session on a built-in registry provider (whose base_url is empty
+    by design because the endpoint lives in PROVIDER_REGISTRY, not config.yaml)
+    must NOT inherit the global ``model.base_url`` owned by a different (custom)
+    provider. The unguarded backfill handed the custom endpoint to the
+    context-length resolver, which probed the wrong ``/models`` catalog and fell
+    back to the generic 128K catalog entry for a 1M-context model, while the
+    on-disk session and SSE stream both carried 1,000,000."""
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    ark_base = "https://ark.cn-beijing.volces.com/api/coding/v3"
+    cfg = {
+        "model": {
+            "provider": "custom:ark",
+            "base_url": ark_base,
+            "default": "ark-code-latest",
+            "context_length": 1000000,
+        },
+        "custom_providers": [
+            {
+                "name": "ark",
+                "base_url": ark_base,
+                "api_key": "ark-key",
+                "model": "ark-code-latest",
+            }
+        ],
+    }
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "@opencode-go:deepseek-v4.1-flash",
+        "opencode-go",
+        cfg=cfg,
+    )
+
+    assert lookup.provider == "opencode-go"
+    assert lookup.base_url == "", (
+        "the global model.base_url belongs to custom:ark; the opencode-go "
+        "registry slot must stay empty so PROVIDER_REGISTRY's endpoint "
+        "resolves the context window (#7535)"
+    )
+
+
+def test_same_provider_session_keeps_global_base_url_backfill():
+    """#7535 control (compat): when the session provider IS the configured
+    owner of ``model.base_url``, the backfill behavior is preserved."""
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    ark_base = "https://ark.cn-beijing.volces.com/api/coding/v3"
+    cfg = {
+        "model": {
+            "provider": "custom:ark",
+            "base_url": ark_base,
+            "default": "ark-code-latest",
+        },
+    }
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "ark-code-latest",
+        "custom:ark",
+        cfg=cfg,
+    )
+
+    assert lookup.provider == "custom:ark"
+    assert lookup.base_url == ark_base, (
+        "same-owner sessions must keep the model.base_url backfill (#7535 compat)"
+    )

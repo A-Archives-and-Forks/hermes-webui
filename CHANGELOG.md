@@ -28,6 +28,13 @@
 
 ### Fixed
 
+- **The live stream reports which model actually served the turn.** A new additive `runtime_model`
+  SSE event carries the model (and provider, when known) that the Agent reported while producing
+  output, separately from the model that was requested. It is journaled for replay, is exposed as
+  `runtime_journal_snapshot.runtime_model`, never falls back to the configured selection when
+  unknown, and never changes the model requested for the next turn. Existing clients ignore it.
+  (#7767 by @ruizanthony)
+
 - **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
   another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's
   "another Hermes process is using this session" notices now reach the chat as a warning status

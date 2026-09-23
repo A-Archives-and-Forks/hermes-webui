@@ -28,6 +28,11 @@
 
 ### Fixed
 
+- **Saving a very large session no longer reads and parses the whole file just to count messages.**
+  The #1558 backup safeguard in `Session.save()` needs the on-disk message count; it obtained it by
+  loading the entire sidecar. On a real 203 MB / 266,940-message session that made every save
+  expensive. The count is now taken without a full parse, and the shrink-backup behaviour is
+  unchanged. (#7578 by @rodrigogs)
 - **A cancelled or recovered turn no longer duplicates an answer that was already saved (#6366).**
   When a completed assistant turn had been persisted and a later cancel/recovery path ran for the
   same pending turn, recovery could append a duplicate user turn plus a `_partial` clone of the

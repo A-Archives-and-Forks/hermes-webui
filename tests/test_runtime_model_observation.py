@@ -1,4 +1,5 @@
 """Observed Agent runtime, durable replay and HTTP reconnect projection."""
+import json
 import queue
 import sys
 import types
@@ -34,6 +35,28 @@ def test_journal_runtime_is_owned_and_invalidated(tmp_path):
     writer.append_sse_event("runtime_model", observation("recovered-again"))
     assert latest_run_summary("session-a", "run-a", session_dir=tmp_path)["runtime_model"]["model"] == "recovered-again"
     assert latest_run_summary("session-a", "another-run", session_dir=tmp_path)["runtime_model"] is None
+
+
+@pytest.mark.parametrize("malformed", ["bad observation", ["bad observation"], None])
+def test_non_object_observation_invalidates_summary_and_http_snapshot(tmp_path, monkeypatch, malformed):
+    from api import routes, run_journal
+    writer = RunJournalWriter("session-a", "run-a", session_dir=tmp_path)
+    writer.append_sse_event("runtime_model", observation("first"))
+    writer.append_sse_event("token", malformed)
+    assert latest_run_summary("session-a", "run-a", session_dir=tmp_path)["runtime_model"]["model"] == "first"
+    writer.append_sse_event("runtime_model", malformed if malformed is not None else {"placeholder": True})
+    if malformed is None:
+        # The writer normalizes None to {}; exercise a legacy/raw null journal row.
+        path = run_journal._run_path("session-a", "run-a", session_dir=tmp_path)
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[-1]["payload"] = None
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    assert latest_run_summary("session-a", "run-a", session_dir=tmp_path)["runtime_model"] is None
+    monkeypatch.setattr(routes, "find_run_summary", lambda rid: latest_run_summary("session-a", rid, session_dir=tmp_path))
+    monkeypatch.setattr(routes, "read_run_events", lambda sid, rid: read_run_events(sid, rid, session_dir=tmp_path))
+    snapshot = routes._run_journal_live_snapshot("run-a")
+    assert snapshot["runtime_model"] is None
+    assert routes._runtime_journal_snapshot_for_session_payload(snapshot)["runtime_model"] is None
 
 
 @pytest.mark.parametrize("suffix,expected", [("", "backup"), ("warning", None), ("foreign", None)])

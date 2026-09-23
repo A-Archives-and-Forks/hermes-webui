@@ -31,8 +31,8 @@ the fingerprint captured at publish time.
 | --- | --- | --- |
 | `config_yaml` | stat identity: `mtime_ns` + size (`_models_cache_file_fingerprint`) | The file is rewritten only on deliberate user edits, and any edit can change the provider/model set, so the cheap conservative identity wins. |
 | `auth_json` | content hash with a volatile-key deny-list (`_auth_store_semantic_fingerprint`, `_AUTH_FINGERPRINT_VOLATILE_KEYS`) | The credential store is rewritten roughly every 14 minutes by credential-pool / OAuth refresh; none of those rotating fields feed `detected_providers` or the returned catalog, and stat identity made the 24h cache churn on every refresh (RCA `t_d127953d` / `t_16551f61`). |
-| `env` | sorted **names** of non-empty keys in the active profile's `.env` (`_models_cache_env_fingerprint`); values are never recorded | Env credentials decide `detected_providers`. Adding or removing a key changes the catalog; rotating a value does not. |
-| `plugins` | `[dir, [relpath, mtime_ns, size] per file]` for each model-provider plugin in the active profile home (`_models_cache_plugin_fingerprint`, `_plugin_tree_stamps`): every dir under `plugins/model-providers/`, plus flat `plugins/<dir>` entries whose `plugin.yaml` declares `kind: model-provider`; `__pycache__`/`.pyc` are skipped | Plugin providers feed the catalog through `api/plugin_providers.py`, and `fallback_models` comes from the plugin code the loader execs (`__init__.py` and anything it imports), so any file edit must invalidate the catalog even without a `version` bump. The discovery rules match `providers._scan_home_layer`. |
+| `env` | sorted **names** of non-empty `.env` keys, parsed by `providers._load_env_file` (`_models_cache_env_fingerprint`); values are never recorded | Env credentials decide `detected_providers`; rotating a value does not. |
+| `plugins` | `[relpath, mtime_ns, size]` of every non-bytecode file of each model-provider plugin, discovered like `providers._scan_home_layer` (`_models_cache_plugin_fingerprint`) | The loader execs plugin code that builds `fallback_models`, so any file edit must invalidate, even without a `version` bump. |
 | `catalog` | baked-in provider catalog sha256 (`_PROVIDER_MODELS` + `_PROVIDER_DISPLAY`) plus the Codex local catalog (`_codex_models_cache_fingerprint`, `_CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS`) | A restart after a catalog change must not keep serving a persisted payload for up to 24h (#2443). Codex rewrites `~/.codex/models_cache.json` on its own timer, bumping `mtime_ns` and size while models, `etag`, and `client_version` stay identical, so the Codex axis hashes **content** with only the refresh timestamps (`fetched_at`, `updated_at`) removed (#7540, #7556). |
 
 ## Invariant: deny-lists are one-directional
@@ -70,52 +70,19 @@ the fingerprint captured at publish time.
 
 ## Invalidation paths: memory vs. disk
 
-Every path that drops the published in-memory snapshot resets
-`_available_models_cache` (plus its timestamps and source fingerprint) and
-calls `_sync_models_cache_provenance()` so the hot-path tuple cannot tear. They
-differ in what they do to the per-profile `models_cache.json` on disk
-(`_delete_models_cache_on_disk()`):
-
 | Path | In-memory snapshot | Disk snapshot |
 | --- | --- | --- |
-| `invalidate_models_cache(delete_disk=True)` (default) | dropped | **deleted** unconditionally |
-| `invalidate_models_cache(delete_disk=False)` | dropped | left in place |
-| `invalidate_provider_models_cache(provider_id)` | dropped | **deleted** unconditionally (no `delete_disk` option) |
-| `_get_fresh_memory_models_cache()` on a fingerprint mismatch or invalid cached shape | dropped | untouched |
-| config-reload branch in `get_available_models()` (`_cfg_changed`) | dropped | deleted by `reload_config_if_stale()` → `_refresh_config_cache()` **only if** the *same* `config.yaml` path was already loaded and its mtime moved (`_old_cfg_mtime != 0.0 and _old_cfg_path == config_path`, i.e. a real edit of the active profile's config); a first-ever load (server start, `_cfg_mtime == 0.0`) or a path change keeps it |
+| `invalidate_models_cache()` (default `delete_disk=True`) | dropped | **deleted** |
+| `invalidate_models_cache(delete_disk=False)` (`POST /api/profile/switch`) | dropped | kept |
+| `invalidate_provider_models_cache(provider_id)` | dropped | **deleted** |
+| `_get_fresh_memory_models_cache()` on fingerprint mismatch / invalid shape | dropped | untouched |
+| config-reload branch in `get_available_models()` | dropped | deleted by `_refresh_config_cache()` only when the *same* `config.yaml` path was already loaded and changed; a first load or path change (per-client switch) keeps it |
 
-The path guard matters for per-client profile switches: `switch_profile(name,
-process_wide=False)` deliberately skips `reload_config()`, so the process-global
-`_cfg_mtime` / `_cfg_path` still describe the *previous* profile's config after
-`POST /api/profile/switch`. The first `/api/models` for the new profile then
-takes the config-reload branch (different path, different mtime). Without the
-`_old_cfg_path == config_path` check that reload looked like a config edit and
-unlinked the *target* profile's `models_cache.<name>.json`, defeating the
-`delete_disk=False` switch on the very next request
-(`tests/test_profile_switch_next_models_request_keeps_disk_cache.py`).
-
-`invalidate_models_cache` is the only entry point that offers the
-`delete_disk` choice. `delete_disk=True` is for when a source may have changed,
-or test isolation requires a guaranteed cold build; every pre-existing caller
-keeps this mode. `delete_disk=False` is for when the sources have **not**
-changed and the caller only needs the next request to re-resolve *which*
-profile's catalog to serve.
-
-`POST /api/profile/switch` uses `delete_disk=False`. The disk cache is keyed
-per profile (`_get_models_cache_path()`), and `_is_loadable_disk_cache()`
-rejects any snapshot whose source fingerprint no longer matches. The fingerprint
-covers every profile-local input to the catalog: `config.yaml`, `auth.json`,
-the `.env` key names, and the model-provider plugins. A switch therefore reuses
-the snapshot only when none of those inputs changed, and skips the full cold
-rebuild (live provider `fetch_models` calls). This mode depends on the
-fingerprint being the only gate for serving a disk snapshot (change-protocol
-items 1 and 4). A new catalog input must be added as an axis before anything
-can rely on this mode.
-
-A profile's snapshot is not stored in its home, so deleting the home leaves the
-file behind. `delete_profile_api()` and `create_profile_api()` both unlink
-`models_cache.<name>.json` (`delete_profile_models_cache()`), so a profile that
-is recreated with the same name never inherits the old catalog.
+The switch keeps the disk snapshot because it is keyed per profile and
+`_is_loadable_disk_cache()` rejects it unless every axis above matches, so any
+new catalog input must become an axis first. `delete_profile_api()` and
+`create_profile_api()` unlink `models_cache.<name>.json`, so a recreated profile
+never inherits the old catalog.
 
 ## Change protocol
 
@@ -141,19 +108,10 @@ timestamp-only churn keeps the fingerprint identical (and a session visit after 
 Codex refresh needs no live rebuild), while genuine changes — a new model, a
 visibility change, any catalog field, any unknown field — still invalidate.
 
-`tests/test_profile_switch_models_disk_cache.py` covers the invalidation modes:
-`delete_disk=False` keeps the disk file and the next `get_available_models()`
-reloads it without a live rebuild, the default still unlinks it, and the
-executed `/api/profile/switch` route passes `delete_disk=False`.
-
-`tests/test_profile_switch_models_cache_source_axes.py` covers the safety side
-of that mode. It saves a real snapshot, changes one source in the target
-profile, runs the switch, and asserts a fresh rebuild for each of these cases:
-adding or removing a `.env` key, installing a plugin (in either location),
-removing a plugin, bumping a plugin's version, editing plugin code without a version bump, and deleting then recreating the
-profile. Two tests pin the speed-up: with unchanged sources, and after rotating
-a `.env` value, the switch still reuses the snapshot, and no secret value is
-written to disk.
+`tests/test_profile_switch_models_disk_cache.py` covers the switch: the disk
+snapshot survives it and is served without a live rebuild, each source-axis
+change or a delete/recreate forces a fresh rebuild, and a same-path config
+edit still deletes the snapshot.
 
 ## References
 

@@ -2685,11 +2685,11 @@ def create_profile_api(name: str, clone_from: str = None,
 
 def _drop_profile_models_cache(name: str) -> None:
     """A deleted or new profile must never inherit a same-name models snapshot."""
-    try:
-        from api.config import delete_profile_models_cache
+    from api.config import _get_models_cache_path
 
-        delete_profile_models_cache(name)
-    except Exception:
+    try:
+        _get_models_cache_path(name).unlink(missing_ok=True)
+    except OSError:
         logger.debug("Failed to drop models cache for profile %s", name, exc_info=True)
 
 

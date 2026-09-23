@@ -564,13 +564,8 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     if config_path is None:
         config_path = _get_config_path()
     _cfg_cache.clear()
-    # Remember the old mtime AND path so we can tell whether *this* config file
-    # actually changed vs. a first-ever load (mtime == 0.0, server start) or a
-    # load of a different profile's config.yaml. _cfg_mtime is process-global,
-    # so after a per-client profile switch (process_wide=False skips
-    # reload_config()) it still holds the previous profile's nonzero mtime;
-    # without the path check the next /api/models on the new profile would
-    # look like an edit and unlink the new profile's disk snapshot.
+    # Remember the old mtime so we can tell whether config actually changed
+    # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
     _old_cfg_mtime = _cfg_mtime
     _old_cfg_path = _cfg_path
     _cfg_path = config_path
@@ -628,14 +623,11 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _apply_config_defaults(_cfg_cache)
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
     # Bust the models cache so the next request sees fresh config values.
-    # Only delete the disk cache when the SAME config file was already loaded
-    # (a real edit / explicit reload of the active profile's config.yaml) --
-    # not on first-ever load (_old_cfg_mtime == 0.0, server start) and not
-    # when the path changed because the request belongs to another profile
-    # (per-client profile switch). The per-profile disk snapshot is
-    # fingerprint-guarded on read, so a path change needs no unlink; deleting
-    # it here forced a full cold rebuild on the first /api/models after every
-    # switch.
+    # Only delete the disk cache when config has actually changed -- not on
+    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start) and not
+    # on a path change (per-client profile switch leaves the old profile's
+    # mtime) -- preserving the disk cache so the next restart
+    # still hits the fast path without a cold run.
     if _old_cfg_mtime != 0.0 and _old_cfg_path == config_path:
         _delete_models_cache_on_disk()
 
@@ -7607,7 +7599,7 @@ _MODELS_CACHE_SCHEMA_VERSION = 3
 _models_cache_path = STATE_DIR / "models_cache.json"
 
 
-def _get_models_cache_path() -> Path:
+def _get_models_cache_path(profile: str | None = None) -> Path:
     """Return the /api/models disk-cache path for the *active* profile (#3957).
 
     WebUI profile switching is per-client/cookie scoped (issue #798), but the
@@ -7631,37 +7623,27 @@ def _get_models_cache_path() -> Path:
     The named-profile path is derived from ``_models_cache_path`` (the
     module-level default), not from ``STATE_DIR`` directly, so the path stays
     correct if the default is repointed (e.g. tests monkeypatch
-    ``_models_cache_path`` to an isolated tmp file).
+    ``_models_cache_path`` to an isolated tmp file). Pass *profile* to get
+    another profile's path (profile delete/create).
     """
     try:
-        from api.profiles import get_active_profile_name
+        from api.profiles import get_active_profile_name, _is_root_profile
 
-        return _models_cache_path_for_profile(get_active_profile_name())
+        name = (profile or get_active_profile_name() or "").strip()
+        if not name or _is_root_profile(name):
+            return _models_cache_path
+        # Defensive filename sanitization: the cookie-derived profile name is
+        # already validated by _PROFILE_ID_RE at the request boundary, but keep
+        # the on-disk filename safe regardless of how the name was resolved.
+        safe = re.sub(r"[^a-z0-9_-]", "_", name.lower())[:64]
+        if not safe:
+            return _models_cache_path
+        # Splice the profile into the default filename: models_cache.json →
+        # models_cache.<safe>.json, keeping the default's parent dir + suffix.
+        base = _models_cache_path
+        return base.with_name(f"{base.stem}.{safe}{base.suffix}")
     except Exception:
         return _models_cache_path
-
-
-def _models_cache_path_for_profile(name: str | None) -> Path:
-    """Return the /api/models disk-cache path owned by profile *name*."""
-    from api.profiles import _is_root_profile
-
-    name = (name or "").strip()
-    if not name or _is_root_profile(name):
-        return _models_cache_path
-    # Keep the on-disk filename safe regardless of how the name was resolved.
-    safe = re.sub(r"[^a-z0-9_-]", "_", name.lower())[:64]
-    if not safe:
-        return _models_cache_path
-    base = _models_cache_path
-    return base.with_name(f"{base.stem}.{safe}{base.suffix}")
-
-
-def delete_profile_models_cache(name: str) -> None:
-    """Unlink profile *name*'s models disk snapshot (profile delete/create)."""
-    try:
-        os.unlink(str(_models_cache_path_for_profile(name)))
-    except (OSError, ValueError):
-        pass
 
 
 def _get_auth_store_path() -> Path:
@@ -7943,46 +7925,26 @@ def _active_profile_home() -> Path:
         return _DEFAULT_HERMES_HOME
 
 
-def _models_cache_env_fingerprint(path: Path) -> dict:
-    """Return the sorted names of non-empty keys in a profile ``.env``.
-
-    Credential presence decides which providers are detected; values are
-    never recorded, so rotating a key keeps the snapshot.
-    """
-    # Same parser provider detection uses, so the key names match exactly.
+def _models_cache_env_fingerprint(path: Path) -> list:
+    """Sorted non-empty ``.env`` key names, parsed like provider detection; values never recorded."""
     from api.providers import _load_env_file
 
-    p = Path(path).expanduser()
-    fp: dict = {"path": str(p)}
-    if not p.exists():
-        fp["missing"] = True
-        return fp
-    fp["present_keys"] = sorted(k for k, v in _load_env_file(p).items() if v)
-    return fp
+    return sorted(k for k, v in _load_env_file(Path(path).expanduser()).items() if v)
 
 
-def _plugin_manifest_fields(plugin_dir: Path) -> dict | None:
-    for filename in ("plugin.yaml", "plugin.yml"):
-        manifest = plugin_dir / filename
+def _declares_model_provider_kind(plugin_dir: Path) -> bool:
+    for manifest in (plugin_dir / "plugin.yaml", plugin_dir / "plugin.yml"):
         try:
-            text = manifest.read_text(encoding="utf-8", errors="replace")
+            lines = manifest.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        fields = {}
-        for line in text.splitlines():
-            key, sep, value = line.partition(":")
-            if sep and not line[:1].isspace() and key.strip() in ("name", "kind", "version"):
-                fields[key.strip()] = value.strip().strip("\"'")
-        return fields
-    return None
+        pairs = (line.partition(":") for line in lines if not line[:1].isspace())
+        return any(k.strip() == "kind" and v.strip().strip("\"'") == "model-provider" for k, _, v in pairs)
+    return False
 
 
 def _models_cache_plugin_fingerprint(home: Path) -> list:
-    """Return ``[dir, file stamps]`` for the profile's model-provider plugins.
-
-    Mirrors providers' discovery: every dir under ``plugins/model-providers/``
-    plus flat ``plugins/<dir>`` entries whose manifest declares that kind.
-    """
+    """``[dir, file stamps]`` per model-provider plugin, discovered like providers._scan_home_layer."""
     found = []
     plugins_root = Path(home).expanduser() / "plugins"
     for base, flat in ((plugins_root / "model-providers", False), (plugins_root, True)):
@@ -7993,18 +7955,14 @@ def _models_cache_plugin_fingerprint(home: Path) -> list:
         for child in children:
             if not child.is_dir() or child.name.startswith(("_", ".")):
                 continue
-            if flat and child.name == "model-providers":
-                continue
-            fields = _plugin_manifest_fields(child)
-            if flat and (fields or {}).get("kind") != "model-provider":
+            if flat and (child.name == "model-providers" or not _declares_model_provider_kind(child)):
                 continue
             found.append([str(child.relative_to(plugins_root)), _plugin_tree_stamps(child)])
     return found
 
 
 def _plugin_tree_stamps(plugin_dir: Path) -> list:
-    # The loader execs __init__.py, which can import sibling modules or read data files,
-    # so stamp every file in the tree; bytecode caches are derived and skipped.
+    # The loader execs __init__.py, which may import siblings or read data files; skip bytecode.
     stamps = []
     for root, dirs, files in os.walk(plugin_dir):
         dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not d.startswith("."))
@@ -8311,12 +8269,7 @@ def invalidate_models_cache(*, delete_disk: bool = True):
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
 
-    ``delete_disk=False`` drops only the in-memory snapshot and leaves the
-    per-profile disk cache in place. Use it when the caller only needs the
-    next request to re-resolve which profile's catalog to serve (e.g. a
-    per-client profile switch). The snapshot is reused only while
-    _models_cache_source_fingerprint() (config, auth, .env key names,
-    provider plugins, catalog) still matches.
+    ``delete_disk=False`` keeps the fingerprint-guarded disk snapshot (profile switch).
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv

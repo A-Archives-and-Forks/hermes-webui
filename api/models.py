@@ -8766,14 +8766,35 @@ def _load_cli_sessions_uncached(
                     # to every starved project made a build scan
                     # len(starved) * query_limit — an order of magnitude past
                     # the ceiling on a profile with ten compression-heavy
-                    # projects. One aggregate pool, spent at the full width of
-                    # each retry, caps the pass at 2 * query_limit of scoped
-                    # reading regardless of how many projects are starved.
+                    # projects. One aggregate pool caps the scoped reading of
+                    # a pass at a constant multiple of `query_limit` however
+                    # many projects are starved.
                     # Only the widening is rationed; the first query of every
                     # starved project is never skipped, which is what keeps the
                     # completeness guarantee above intact.
+                    #
+                    # (greptile P1, 2026-09-22 re-review) The pool is debited
+                    # only for what a retry reads BEYOND the project's own
+                    # first-query width — `widened - scoped_limit`, not the
+                    # whole `widened` grant. Debiting the whole grant spent the
+                    # entire pool on the first starved project whose window
+                    # merely touched its own 8x oversample: it read
+                    # `grant - share` extra rows but was billed the full grant,
+                    # so every later starved project lost its retry and its
+                    # older conversations stayed absent from its sidebar on
+                    # every rebuild. With incremental debits a later project
+                    # retries whenever real reads have left it pool; if an
+                    # earlier project genuinely read the pool down to zero,
+                    # that was real scan work — the aggregate bound, not a
+                    # reservation, is what caps the pass. The bound is
+                    # `3 * query_limit`: every starved project's first query
+                    # sums to at most `query_limit`, a retrying project re-reads
+                    # at most its own first width again, and the funded
+                    # increments sum to at most the pool — still constant in
+                    # the number of starved projects, which is what retires the
+                    # original `len(starved) * query_limit` blow-up.
                     widening_budget = query_limit
-                    for _kept, project_id in starved:
+                    for starved_index, (_kept, project_id) in enumerate(starved):
                         remaining = effective_limit - kept_per_project.get(project_id, 0)
                         if remaining <= 0:
                             continue
@@ -8787,10 +8808,11 @@ def _load_cli_sessions_uncached(
                         # the loop would advance to the next project and leave
                         # this one under-delivered on every rebuild — the same
                         # failure the global query already guards against
-                        # (greptile P1 on #6659). Re-query once, widened to
-                        # whatever the pass's widening budget has left, which is
-                        # what bounds the retry at the PASS level instead of per
-                        # project (greptile P1 on #6659).
+                        # (greptile P1 on #6659). Re-query once, widened to the
+                        # project's own width plus whatever the pass's widening
+                        # pool still has, which is what bounds the retry at the
+                        # PASS level instead of per project (greptile P1 on
+                        # #6659).
                         scoped_limit = remaining
                         while True:
                             scoped_rows, scoped_window_exhausted = cast(
@@ -8816,14 +8838,43 @@ def _load_cli_sessions_uncached(
                                 or scoped_limit >= query_limit
                             ):
                                 break
-                            widened = min(query_limit, widening_budget)
-                            if widened <= scoped_limit:
-                                # The pass has spent its widening budget. A
-                                # retry now could only re-read a window this
-                                # query already consumed, so stop instead of
-                                # paying for a read that cannot deliver.
+                            # (greptile P1, 2026-09-22 re-review) Each
+                            # retry is funded by a FAIR SHARE of what the
+                            # pool still holds — one slice per starved
+                            # project not yet tried, so later projects
+                            # always keep pool for their own first retry.
+                            # The retry goes to `scoped_limit + share`:
+                            # debiting the whole grant spent the entire
+                            # pool on the first starved project whose
+                            # window merely touched its own 8x oversample
+                            # and left every later one unfunded, but
+                            # granting `min(query_limit, pool)` whole also
+                            # let the first project READ the pool down to
+                            # zero — every project whose raw window is
+                            # consumed re-reads its own width once before
+                            # delivering, so an honest retry must buy
+                            # roughly one more width. The share converges
+                            # there in a few bounded steps; anything still
+                            # short after the pool is spent stays for the
+                            # next build — the alternative is the
+                            # per-project grant that made the pass scan
+                            # `len(starved) * query_limit` (the original
+                            # greptile P1 on #6659).
+                            pool_share = (
+                                widening_budget
+                                // max(len(starved) - starved_index, 1)
+                            )
+                            if pool_share <= 0:
+                                # The pool is spent: no further starved
+                                # project's retry can be funded. Whatever a
+                                # project could not reach this pass stays
+                                # for the next build — the alternative is
+                                # buying reads nobody budgeted for.
                                 break
-                            widening_budget -= widened
+                            widened = min(
+                                query_limit, scoped_limit + pool_share
+                            )
+                            widening_budget -= widened - scoped_limit
                             scoped_limit = widened
             except Exception:
                 logger.debug("Project-assigned CLI recovery pass failed", exc_info=True)

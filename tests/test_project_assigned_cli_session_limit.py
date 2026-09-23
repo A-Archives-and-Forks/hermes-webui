@@ -2398,11 +2398,15 @@ def test_compression_heavy_widening_is_one_pass_budget_not_per_project(
     ``query_limit`` — and it was granted to every starved project in turn. A
     profile with ten compression-heavy projects therefore scanned ten times the
     ceiling in a single build, growing with the number of starved projects
-    (greptile P1 on #6659). The widening now comes out of one pass-level pool,
-    so the scoped reading of a build is bounded by ``2 * query_limit`` however
-    many projects are starved — while every starved project still pays its own
-    first query, the completeness guarantee that a fixed per-build project cap
-    used to break (greptile P1 on #6659).
+    (greptile P1 on #6659). The widening now comes out of one pass-level pool
+    shared FAIRLY: each starved project's retry is funded by a slice of what
+    the pool still holds (one slice per project not yet tried), and the pool is
+    debited only for what a retry reads beyond the project's own width, so the
+    scoped reading of a build is bounded by ``3 * query_limit`` however many
+    projects are starved — while every starved project still pays its own first
+    query and still keeps pool for its own first retry, the completeness
+    guarantees neither a per-build project cap nor a first-come whole-grant
+    debit may break (both greptile P1 reviews on #6659).
 
     Parametrized over the number of starved projects because that is exactly
     what the budget must not scale with.
@@ -2465,16 +2469,35 @@ def test_compression_heavy_widening_is_one_pass_budget_not_per_project(
 
     # A widened query is one that asks for more than the project's own share.
     widened = [limit for _, limit in scoped_queries if limit > effective_limit]
-    # The pool is one query_limit wide and each retry is charged its full width,
-    # so exactly one project can take the widest retry — not one per project.
-    assert widened == [query_limit]
-    # And the whole pass stays inside the documented 2 * query_limit bound,
+    # The pool is shared fairly: EVERY starved project gets a widening retry —
+    # not just the first in line, and not zero of them. With one starved
+    # project the pool is entirely its own; with several, each retry is funded
+    # by a slice of what remains so later projects keep pool for theirs.
+    # Bounded by the number of retrying projects, not by the pool arithmetic
+    # (a single starved project legitimately spends the whole pool on one
+    # retry to `query_limit`).
+    assert len(widened) == min(quiet_count, len(quiet))
+    # Every retry covers the whole project: the reader's own 32x oversample
+    # turns a query at `limit` into a raw read of at most
+    # `limit * max(CANDIDATE_WINDOW_MULTIPLIERS)` rows, so the retry grants
+    # stay under `query_limit * 32` — but the retries must never buy the
+    # unbounded per-project read the original P1 described.
+    assert all(
+        limit <= query_limit * max(agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS)
+        for limit in widened
+    )
+    # The retries are PAID FROM THE POOL, not granted per project: the sum of
+    # what they read beyond their projects' own widths stays within the pool
+    # plus each project's one honest re-read of its own width — the aggregate
+    # bound that keeps the pass constant in the number of starved projects.
+    assert sum(widened) <= len(widened) * query_limit
+    # And the whole pass stays inside the documented aggregate bound,
     # whatever the number of starved projects.
-    assert sum(limit for _, limit in scoped_queries) <= 2 * query_limit
+    assert sum(limit for _, limit in scoped_queries) <= 3 * query_limit
 
-    # The widening the budget did fund still recovers the conversation behind
-    # the neediest project's window — the retry was rationed, not disabled.
-    widened_project = quiet[0]
-    assert f"{widened_project}-old" in {
-        session["session_id"] for session in sessions
-    }, "the one funded widening must still reach behind the binding window"
+    # The widening the budget funded still recovers the conversation behind
+    # EVERY starved project's window — the retry was rationed, not disabled.
+    for project_id in quiet:
+        assert f"{project_id}-old" in {
+            session["session_id"] for session in sessions
+        }, f"the funded widening must still reach behind {project_id}'s window"

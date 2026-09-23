@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **A session deleted during a restart no longer produces a spurious recovery warning.** When
+  WebUI startup recovery re-attached background processes, a session that had vanished between
+  enumeration and rebind raised a `KeyError` that was logged as a warning. It now follows the
+  existing skip path, confined to the session lookup, so the vanished owner is skipped, live owners
+  still rebind, and registry errors still warn. (#7753, #7774 by @happy5318)
+
 - **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
   another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's
   "another Hermes process is using this session" notices now reach the chat as a warning status

@@ -24,6 +24,12 @@
 
 ### Fixed
 
+- **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
+  another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's
+  "another Hermes process is using this session" notices now reach the chat as a warning status
+  instead of being dropped, and the status clears when the run ends. Classification keys on the Agent
+  status kind (`lifecycle` / `warn`), so user-authored text can never be promoted to a warning.
+  (#7760 by @ruizanthony)
 - **`MEDIA:` links wrapped in inline code no longer 404.** Every `MEDIA:` capture site (renderer,
   streaming parser, TTS stripper, session-media authorization and snapshot capture, seven in all)
   swallowed the closing backtick of `` `MEDIA:/path` `` into the path, so the file lookup and the

@@ -9137,10 +9137,42 @@ def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
     return False
 
 
+def _register_pending_user_timestamp_identity(
+    callable_obj, session, persist_user_timestamp,
+):
+    """Persist the pending-turn proof while the caller owns the session lock."""
+    if session is None:
+        return
+    try:
+        timestamp_parameter = inspect.signature(callable_obj).parameters.get(
+            "persist_user_timestamp"
+        )
+    except (TypeError, ValueError):
+        timestamp_parameter = None
+    has_timestamp_contract = (
+        timestamp_parameter is not None
+        and timestamp_parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+    )
+    identity = (
+        _validated_webui_pending_user_timestamp_identity(
+            session,
+            (getattr(session, "active_stream_id", None), persist_user_timestamp),
+        )
+        if has_timestamp_contract
+        else None
+    )
+    previous = getattr(session, "_webui_pending_user_timestamp_identity", None)
+    session._webui_pending_user_timestamp_identity = identity
+    session_id = getattr(session, "session_id", None)
+    save = getattr(session, "save", None)
+    if callable(save) and session_id and previous != identity:
+        # Persist before run_conversation can write this turn to state.db.
+        save(touch_updated_at=False, skip_index=True)
+
+
 def _build_run_conversation_kwargs(
     callable_obj,
     *,
-    session=None,
     user_message,
     system_message,
     conversation_history,
@@ -9149,7 +9181,7 @@ def _build_run_conversation_kwargs(
     persist_user_message,
     persist_user_timestamp,
 ):
-    """Build one rolling-compatible Agent invocation contract.
+    """Build one rolling-compatible Agent invocation contract without mutation.
 
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
@@ -9174,45 +9206,6 @@ def _build_run_conversation_kwargs(
         "conversation_history_revision",
         conversation_history_revision,
     )
-    if session is not None:
-        try:
-            timestamp_parameter = inspect.signature(callable_obj).parameters.get(
-                "persist_user_timestamp"
-            )
-        except (TypeError, ValueError):
-            timestamp_parameter = None
-        has_timestamp_contract = (
-            timestamp_parameter is not None
-            and timestamp_parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
-        )
-        session_id = getattr(session, "session_id", None)
-        save = getattr(session, "save", None)
-        lock = (
-            _get_session_agent_lock(session_id)
-            if callable(save) and session_id
-            else contextlib.nullcontext()
-        )
-        with lock:
-            candidate = (
-                _validated_webui_pending_user_timestamp_identity(
-                    session,
-                    (
-                        getattr(session, "active_stream_id", None),
-                        kwargs.get("persist_user_timestamp"),
-                    ),
-                )
-                if has_timestamp_contract
-                else None
-            )
-            # A retry using an older/opaque Agent must revoke earlier proof;
-            # row identity cannot be carried across a changed invocation contract.
-            identity = candidate
-            previous = getattr(session, "_webui_pending_user_timestamp_identity", None)
-            session._webui_pending_user_timestamp_identity = identity
-            if callable(save) and session_id and previous != identity:
-                # Persist the proof while holding the session mutation lock,
-                # before run_conversation can write this turn to state.db.
-                save(touch_updated_at=False, skip_index=True)
     return kwargs
 
 
@@ -11763,9 +11756,13 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
+            with _agent_lock:
+                _persist_user_timestamp = getattr(s, 'pending_started_at', None)
+                _register_pending_user_timestamp_identity(
+                    agent.run_conversation, s, _persist_user_timestamp
+                )
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
-                session=s,
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_agent(
@@ -11779,7 +11776,7 @@ def _run_agent_streaming(
                 conversation_history_revision=_conversation_history_revision,
                 task_id=session_id,
                 persist_user_message=msg_text,
-                persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                persist_user_timestamp=_persist_user_timestamp,
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -12343,9 +12340,17 @@ def _run_agent_streaming(
                                     _heal_context_messages,
                                     _heal_conversation_history_revision,
                                 ) = _refresh_context_and_revision_from_state_db()
+                                _heal_persist_user_timestamp = getattr(
+                                    s, 'pending_started_at', None
+                                )
+                                # The returned-error path already owns _agent_lock.
+                                _register_pending_user_timestamp_identity(
+                                    agent.run_conversation,
+                                    s,
+                                    _heal_persist_user_timestamp,
+                                )
                                 _heal_kwargs = _build_run_conversation_kwargs(
                                     agent.run_conversation,
-                                    session=s,
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_agent(
@@ -12361,7 +12366,7 @@ def _run_agent_streaming(
                                     ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
-                                    persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                                    persist_user_timestamp=_heal_persist_user_timestamp,
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -13695,9 +13700,17 @@ def _run_agent_streaming(
                             _heal_context_messages,
                             _heal_conversation_history_revision,
                         ) = _refresh_context_and_revision_from_state_db()
+                        with _agent_lock:
+                            _heal_persist_user_timestamp = getattr(
+                                s, 'pending_started_at', None
+                            )
+                            _register_pending_user_timestamp_identity(
+                                _heal_agent.run_conversation,
+                                s,
+                                _heal_persist_user_timestamp,
+                            )
                         _heal_kwargs2 = _build_run_conversation_kwargs(
                             _heal_agent.run_conversation,
-                            session=s,
                             user_message=user_message,
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_agent(
@@ -13713,7 +13726,7 @@ def _run_agent_streaming(
                             ),
                             task_id=session_id,
                             persist_user_message=msg_text,
-                            persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                            persist_user_timestamp=_heal_persist_user_timestamp,
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config

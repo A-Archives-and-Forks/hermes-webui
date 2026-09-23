@@ -236,6 +236,10 @@ def test_get_session_keeps_pending_agent_projection_private_but_in_context(
     import api.models as models
     import api.session_ops
     from api import routes
+    from api.streaming import (
+        _build_run_conversation_kwargs,
+        _register_pending_user_timestamp_identity,
+    )
 
     timestamp = time.time()
     stream_id = "pending-webui-stream"
@@ -304,11 +308,10 @@ def test_get_session_keeps_pending_agent_projection_private_but_in_context(
                 ],
             )
 
-    from api.streaming import _build_run_conversation_kwargs
-
+    with api.config._get_session_agent_lock(session_id):
+        _register_pending_user_timestamp_identity(agent_run, session, timestamp)
     run_kwargs = _build_run_conversation_kwargs(
         agent_run,
-        session=session,
         user_message=prompt,
         system_message="system",
         conversation_history=[],
@@ -434,7 +437,11 @@ def test_get_session_keeps_pending_agent_projection_private_but_in_context(
 
 def test_pending_row_identity_requires_timestamp_handoff_to_active_agent():
     from api.models import _suppress_native_image_display_mirrors
-    from api.streaming import _build_run_conversation_kwargs
+    from api.streaming import (
+        _build_run_conversation_kwargs,
+        _register_pending_user_timestamp_identity,
+        _get_session_agent_lock,
+    )
 
     def modern_run(user_message, persist_user_timestamp=None):
         return None
@@ -453,7 +460,6 @@ def test_pending_row_identity_requires_timestamp_handoff_to_active_agent():
         pending_user_source="webui",
     )
     kwargs = {
-        "session": session,
         "user_message": "prompt",
         "system_message": "system",
         "conversation_history": [],
@@ -462,11 +468,15 @@ def test_pending_row_identity_requires_timestamp_handoff_to_active_agent():
         "persist_user_message": "prompt",
         "persist_user_timestamp": timestamp,
     }
+    with _get_session_agent_lock("session"):
+        _register_pending_user_timestamp_identity(modern_run, session, timestamp)
     modern = _build_run_conversation_kwargs(modern_run, **kwargs)
     assert modern["persist_user_timestamp"] == timestamp
     assert session._webui_pending_user_timestamp_identity == (
         "stream-identity", timestamp,
     )
+    with _get_session_agent_lock("session"):
+        _register_pending_user_timestamp_identity(modern_run, session, timestamp)
     rebuilt = _build_run_conversation_kwargs(modern_run, **kwargs)
     assert rebuilt["persist_user_timestamp"] == timestamp
     assert session._webui_pending_user_timestamp_identity == (
@@ -474,6 +484,8 @@ def test_pending_row_identity_requires_timestamp_handoff_to_active_agent():
     )
     # Credential-heal fallback can replace the callable mid-turn. Proof from
     # the first invocation must not authorize rows from an older Agent.
+    with _get_session_agent_lock("session"):
+        _register_pending_user_timestamp_identity(legacy_run, session, timestamp)
     fallback = _build_run_conversation_kwargs(legacy_run, **kwargs)
     assert "persist_user_timestamp" not in fallback
     assert session._webui_pending_user_timestamp_identity is None
@@ -484,14 +496,18 @@ def test_pending_row_identity_requires_timestamp_handoff_to_active_agent():
         pending_user_message="prompt",
         pending_user_source="webui",
     )
-    legacy = _build_run_conversation_kwargs(
-        legacy_run, **{**kwargs, "session": legacy_session}
-    )
+    with _get_session_agent_lock("session"):
+        _register_pending_user_timestamp_identity(
+            legacy_run, legacy_session, timestamp
+        )
+    legacy = _build_run_conversation_kwargs(legacy_run, **kwargs)
     assert "persist_user_timestamp" not in legacy
     assert legacy_session._webui_pending_user_timestamp_identity is None
-    opaque = _build_run_conversation_kwargs(
-        opaque_run, **{**kwargs, "session": legacy_session}
-    )
+    with _get_session_agent_lock("session"):
+        _register_pending_user_timestamp_identity(
+            opaque_run, legacy_session, timestamp
+        )
+    opaque = _build_run_conversation_kwargs(opaque_run, **kwargs)
     assert "persist_user_timestamp" in opaque
     assert legacy_session._webui_pending_user_timestamp_identity is None
     row = {"role": "user", "content": "Agent-only memory", "timestamp": timestamp}
@@ -1204,12 +1220,18 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery(
         if message.get("_active_turn_token") == identity["token"]
     )
     mirror = _durable_agent_content(context_user["content"])
+    display_attachments = [{
+        "name": "sidecar-owned.png",
+        "mime": "image/png",
+        "is_image": True,
+    }]
     sidecar_mirror_row = {
         "role": "user",
         "content": mirror,
         "timestamp": timestamp,
         "_state_db_row_id": 42,
         "api_content": sidecar_payload,
+        "attachments": display_attachments,
     }
     session.messages.append(dict(sidecar_mirror_row))
     session.context_messages.append(dict(sidecar_mirror_row))
@@ -1243,10 +1265,9 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery(
             message for message in context
             if message.get("_state_db_row_id") == 42
         ]
-        assert len(display_row_42) == 2
-        assert {message["api_content"] for message in display_row_42} == {
-            sidecar_payload, state_payload,
-        }
+        assert len(display_row_42) == 1
+        assert display_row_42[0]["api_content"] == sidecar_payload
+        assert display_row_42[0]["attachments"] == display_attachments
         assert len(context_row_42) == 2
         assert {message["api_content"] for message in context_row_42} == {
             sidecar_payload, state_payload,
@@ -1254,8 +1275,9 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery(
 
         public = public_session_projection({"messages": display})["messages"]
         public_mirrors = [message for message in public if message.get("content") == mirror]
-        assert len(public_mirrors) == 2
+        assert len(public_mirrors) == 1
         assert all("api_content" not in message for message in public_mirrors)
+        assert public_mirrors[0]["attachments"] == display_attachments
         display_image_turn = next(
             message for message in display
             if message.get("_active_turn_token") == identity["token"]
@@ -1277,14 +1299,8 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery(
             message for message in session.messages
             if message.get("_state_db_row_id") == 42
         ]
-        if first_public is None:
-            assert len(live_row_42) == 1
-            assert live_row_42[0]["api_content"] == sidecar_payload
-        else:
-            assert len(live_row_42) == 2
-            assert {message["api_content"] for message in live_row_42} == {
-                sidecar_payload, state_payload,
-            }
+        assert len(live_row_42) == 1
+        assert live_row_42[0]["api_content"] == sidecar_payload
         replay_image_turn = next(
             message for message in replay
             if isinstance(message.get("content"), list)
@@ -1304,6 +1320,106 @@ def test_marked_native_image_mirror_conflict_stays_bounded_across_recovery(
             assert replay == first_replay
         session.messages = display
         session.context_messages = context
+
+
+def test_native_image_payload_conflict_with_distinct_visible_text_stays_separate():
+    import api.models as models
+
+    timestamp = 865.0
+    session, identity, _ = _settle_image_turn(timestamp=timestamp, agent_row_id=41)
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    sidecar_row = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 42,
+        "api_content": "SIDECAR-PAYLOAD",
+    }
+    session.messages.append(sidecar_row)
+    state_row = {
+        "role": "user",
+        "content": "A separate visible submission",
+        "timestamp": timestamp,
+        "_state_db_row_id": 42,
+        "api_content": "STATE-DB-PAYLOAD",
+        "_webui_unmatched_native_image_mirror": True,
+    }
+
+    display = models.reconciled_state_db_messages_for_session(
+        session,
+        state_messages=[state_row],
+    )
+    same_row = [
+        message for message in display
+        if message.get("_state_db_row_id") == 42
+    ]
+    assert {message["content"] for message in same_row} == {
+        mirror,
+        "A separate visible submission",
+    }
+
+
+def test_marked_native_image_conflict_keeps_ambiguous_sidecar_row_id_visible():
+    import api.models as models
+
+    timestamp = 867.0
+    session, identity, _ = _settle_image_turn(timestamp=timestamp, agent_row_id=41)
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    sidecar_rows = [
+        {
+            "role": "user",
+            "content": mirror,
+            "timestamp": timestamp,
+            "_state_db_row_id": 42,
+            "api_content": "SIDECAR-PAYLOAD-ONE",
+            "attachments": [{"name": "first.png"}],
+        },
+        {
+            "role": "user",
+            "content": mirror,
+            "timestamp": timestamp,
+            "_state_db_row_id": 42,
+            "api_content": "SIDECAR-PAYLOAD-TWO",
+            "attachments": [{"name": "second.png"}],
+        },
+    ]
+    session.messages.extend(sidecar_rows)
+    state_row = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 42,
+        "api_content": "STATE-DB-PAYLOAD",
+    }
+    marked = models._suppress_native_image_display_mirrors(session, [state_row])
+    assert marked[0]["_webui_unmatched_native_image_mirror"] is True
+
+    display = models.reconciled_state_db_messages_for_session(
+        session,
+        state_messages=[state_row],
+    )
+    same_row = [
+        message for message in display
+        if message.get("_state_db_row_id") == 42
+    ]
+    assert len(same_row) == 3
+    assert {message["api_content"] for message in same_row} == {
+        "SIDECAR-PAYLOAD-ONE",
+        "SIDECAR-PAYLOAD-TWO",
+        "STATE-DB-PAYLOAD",
+    }
+    assert [message.get("attachments") for message in same_row[:2]] == [
+        [{"name": "first.png"}],
+        [{"name": "second.png"}],
+    ]
 
 
 def test_marked_native_image_rows_with_distinct_ids_survive_recovery():

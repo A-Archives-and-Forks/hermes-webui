@@ -187,10 +187,13 @@ and 5; it does not mark every run-state boundary implemented.
    Match settled native-image scalar projections only with trusted turn and
    durable-row identity, never the marker alone. A durable row ID proves row
    identity, not provider-payload freshness: when the sidecar and state.db have
-   conflicting nonempty `api_content`, preserve both versions for display and
-   replay without mutating either. Fill a missing payload from the other copy;
-   repeated reconciliation must remain bounded and idempotent. Preserve
-   genuinely distinct or ambiguous rows when matching settled projections.
+   conflicting nonempty `api_content`, preserve both versions for model-context
+   replay without mutating either. For visible display, a marked mirror may
+   share the existing sidecar bubble only when its valid durable row ID, exact
+   timestamp, and exact visible user content match; keep the sidecar-owned row
+   and its display metadata. Distinct row IDs, ambiguous or invalid identities,
+   and different visible user text remain separate. Fill a missing payload from
+   the other copy; repeated reconciliation must remain bounded and idempotent.
    Agent state.db alone cannot restore the original attachment if the WebUI
    sidecar is lost.
    Visible interim assistant progress must remain visible timeline content; a

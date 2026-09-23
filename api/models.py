@@ -8430,8 +8430,8 @@ def _project_state_db_message(row, available, id_col, optional):
     Shared by ``get_state_db_session_messages`` and the regeneration
     single-snapshot helper so the bounded tail can never drift from the
     canonical reader: JSON-decode content/tool_calls/reasoning payloads, omit
-    empty fields, keep durable row id private (``_state_db_row_id`` only for
-    real Agent api_content replays), and apply ``tool_name → name``.
+    empty fields, keep durable row id private for provider replays and native
+    image projections, and apply ``tool_name → name``.
     """
     msg = {
         'role': row['role'],
@@ -8447,11 +8447,21 @@ def _project_state_db_message(row, available, id_col, optional):
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
             value = _json_loads_if_string(value)
         msg[col] = value
+    native_image_projection = (
+        msg.get('role') == 'user'
+        and isinstance(msg.get('content'), str)
+        and '[screenshot]' in msg['content']
+    )
     if (
         id_col
         and row['id'] is not None
-        and isinstance(msg.get('api_content'), str)
-        and msg['api_content']
+        and (
+            native_image_projection
+            or (
+                isinstance(msg.get('api_content'), str)
+                and msg['api_content']
+            )
+        )
     ):
         msg['_state_db_row_id'] = row['id']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
@@ -9120,6 +9130,8 @@ def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
 
 
 _SESSION_MESSAGE_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+_WEBUI_TRUSTED_AGENT_INPUT_FIELD = "_webui_trusted_agent_input_text"
+_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD = "_webui_unmatched_native_image_mirror"
 
 
 def _agent_durable_multimodal_content(msg: dict) -> str | None:
@@ -9198,6 +9210,178 @@ def _session_message_multimodal_mirror_key(
         str(msg.get("tool_name") or msg.get("name") or ""),
         tool_calls_key,
     )
+
+
+def _native_image_leading_text(message):
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            return None
+        part_type = str(part.get("type") or "").lower()
+        if part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+            return "\n".join(parts)
+        if part_type not in {"", "text", "input_text", "output_text"}:
+            return None
+        text = part.get("text", part.get("input_text", part.get("output_text", "")))
+        if not isinstance(text, str):
+            return None
+        parts.append(text)
+    return None
+
+
+def _suppress_native_image_display_mirrors(
+    session,
+    state_messages,
+    *,
+    suppress_api_content=True,
+):
+    """Drop exact Agent image projections backed by one token-paired WebUI turn."""
+    display_messages = getattr(session, "messages", None) or []
+    context_messages = getattr(session, "context_messages", None) or []
+    if not display_messages or not context_messages or not state_messages:
+        return state_messages
+
+    display_by_token = collections.defaultdict(list)
+    context_by_token = collections.defaultdict(list)
+    for message in display_messages:
+        if isinstance(message, dict) and message.get("_active_turn_token"):
+            display_by_token[message["_active_turn_token"]].append(message)
+    for message in context_messages:
+        if isinstance(message, dict) and message.get("_active_turn_token"):
+            context_by_token[message["_active_turn_token"]].append(message)
+
+    display_row_id_counts = collections.Counter()
+    context_row_id_counts = collections.Counter()
+    for messages, counts in (
+        (display_messages, display_row_id_counts),
+        (context_messages, context_row_id_counts),
+    ):
+        for message in messages:
+            row_id, valid = _state_db_row_identity_details(message)
+            if valid and row_id is not None:
+                counts[row_id] += 1
+
+    from api.streaming import _submitted_user_text_matches
+
+    mirrors = collections.defaultdict(list)
+    for token, contexts in context_by_token.items():
+        displays = display_by_token.get(token, [])
+        for context in contexts:
+            trusted_input = context.get(_WEBUI_TRUSTED_AGENT_INPUT_FIELD)
+            leading_text = _native_image_leading_text(context)
+            if (
+                not isinstance(trusted_input, str)
+                or leading_text is None
+                or not _submitted_user_text_matches(leading_text, trusted_input)
+            ):
+                continue
+            key = _session_message_multimodal_mirror_key(
+                context,
+                require_image_parts=True,
+            )
+            if key is None:
+                continue
+            display = displays[0] if len(contexts) == len(displays) == 1 else None
+            display_link_valid = False
+            if display is not None and display.get("role") == "user":
+                context_ts, context_ts_valid = _message_exact_timestamp_details(context)
+                display_ts, display_ts_valid = _message_exact_timestamp_details(display)
+                display_link_valid = (
+                    context_ts_valid
+                    and display_ts_valid
+                    and context_ts is not None
+                    and display_ts == context_ts
+                    and _message_private_identity_compatible(display, context)
+                )
+            # Keep trusted rich candidates even when display linkage is
+            # ambiguous, so a matching scalar row is preserved unless its
+            # durable row id proves it is the exact Agent projection.
+            mirrors[key].append((context, display, display_link_valid))
+    if not mirrors:
+        return state_messages
+
+    row_id_counts = collections.Counter()
+    stable_id_counts = collections.Counter()
+    state_mirror_keys = []
+    for message in state_messages:
+        if not isinstance(message, dict):
+            state_mirror_keys.append(None)
+            continue
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        stable_id, stable_id_valid = _stable_message_identity_details(message)
+        if row_id_valid and row_id is not None:
+            row_id_counts[row_id] += 1
+        if stable_id_valid and stable_id is not None:
+            stable_id_counts[stable_id] += 1
+        state_mirror_keys.append(
+            _session_message_multimodal_mirror_key(
+                message,
+                require_scalar_mirror=True,
+            )
+        )
+
+    suppress = set()
+    marked = {}
+    for index, key in enumerate(state_mirror_keys):
+        if key is None or key not in mirrors:
+            continue
+        message = state_messages[index]
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        stable_id, stable_id_valid = _stable_message_identity_details(message)
+        contexts = mirrors[key]
+        matched = None
+        preserve_distinct_row = False
+        if len(contexts) == 1:
+            context, display, display_link_valid = contexts[0]
+            context_row_id, context_row_id_valid = _state_db_row_identity_details(context)
+            display_row_id, display_row_id_valid = _state_db_row_identity_details(display)
+            linked_context_row = (
+                display is not None
+                and display_link_valid
+                and context_row_id_valid
+                and display_row_id_valid
+                and context_row_id is not None
+                and context_row_id == display_row_id
+                and context_row_id_counts[context_row_id] == 1
+                and display_row_id_counts[display_row_id] == 1
+            )
+            if (
+                linked_context_row
+                and (not row_id_valid or row_id is None or row_id != context_row_id)
+                and (row_id is None or row_id_counts[row_id] == 1)
+                and stable_id_valid
+                and (stable_id is None or stable_id_counts[stable_id] == 1)
+            ):
+                preserve_distinct_row = True
+            if (
+                linked_context_row
+                and row_id_valid
+                and row_id is not None
+                and context_row_id == row_id
+                and row_id_counts[row_id] == 1
+                and stable_id_valid
+                and (stable_id is None or stable_id_counts[stable_id] == 1)
+                and _message_private_identity_compatible(context, message)
+            ):
+                matched = context
+        if (
+            matched is not None
+            and (suppress_api_content or not _session_message_api_content_key(message))
+        ):
+            suppress.add(index)
+        elif preserve_distinct_row:
+            marked[index] = {
+                **message,
+                _WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD: True,
+            }
+    return [
+        marked.get(index, message)
+        for index, message in enumerate(state_messages)
+        if index not in suppress
+    ]
 
 
 # Per-call memo of structured-content identities. Reconciliation derives merge,
@@ -10789,14 +10973,36 @@ def _merge_session_messages_append_only_impl(
         and boundary_ts is not None
         and boundary_ts < watermark_timestamp
     )
-    for msg in state_messages:
+    for source_message in state_messages:
+        preserve_native_image_row = (
+            isinstance(source_message, dict)
+            and source_message.get(_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD) is True
+        )
+        msg = (
+            {
+                key: value
+                for key, value in source_message.items()
+                if key != _WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD
+            }
+            if preserve_native_image_row
+            else source_message
+        )
         timestamp = _message_timestamp_as_float(msg)
         key = _cached_message_key(msg, "merge")
         dedup_key = _cached_message_key(msg, "dedup")
         visible_key = _cached_message_key(msg, "visible_state")
         content_key = _cached_message_key(msg, "content_state")
+        if preserve_native_image_row:
+            if not _insert_state_message_chronologically(merged_messages, msg):
+                merged_messages.append(msg)
+            seen_message_keys.add(key)
+            seen_dedup_keys.add(dedup_key)
+            seen_content_keys.add(content_key)
+            seen_visible_keys.add(visible_key)
+            _remember_merged_message(msg, source="state")
+            continue
         multimodal_mirror_key = (
-            state_multimodal_mirror_keys.get(id(msg))
+            state_multimodal_mirror_keys.get(id(source_message))
             if sidecar_multimodal_mirrors
             else None
         )
@@ -11153,6 +11359,11 @@ def reconciled_state_db_messages_for_session(
             state_messages = state_result.messages
         else:
             state_messages = state_result
+    state_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_messages,
+        suppress_api_content=not using_context_messages,
+    )
     if prefer_context and local_messages:
         if using_context_messages:
             sidecar_messages = getattr(session, 'messages', None) or []

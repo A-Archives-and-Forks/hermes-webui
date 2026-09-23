@@ -9298,6 +9298,12 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         return sidecar_messages
+    state_db_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_db_messages,
+    )
+    if not state_db_messages:
+        return sidecar_messages
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
     # newest (recovery / edited-in-place / missing-timestamp cases) is still
@@ -10574,6 +10580,7 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _suppress_native_image_display_mirrors,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
@@ -13314,6 +13321,10 @@ def _handle_session_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
             else:
+                state_db_messages = _suppress_native_image_display_mirrors(
+                    s,
+                    state_db_messages,
+                )
                 _all_msgs = merge_session_messages_append_only(
                     _webui_sidecar_lineage_messages_for_display(s),
                     state_db_messages,
@@ -25024,10 +25035,12 @@ def _handle_chat_sync(handler, body):
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
+                _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata_before_boundary,
+                _settle_current_turn_boundary,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
@@ -25092,6 +25105,33 @@ def _handle_chat_sync(handler, body):
             result=result,
             agent=agent,
         )
+        if (
+            isinstance(_active_turn_identity, dict)
+            and _active_turn_identity.get("agent_turn_boundary_resolved") is True
+            and not _active_turn_identity.get("token")
+        ):
+            _active_image_index = _find_active_turn_checkpoint_index(
+                _result_messages,
+                _previous_context_messages,
+                _active_turn_identity,
+                msg,
+            )
+            _active_image_content = (
+                _result_messages[_active_image_index].get("content")
+                if _active_image_index is not None
+                else None
+            )
+            if isinstance(_active_image_content, list) and any(
+                isinstance(part, dict)
+                and part.get("type") in {"image", "image_url", "input_image"}
+                for part in _active_image_content
+            ):
+                from api.process_event_utils import build_active_turn_token
+
+                _active_turn_identity["token"] = build_active_turn_token(
+                    f"sync:{s.session_id}:{_active_turn_identity['turn_id']}",
+                    time.time(),
+                )
         _turn_boundary = _active_turn_boundary(
             _result_messages, _previous_context_messages, _active_turn_identity, msg,
         )
@@ -25110,6 +25150,14 @@ def _handle_chat_sync(handler, body):
             _next_context_messages,
             msg,
         )
+        if _active_turn_identity.get("token"):
+            _next_context_messages = _settle_current_turn_boundary(
+                _previous_context_messages,
+                _next_context_messages,
+                _active_turn_identity,
+                msg,
+                getattr(s, "pending_user_source", None) or "webui",
+            )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
@@ -25119,6 +25167,9 @@ def _handle_chat_sync(handler, body):
             ),
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
+            verification_nudge_provenance={
+                "active_turn_identity": _active_turn_identity,
+            },
         )
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames

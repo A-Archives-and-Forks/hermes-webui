@@ -46,6 +46,7 @@ from api.agent_sessions import (
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
+    open_state_db_readonly,
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
@@ -320,7 +321,7 @@ def _latest_cron_session_info_for_jobs(
     if not db_path or not Path(db_path).exists():
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -2543,8 +2544,8 @@ def _build_session_list_cache_payload(
     )
     if show_cli_sessions:
         diag_stage("cli_cap")
-        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        archived_scoped = _cap_recent_cli_sessions(archived_scoped)
+        visible_scoped = _cap_recent_cli_sessions(visible_scoped)
     if visible_only:
         archived_scoped = [
             s for s in archived_scoped if _session_has_server_visible_messages(s)
@@ -3484,16 +3485,31 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         emit_error=False,
     ):
         return None
-    summary = find_run_summary(stream_id)
-    if not summary:
-        return None
-    session_id = str(summary.get("session_id") or "")
-    if not session_id:
-        return None
+    # Locate the run journal WITHOUT parsing it first. find_run_summary reads
+    # and parses the whole file (tens of thousands of rows on a long live
+    # run), and read_run_events below then parsed it AGAIN — two full passes
+    # cost ~0.6s per rebuild. Derive the durable summary from the single
+    # parse below instead; its last_seq / last_event_id are rebuilt from the
+    # same rows the snapshot consumes.
+    located = find_run_file(stream_id)
+    if located:
+        session_id, _journal_path = located
+    else:
+        # No journal file on disk for this run id: fall back to the
+        # historical summary-based lookup seam (defensive — a real miss
+        # returns None exactly like before; this is also the seam that
+        # long-standing tests stub with a handler-side summary).
+        fallback_summary = find_run_summary(stream_id)
+        if not fallback_summary:
+            return None
+        session_id = str(fallback_summary.get("session_id") or "")
+        if not session_id:
+            return None
     journal = read_run_events(session_id, stream_id)
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
+    summary = _summary_from_events(session_id, stream_id, events)
     event_run_ids: set[str] = set()
     malformed_envelope_run_id = False
     for event in events:
@@ -3513,6 +3529,18 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     assistant_text = ""
     reasoning_text = ""
+    # Reasoning deltas arrive as thousands of tiny append events. Growing the
+    # transcript with ``reasoning_text += chunk`` copies the full (multi-
+    # hundred-KB) string on every append inside these closures — quadratic
+    # (~2.3s of a 4.6s rebuild on a 9.7k-chunk run). Collect chunks and
+    # materialize lazily; readers (echo probes, strip, final message) join at
+    # most once per interim segment.
+    reasoning_parts: list[str] = []
+    reasoning_dirty = False
+    # Incremental folded index over the reasoning transcript: the per-interim
+    # echo probe consults this instead of re-walking the raw text (see
+    # ``_CompactEchoIndex``).
+    reasoning_index = _CompactEchoIndex()
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
@@ -3520,6 +3548,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     fresh_segment = True
     last_ts = None
     reasoning_first_tool_count: int | None = None
+
+    def _materialize_reasoning_text() -> str:
+        nonlocal reasoning_text, reasoning_dirty
+        if reasoning_dirty:
+            reasoning_text = "".join(reasoning_parts)
+            reasoning_dirty = False
+        return reasoning_text
 
     def mark_boundary() -> int:
         nonlocal current_activity_burst_id
@@ -3585,22 +3620,42 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         tool_calls.append(call)
 
     def reasoning_echo_tail_matches(text: str) -> bool:
-        candidate = _compact_for_echo_compare(text)
-        if not candidate:
-            return False
-        return _compact_for_echo_compare(reasoning_text).endswith(candidate)
+        # Indexed tail match (no raw-text walk): the incremental index folds
+        # each reasoning chunk once as it is appended, so this probe costs
+        # O(len(text)) regardless of how much interior whitespace stretches
+        # the raw span. The previous raw backward walk re-walked that span
+        # once per interim event, which turned the replay quadratic on a
+        # whitespace-heavy transcript (#7569 review, ~55x slower than master
+        # on a production-shaped journal).
+        return reasoning_index.matches_tail(text)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count
-        next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
-        if did_remove:
-            reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
-        return did_remove
+        nonlocal reasoning_text, reasoning_dirty, reasoning_first_tool_count
+        cut = reasoning_index.cut_to(text)
+        if cut is None:
+            return False
+        next_reasoning = _materialize_reasoning_text()[:cut].rstrip()
+        reasoning_text = next_reasoning
+        reasoning_parts.clear()
+        reasoning_parts.append(next_reasoning)
+        reasoning_dirty = False
+        # Re-index the truncated transcript so later probes match against it
+        # instead of the pre-strip tail (the index is the match authority).
+        reasoning_index.reset()
+        reasoning_index.append(next_reasoning)
+        if not _compact_for_echo_compare(reasoning_text):
+            reasoning_first_tool_count = None
+        return True
 
     for event in events:
         event_name = str(event.get("event") or event.get("type") or "")
+        if event_name == "metering":
+            # Metering rows are the bulk of a long live journal (~10k rows,
+            # ~60% of its bytes) and project nothing onto the snapshot; skip
+            # their per-row work while preserving the last_ts watermark they
+            # carry.
+            last_ts = event.get("created_at", last_ts)
+            continue
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
         if event_name == "token":
@@ -3611,9 +3666,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
-            reasoning_text += text
+            if text:
+                if reasoning_first_tool_count is None:
+                    reasoning_first_tool_count = len(tool_calls)
+                reasoning_parts.append(text)
+                reasoning_index.append(text)
+                reasoning_dirty = True
             continue
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
@@ -3657,6 +3715,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+
+    reasoning_text = _materialize_reasoning_text()
 
     if assistant_text or reasoning_text:
         message = {
@@ -9296,6 +9356,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
     )
     if cache_key is not None:
         _state_key = cache_key[4]
@@ -10344,11 +10405,16 @@ def _dedupe_cli_sidebar_sessions_for_api(
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
-CLI_VISIBLE_SESSION_CAP = 20
+def _cli_visible_session_cap() -> int:
+    """Shared sidebar window, not a second hard-coded 20."""
+    from api.config import CLI_VISIBLE_SESSION_LIMIT
+    return CLI_VISIBLE_SESSION_LIMIT
 
 
-def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
+def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int | None = None) -> list[dict]:
     """Keep only the most recent CLI-visible sessions after filtering."""
+    if cli_cap is None:
+        cli_cap = _cli_visible_session_cap()
     if cli_cap <= 0:
         return sessions
     kept = []
@@ -10769,12 +10835,14 @@ from api.streaming import (
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
     _compact_for_echo_compare,
-    _strip_compact_echo_suffix,
+    _CompactEchoIndex,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    _summary_from_events,
     bound_run_journal_snapshot_args,
+    find_run_file,
     find_run_summary,
     journal_replay_visible,
     read_run_events,
@@ -11969,7 +12037,7 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
@@ -12604,7 +12672,7 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
                 "ms": round((time.time() - t0) * 1000, 1),
             }
         else:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path)) as conn:
                 conn.execute("PRAGMA schema_version").fetchone()
             checks["state_db"] = {
                 "status": "ok",
@@ -22962,6 +23030,54 @@ def _prepare_chat_start_session_for_stream(
         s.save()
 
 
+def _cleanup_chat_start_launch_failure(session, stream_id: str) -> None:
+    """Release state registered before a worker thread successfully starts."""
+    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+    unregister_stream_owner(stream_id)
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    STREAM_GOAL_RELATED.pop(stream_id, None)
+    # The session-field reset needs the same concurrency discipline as the
+    # registry half: hold the per-session lock and re-resolve the canonical
+    # session before clearing anything. Mutating the passed-in stale object
+    # could wipe a concurrent successor turn's pending fields, and saving it
+    # could resurrect a session deleted while the launch was failing. Same
+    # pattern as the #1533 race fix (routes.py:3077) and the anchor-scene
+    # write guard (routes.py:5140).
+    #
+    # This runs while the original launch failure is being handled, so it must
+    # never raise. Lock acquisition and session resolution can fail on their own
+    # (I/O, deserialization), and an escaping error here would mask the launch
+    # failure the caller is about to report while leaving the reset half done.
+    try:
+        with _get_session_agent_lock(session.session_id):
+            try:
+                canonical = get_session(session.session_id)
+            except KeyError:
+                return  # session deleted while the thread launch was failing
+            if getattr(canonical, "active_stream_id", None) != stream_id:
+                return  # a successor turn already owns the session
+            canonical.active_stream_id = None
+            canonical.pending_user_message = None
+            canonical.pending_attachments = []
+            canonical.pending_started_at = None
+            canonical.pending_user_source = None
+            try:
+                canonical.save()
+            except Exception:
+                logger.debug(
+                    "Failed to persist chat-start cleanup after worker launch failure for %s",
+                    stream_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.debug(
+            "Failed to reset session state after worker launch failure for %s",
+            stream_id,
+            exc_info=True,
+        )
+
+
 def _is_hidden_empty_session(s) -> bool:
     return (
         getattr(s, "title", "Untitled") == "Untitled"
@@ -23545,6 +23661,7 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        _cleanup_chat_start_launch_failure(s, stream_id)
         raise
     response = {
         "stream_id": stream_id,

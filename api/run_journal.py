@@ -451,8 +451,6 @@ class RunJournalWriter:
         self.session_id = _validate_id(session_id, "session_id")
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
-        self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
-        self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict | None:
         # Live-UI-only telemetry (metering) has no recovery value in the journal:
@@ -464,18 +462,15 @@ class RunJournalWriter:
         # the offline-gap coverage and replay-cursor contiguity checks rely on.
         if str(event_name or "").strip() in REPLAY_SKIPPED_SSE_EVENTS:
             return None
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+        # Allocate the sequence inside the same per-path transaction that writes
+        # the row. Reserving here, then releasing the lock before append, lets a
+        # concurrent writer put a higher sequence on disk first.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
 
 

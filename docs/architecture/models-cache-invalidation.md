@@ -32,7 +32,7 @@ the fingerprint captured at publish time.
 | `config_yaml` | stat identity: `mtime_ns` + size (`_models_cache_file_fingerprint`) | The file is rewritten only on deliberate user edits, and any edit can change the provider/model set, so the cheap conservative identity wins. |
 | `auth_json` | content hash with a volatile-key deny-list (`_auth_store_semantic_fingerprint`, `_AUTH_FINGERPRINT_VOLATILE_KEYS`) | The credential store is rewritten roughly every 14 minutes by credential-pool / OAuth refresh; none of those rotating fields feed `detected_providers` or the returned catalog, and stat identity made the 24h cache churn on every refresh (RCA `t_d127953d` / `t_16551f61`). |
 | `env` | sorted **names** of non-empty keys in the active profile's `.env` (`_models_cache_env_fingerprint`); values are never recorded | Env credentials decide `detected_providers`. Adding or removing a key changes the catalog; rotating a value does not. |
-| `plugins` | `[dir, name, version]` for each model-provider plugin in the active profile home (`_models_cache_plugin_fingerprint`): every dir under `plugins/model-providers/`, plus flat `plugins/<dir>` entries whose `plugin.yaml` declares `kind: model-provider` | Plugin providers feed the catalog through `api/plugin_providers.py`. Installing, removing, or upgrading one must invalidate the catalog. The discovery rules match `providers._scan_home_layer`. |
+| `plugins` | `[dir, [relpath, mtime_ns, size] per file]` for each model-provider plugin in the active profile home (`_models_cache_plugin_fingerprint`, `_plugin_tree_stamps`): every dir under `plugins/model-providers/`, plus flat `plugins/<dir>` entries whose `plugin.yaml` declares `kind: model-provider`; `__pycache__`/`.pyc` are skipped | Plugin providers feed the catalog through `api/plugin_providers.py`, and `fallback_models` comes from the plugin code the loader execs (`__init__.py` and anything it imports), so any file edit must invalidate the catalog even without a `version` bump. The discovery rules match `providers._scan_home_layer`. |
 | `catalog` | baked-in provider catalog sha256 (`_PROVIDER_MODELS` + `_PROVIDER_DISPLAY`) plus the Codex local catalog (`_codex_models_cache_fingerprint`, `_CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS`) | A restart after a catalog change must not keep serving a persisted payload for up to 24h (#2443). Codex rewrites `~/.codex/models_cache.json` on its own timer, bumping `mtime_ns` and size while models, `etag`, and `client_version` stay identical, so the Codex axis hashes **content** with only the refresh timestamps (`fetched_at`, `updated_at`) removed (#7540, #7556). |
 
 ## Invariant: deny-lists are one-directional
@@ -150,7 +150,7 @@ executed `/api/profile/switch` route passes `delete_disk=False`.
 of that mode. It saves a real snapshot, changes one source in the target
 profile, runs the switch, and asserts a fresh rebuild for each of these cases:
 adding or removing a `.env` key, installing a plugin (in either location),
-removing a plugin, bumping a plugin's version, and deleting then recreating the
+removing a plugin, bumping a plugin's version, editing plugin code without a version bump, and deleting then recreating the
 profile. Two tests pin the speed-up: with unchanged sources, and after rotating
 a `.env` value, the switch still reuses the snapshot, and no secret value is
 written to disk.

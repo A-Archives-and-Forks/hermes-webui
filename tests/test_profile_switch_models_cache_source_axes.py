@@ -193,3 +193,35 @@ def test_recreate_same_name_profile_does_not_resurrect_old_catalog(two_profiles,
     (two_profiles.demo_home / "config.yaml").write_text("model:\n  default: demo-model\n", encoding="utf-8")
     os.utime(two_profiles.demo_home / "config.yaml", (1_000_000, 1_000_000))
     assert _switch_to_demo_and_fetch(two_profiles)["default_model"] == "fresh-model"
+
+
+@pytest.mark.parametrize("flat", [False, True], ids=["model-providers-dir", "flat-install-dir"])
+def test_switch_after_plugin_code_change_without_version_bump_rejects_snapshot(two_profiles, flat):
+    """fallback_models lives in the plugin's code, which the loader imports; the version may not move."""
+    plugin = _write_plugin(two_profiles.demo_home, "acme", "1.0.0", flat=flat)
+    init = plugin / "__init__.py"
+    init.write_text("FALLBACK_MODELS = ('acme-1',)\n", encoding="utf-8")
+    os.utime(init, (1_000_000, 1_000_000))
+    _save_demo_snapshot(two_profiles)
+    init.write_text("FALLBACK_MODELS = ('acme-1', 'acme-2')\n", encoding="utf-8")
+    assert _switch_to_demo_and_fetch(two_profiles)["default_model"] == "fresh-model"
+
+
+def test_switch_after_plugin_submodule_change_rejects_snapshot(two_profiles):
+    plugin = _write_plugin(two_profiles.demo_home, "acme", "1.0.0", flat=False)
+    (plugin / "__init__.py").write_text("from .models import FALLBACK_MODELS\n", encoding="utf-8")
+    sub = plugin / "models.py"
+    sub.write_text("FALLBACK_MODELS = ('acme-1',)\n", encoding="utf-8")
+    os.utime(sub, (1_000_000, 1_000_000))
+    _save_demo_snapshot(two_profiles)
+    sub.write_text("FALLBACK_MODELS = ('acme-1', 'acme-2')\n", encoding="utf-8")
+    assert _switch_to_demo_and_fetch(two_profiles)["default_model"] == "fresh-model"
+
+
+def test_plugin_bytecode_cache_does_not_churn_fingerprint(two_profiles):
+    plugin = _write_plugin(two_profiles.demo_home, "acme", "1.0.0", flat=False)
+    (plugin / "__init__.py").write_text("X = 1\n", encoding="utf-8")
+    before = two_profiles.cfg._models_cache_plugin_fingerprint(two_profiles.demo_home)
+    (plugin / "__pycache__").mkdir()
+    (plugin / "__pycache__" / "__init__.cpython-311.pyc").write_bytes(b"x")
+    assert two_profiles.cfg._models_cache_plugin_fingerprint(two_profiles.demo_home) == before

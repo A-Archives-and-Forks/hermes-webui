@@ -7978,7 +7978,7 @@ def _plugin_manifest_fields(plugin_dir: Path) -> dict | None:
 
 
 def _models_cache_plugin_fingerprint(home: Path) -> list:
-    """Return ``[dir, name, version]`` for the profile's model-provider plugins.
+    """Return ``[dir, file stamps]`` for the profile's model-provider plugins.
 
     Mirrors providers' discovery: every dir under ``plugins/model-providers/``
     plus flat ``plugins/<dir>`` entries whose manifest declares that kind.
@@ -7998,9 +7998,26 @@ def _models_cache_plugin_fingerprint(home: Path) -> list:
             fields = _plugin_manifest_fields(child)
             if flat and (fields or {}).get("kind") != "model-provider":
                 continue
-            fields = fields or {}
-            found.append([str(child.relative_to(plugins_root)), fields.get("name", ""), fields.get("version", "")])
+            found.append([str(child.relative_to(plugins_root)), _plugin_tree_stamps(child)])
     return found
+
+
+def _plugin_tree_stamps(plugin_dir: Path) -> list:
+    # The loader execs __init__.py, which can import sibling modules or read data files,
+    # so stamp every file in the tree; bytecode caches are derived and skipped.
+    stamps = []
+    for root, dirs, files in os.walk(plugin_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not d.startswith("."))
+        for name in sorted(files):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            stamps.append([os.path.relpath(path, plugin_dir), st.st_mtime_ns, st.st_size])
+    return stamps
 
 
 def _models_cache_source_fingerprint() -> dict:

@@ -30,6 +30,50 @@ This RFC defines a consistency contract for those layers. It complements the
 larger run adapter direction in #1925 by documenting what must remain coherent
 while WebUI still has multiple overlapping state stores.
 
+## Agent registration after cancellation
+
+Initial and credential self-heal Agent construction use the same registration
+boundary. Under `STREAMS_LOCK`, both the worker-retained cancellation event and
+live stream membership must permit registration. A removed `CANCEL_FLAGS` entry
+is not permission to restart. If Stop won during initial or self-heal
+construction, the candidate must not enter the reusable cache or call
+`run_conversation`. Stream registration, reusable-cache publication and the
+in-memory lifecycle handle share one atomic Stop admission, using lock order
+`STREAMS_LOCK` then `SESSION_AGENT_CACHE_LOCK`. Merely moving a cache write
+after a cancellation check does not protect that check-to-publication gap.
+
+After prompt preparation and immediately before each initial/self-heal invocation,
+revalidate the retained cancel event, stream membership and exact registered
+Agent. If Stop already won, retire a matching reusable entry only while the
+existing `SESSION_WRITEBACK_OWNERS` record still equals this exact stream.
+Hold that ownership lock through cache/lifecycle retirement. Object identity is
+insufficient because successors can reuse the same Agent; absent ownership is
+not permission either, since a completed successor clears its record. Never
+clear a successor's cache or lifecycle handle, and do not issue another Agent
+interrupt for an invocation that never started. Rejected cache-hit registration
+likewise must not interrupt the borrowed Agent; only a never-published newly
+constructed candidate may receive construction-cancellation cleanup. Drop the
+old worker's local borrowed handle as well, so final pending-Steer drain cannot
+reach a successor through an object-reference fallback.
+Stop after invocation admission uses the existing Agent interrupt mechanism;
+registry locks must not span provider or tool execution. LRU eviction/close stays
+outside the stream lock and retains the existing active-worker policy.
+
+Interrupt and cancellation finalization occur outside the stream registry lock.
+Session finalization still owns the session lock: the returned-error path already
+holds it, while initial registration and the exception path acquire it. Do not
+reacquire this non-reentrant lock from a branch that already owns it.
+
+## Run-journal sequence publication
+
+Within one WebUI process, auto-numbered appends to the same journal allocate
+sequence numbers and write their rows under the same per-path lock.
+`RunJournalWriter` delegates both operations to `append_run_event`; it must not
+reserve a sequence and release the lock before the physical append. Otherwise
+individually valid rows can reach disk out of order and the session replay
+reader must reject them as noncontiguous. This does not change caller-supplied
+sequence semantics, cross-process ownership, or failed-write recovery.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

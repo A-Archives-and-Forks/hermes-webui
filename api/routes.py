@@ -20641,6 +20641,16 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
 
 
 _MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+# #7680 re-gate (9/22): two-pass scan.
+#   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
+#      the wrapping backticks so the bare-token pass below sees a
+#      plain ``MEDIA:path`` and the closing backtick is not consumed
+#      as part of the path.
+#   2. ``MEDIA:[^\s\)\]]+`` (bare, no backtick in the exclusion
+#      class) so a filename that legally contains a backtick
+#      (``report`final.png``) is captured in full instead of being
+#      truncated at the first backtick.
+_BACKTICK_MEDIA_RE = re.compile(r"`MEDIA:([^`\s]+)`")
 
 
 def _message_content_text(content) -> str:
@@ -20700,6 +20710,10 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         )
         if "MEDIA:" not in text:
             continue
+        # #7680 re-gate: strip backtick wrappers first so the bare
+        # class below captures the full path even when the filename
+        # itself contains a backtick.
+        text = _BACKTICK_MEDIA_RE.sub(lambda m: f"MEDIA:{m.group(1)}", text)
         for ref in _MEDIA_TOKEN_RE.findall(text):
             if "://" in ref:
                 continue
@@ -21892,6 +21906,99 @@ def _handle_live_models(handler, parsed):
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
 
+            def _custom_provider_models_discover_is_false(_cp):
+                """True when ``discover_models`` is an explicit ``false`` opt-out.
+
+                Mirrors ``api.config._provider_discover_allowed`` / Hermes
+                Agent ``model_switch_providers._discover_flag``: ``discover_models``
+                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
+                (case-insensitive) mean False.  Used to decide whether a
+                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
+                when discovery is off) rather than per-model metadata.
+                """
+                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
+                if isinstance(_discover, str):
+                    return _discover.strip().lower() in {"false", "no", "0"}
+                return not bool(_discover)
+
+            def _custom_provider_allowlist_ids(_cp):
+                """Plural ``models`` list only — the explicit allowlist signal.
+
+                The singular ``model`` field is sticky/default metadata, NOT an
+                allowlist: it must not gate live-catalog filtering, otherwise a
+                provider configured with only ``model: assistant`` (no ``models``
+                list) would be collapsed to a single model.  Only an explicit
+                ``models`` allowlist expresses "show exactly these models".
+
+                An auto-discovered catalog is NOT an allowlist: when Hermes
+                persisted discovery results back into config (``models: {...}``
+                plus ``models_discovered: true``), that mapping is a snapshot
+                of what the gateway exposed at discovery time.  Gating on it
+                would permanently pin the live catalog to the first-discovery
+                set, silently dropping any model the user pulls in later
+                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+                is the shared predicate the ``/api/models`` path already uses;
+                when it says "discovered", return no allowlist and let the
+                live probe win.  An explicit ``discover_models: false`` opt-out
+                re-pins the catalog (the predicate accounts for it), so a
+                hand-pinned discovered catalog still filters.
+
+                A dict-shaped ``models`` mapping that is NOT marked discovered is
+                *per-model metadata* written by the Hermes Agent setup flow
+                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+                not a catalog narrow: treating its keys as an allowlist would
+                collapse the live picker to the single saved default (keyless
+                Ollama) while the CLI live-probe shows the full catalog.  Only an
+                explicit ``discover_models: false`` opts into treating the dict
+                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+                shapes remain plain allowlists.
+
+                The plural value is decoded through ``_parse_config_string_list()``
+                because ``hermes config set`` / JSON-mode editor saves persist
+                lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
+                Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
+                made a serialized allowlist fall through to ``[]``, which the
+                caller reads as "no allowlist configured" and floods the picker
+                with the full upstream catalog — the same class of bug as the
+                ``skills.disabled`` regression (#7120 / #7134).
+                """
+                from api.config import _provider_models_are_discovered_catalog
+
+                if _provider_models_are_discovered_catalog(_cp):
+                    return []
+                _ids = []
+                _models = _cp.get("models")
+                # Serialized shapes only: ``hermes config set`` / JSON-mode
+                # editor saves persist lists as quoted JSON-array strings
+                # (``'["chat-a","chat-b"]'``) or Python literals
+                # (``"['chat-a']"``).  Decode those through the shared helper so
+                # they are honored; native dict/list values are walked below so
+                # dict *entries* keep their id|model|name metadata (the decoder
+                # str()-ifies list members, which would mangle them).
+                if isinstance(_models, str):
+                    _models = _parse_config_string_list(_models)
+                if isinstance(_models, dict):
+                    # A dict-shaped ``models`` is per-model metadata written by
+                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+                    # ``discover_models: false`` opt-out treats the dict keys as a
+                    # pinned allowlist; otherwise return the empty allowlist so the
+                    # live probe returns the full catalog.
+                    if not _custom_provider_models_discover_is_false(_cp):
+                        return []
+                    for _mid in _models:
+                        if isinstance(_mid, str) and _mid.strip():
+                            _ids.append(_mid.strip())
+                elif isinstance(_models, (list, tuple)):
+                    for _item in _models:
+                        if isinstance(_item, str) and _item.strip():
+                            _ids.append(_item.strip())
+                        elif isinstance(_item, dict):
+                            _mid = _item.get("id") or _item.get("model") or _item.get("name")
+                            if _mid and str(_mid).strip():
+                                _ids.append(str(_mid).strip())
+                return _ids
+
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
             # Fall back to the custom_providers entries from config.yaml so
@@ -21900,11 +22007,13 @@ def _handle_live_models(handler, parsed):
             # Collect config-specified model IDs separately so they don't
             # prevent the live fetch below from running (#3718).
             _config_ids = []
+            _allowlist_ids = []
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
                         custom_provider_entry = _cp
                     _config_ids.extend(_custom_provider_model_ids(_cp))
+                    _allowlist_ids.extend(_custom_provider_allowlist_ids(_cp))
             
             # Always try live fetch for custom providers — config entries are a
             # fallback, not a replacement.  The live endpoint should return ALL
@@ -21975,15 +22084,39 @@ def _handle_live_models(handler, parsed):
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
 
-                # If live fetch succeeded, merge with config entries (live takes
-                # priority).  If live fetch failed, fall back to config-only list.
+                # If live fetch succeeded, filter the live catalog down to the
+                # config-declared models allowlist first, then append any
+                # allowlisted models the live endpoint didn't return.  Custom
+                # providers (esp. New-API-style gateways) expose their ENTIRE
+                # catalog via /v1/models — including image/audio models that
+                # are not chat models.  The picker must not surface models the
+                # user never declared in config.yaml.  Only a NON-EMPTY explicit
+                # ``models`` allowlist gates the filter — a provider configured
+                # with just a singular ``model`` (no ``models`` list) keeps the
+                # unfiltered live catalog.  When no allowlist is configured,
+                # return the live list as-is (preserves the pre-filter
+                # discovery behaviour).
+                #
+                # An empty allowlist (``models: []``, ``models: "[]"``, or a
+                # value that decodes to no usable ids) is deliberately treated
+                # as "not configured", NOT as "allow nothing".  Gating on
+                # declared-ness instead would emit an EMPTY picker and make the
+                # provider unselectable — a harder failure than surfacing a few
+                # extra models, and unrecoverable from the UI because
+                # ``custom_providers`` is hand-edited in config.yaml (the WebUI
+                # has no write path for it).  ``[]`` in practice means a
+                # leftover/placeholder key, not an intentional deny-all, and no
+                # deny-all use case exists: a provider the user wants hidden is
+                # removed from ``custom_providers`` outright.
                 if ids:
-                    _live_set = set(ids)
-                    for _cid in _config_ids:
-                        if _cid not in _live_set:
-                            ids.append(_cid)
+                    if _allowlist_ids:
+                        _allowlist_set = set(_allowlist_ids)
+                        ids = [m for m in ids if m in _allowlist_set] or []
+                        for _aid in _allowlist_ids:
+                            if _aid not in ids:
+                                ids.append(_aid)
                 else:
-                    ids = list(_config_ids)
+                    ids = list(_allowlist_ids or _config_ids)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider

@@ -28,6 +28,12 @@
 
 ### Fixed
 
+- **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
+  another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's
+  "another Hermes process is using this session" notices now reach the chat as a warning status
+  instead of being dropped, and the status clears when the run ends. Classification keys on the Agent
+  status kind (`lifecycle` / `warn`), so user-authored text can never be promoted to a warning.
+  (#7760 by @ruizanthony)
 - **A stale in-flight projection can no longer reach a gateway watcher after its last subscriber
   leaves.** Final unsubscribe and queue eviction now invalidate the cache and fence projections that
   were already in flight, without holding the lock across database reads or SSE writes, so a client

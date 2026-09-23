@@ -24,6 +24,11 @@
 
 ### Fixed
 
+- **`MEDIA:` links wrapped in inline code no longer 404.** Every `MEDIA:` capture site (renderer,
+  streaming parser, TTS stripper, session-media authorization and snapshot capture, seven in all)
+  swallowed the closing backtick of `` `MEDIA:/path` `` into the path, so the file lookup and the
+  session allowlist both missed. Backtick-wrapped refs are now normalized first, while bare paths that
+  genuinely contain a backtick keep their full name. (#7359, #7708 by @happy5318)
 - **Reconnecting to a running session no longer redraws every tool card over and over.** After a
   reconnect restored the live activity scene from the run journal, the client also replayed its older
   cached in-flight tool list on top, so a turn with N tool cards redrew them N times. When the

@@ -28,6 +28,11 @@
 
 ### Fixed
 
+- **A consumed mid-turn `/steer` no longer leaves its out-of-band wrapper in the settled chat (#7600).**
+  A `/steer` reaches the agent as an `[OUT-OF-BAND USER MESSAGE …]` block appended to the turn's
+  last tool result. After the turn settled, that wrapper stayed visible in the chat transcript. The
+  settled-transcript writeback now scrubs the consumed wrapper from the rows it is built from.
+  (#7610 by @webtecnica)
 - **Saving a very large session no longer reads and parses the whole file just to count messages.**
   The #1558 backup safeguard in `Session.save()` needs the on-disk message count; it obtained it by
   loading the entire sidecar. On a real 203 MB / 266,940-message session that made every save

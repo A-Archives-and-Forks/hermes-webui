@@ -295,9 +295,45 @@ def test_route_cap_bounds_imported_sidecar_assigned_rows(fake_hermes_home):
     assert kept[0]["session_id"] == "imported-0000"
     # The recent window still renders normally; only the overflow is chip-only.
     visible = [row for row in kept if not row.get("default_hidden")]
-    assert len(visible) == routes.CLI_VISIBLE_SESSION_CAP
+    assert len(visible) == routes._cli_visible_session_cap()
     # Capping never mutates the caller's rows.
     assert not any("default_hidden" in row for row in sidecars)
+
+
+def test_route_cap_composes_with_configured_window(fake_hermes_home, monkeypatch):
+    """The assigned-retention layer rides on the CONFIGURED sidebar window.
+
+    master made the window configurable (HERMES_WEBUI_VISIBLE_SESSION_LIMIT,
+    #7631); the project-assigned caps must compose with whatever it resolves
+    to, not with a hard-coded 20. With the window at 5, 8 assigned rows stay
+    chip-reachable but only the 5 newest render in the recent window.
+    """
+    from api import config as api_config
+
+    monkeypatch.setattr(api_config, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    sidecars = [
+        {
+            "session_id": f"configured-{index:04d}",
+            "is_cli_session": True,
+            "project_id": "project-configured",
+        }
+        for index in range(8)
+    ]
+
+    kept = routes._cap_recent_cli_sessions(sidecars)
+
+    # Assigned retention keeps every row chip-reachable past the window.
+    assert len(kept) == 8
+    visible = [row for row in kept if not row.get("default_hidden")]
+    chip_only = [row for row in kept if row.get("default_hidden")]
+    assert len(visible) == 5 == routes._cli_visible_session_cap()
+    # The OLDEST end of the project's history is what goes chip-only.
+    assert [row["session_id"] for row in chip_only] == [
+        "configured-0005",
+        "configured-0006",
+        "configured-0007",
+    ]
 
 
 def _assigned_project_counts(rows):
@@ -1310,7 +1346,7 @@ def test_sidecar_carried_assignment_does_not_spend_an_unassigned_slot(
     unassigned_cli = [
         row for row in kept if row.get("is_cli_session") and not row.get("project_id")
     ]
-    assert len(unassigned_cli) == routes.CLI_VISIBLE_SESSION_CAP == 20
+    assert len(unassigned_cli) == routes._cli_visible_session_cap() == 20
     # The three genuinely unassigned conversations at the bottom of state.db are
     # what the lost slots cost: they were never fetched.
     kept_ids = {row["session_id"] for row in kept}
@@ -1423,7 +1459,7 @@ def test_sidecar_moves_below_the_window_still_deliver_the_full_window(
 
     kept = _sidebar_rows_after_route(sessions, moved)
     unassigned_cli = _unassigned_cli_ids(kept)
-    assert len(unassigned_cli) == routes.CLI_VISIBLE_SESSION_CAP == 20
+    assert len(unassigned_cli) == routes._cli_visible_session_cap() == 20
     # Newest-first, skipping every moved conversation: the 20th unassigned
     # conversation is exactly the tail row above.
     expected = [

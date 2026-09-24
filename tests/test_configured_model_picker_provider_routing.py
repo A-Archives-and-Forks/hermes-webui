@@ -229,9 +229,16 @@ const modelAFree = {
   dataset: {},  // no data-model — normal catalog render path
   parentElement: group,
 };
+const localhostGroup = {tagName: 'OPTGROUP', dataset: {provider: 'custom:localhost:11434'}};
+const llama = {
+  value: '@custom:localhost:11434:llama3.2',
+  textContent: 'llama3.2',
+  dataset: {},
+  parentElement: localhostGroup,
+};
 const select = {
   id: 'modelSelect',
-  options: [luna, sol, modelAFree],
+  options: [luna, sol, modelAFree, llama],
   querySelectorAll() { return []; },
   get selectedOptions() { return [sol]; },
   get value() { return sol.value; },
@@ -242,6 +249,8 @@ process.stdout.write(JSON.stringify({
   nonDefault: _modelStateForSelect(select, '@custom:hetmer.net:sol'),
   defaultUnprefixed: _modelStateForSelect(select, 'luna'),
   colonBearingModel: _modelStateForSelect(select, '@custom:hetmer.net:model-a:free'),
+  localhostEndpoint: _modelStateForSelect(select, '@custom:localhost:11434:llama3.2'),
+  missingOptionCustomInput: _modelStateForSelect(select, '@custom:localhost:11434:mistral-custom'),
 }));
 """
 
@@ -275,6 +284,16 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
     assert payload["colonBearingModel"] == {
         "model": "model-a:free",
         "model_provider": "custom:hetmer.net",
+    }
+    # Endpoint-style custom provider (e.g. host:port derived from base_url authority):
+    # preserves full custom:localhost:11434 for both catalog and missing-option paths.
+    assert payload["localhostEndpoint"] == {
+        "model": "llama3.2",
+        "model_provider": "custom:localhost:11434",
+    }
+    assert payload["missingOptionCustomInput"] == {
+        "model": "mistral-custom",
+        "model_provider": "custom:localhost:11434",
     }
 
 

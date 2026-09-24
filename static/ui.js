@@ -2982,9 +2982,19 @@ function _getOptionProviderId(opt){
   const value=String(opt.value||'');
   if(value.startsWith('@') && value.includes(':')){
     // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // For @custom:backup:model-a:free → provider="custom:backup", not "custom:backup:model-a"
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
     if(value.startsWith('@custom:')){
       const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
       const firstColon=afterCustom.indexOf(':');
       if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
       return 'custom:'+afterCustom;
@@ -2998,9 +3008,19 @@ function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')){
     // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // For @custom:backup:model-a:free → provider="custom:backup", not "custom:backup:model-a"
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
     if(value.startsWith('@custom:')){
       const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
       const firstColon=afterCustom.indexOf(':');
       if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
       return 'custom:'+afterCustom;
@@ -3018,9 +3038,19 @@ function _modelPickerOptionIdentity(modelId, providerId){
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
     }else if(value.startsWith('@custom:')){
-      const namedProvider=value.substring('@custom:'.length);
-      const splitAt=namedProvider.indexOf(':');
-      value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      let splitAt=-1;
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          splitAt=parts[0].length + 1 + parts[1].length;
+        }
+      }
+      if(splitAt<0) splitAt=afterCustom.indexOf(':');
+      value=splitAt>=0 ? afterCustom.substring(splitAt+1) : afterCustom;
     }else{
       value=value.substring(value.indexOf(':')+1);
     }

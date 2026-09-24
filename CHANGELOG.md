@@ -39,6 +39,13 @@
 
 ### Fixed
 
+- **A background tab stops polling a session that's gone, and still recovers after a profile
+  switch in another tab.** A hidden tab polling a deleted session used to loop on 404s every six
+  seconds. It now stops after three consecutive 404s but keeps the session as its resume target,
+  so if the 404 came from switching profile in another tab and you switch back, the tab reattaches
+  when you return to it. A queued poll response can no longer stop a replacement poll for the same
+  session. (#7301, @laitekin; completes the #7299 fix)
+
 - **An image turn's provider context stays out of your message bubble, and Edit/Undo no longer
   brings a removed image turn back.** When an image turn was mirrored into the Agent's state.db,
   its rich provider payload could appear in the user bubble, and after Edit or Undo a removed

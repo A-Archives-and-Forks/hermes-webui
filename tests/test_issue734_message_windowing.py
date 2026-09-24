@@ -93,8 +93,10 @@ def test_measurement_burst_not_reset_by_cycle_key_change():
         "the seen-key reset must be guarded by the burst-active check "
         "(per-burst lifecycle, issue #6717)"
     )
-    # Repeated keys terminate the burst; unseen keys proceed.
-    assert "if(_messageVirtualMeasurementSeenKeys.includes(cycleKey)){" in body
+    # A NON-consecutive repeat (A -> B -> A) is oscillation and terminates the
+    # burst. A consecutive repeat (same window needing a second re-measure, e.g.
+    # a row shrinking 1500 -> 1400 -> 100 px) proceeds; unseen keys proceed.
+    assert "if(cycleKey !== lastKey && _messageVirtualMeasurementSeenKeys.includes(cycleKey)){" in body
     assert "_messageVirtualMeasurementSeenKeys.push(cycleKey);" in body
     # The internal-measurement origin travels WITH the scheduled render request
     # (threaded through both rAF layers), never as a global consumable flag that

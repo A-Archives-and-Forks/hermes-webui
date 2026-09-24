@@ -789,10 +789,14 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
     _resetMessageVirtualMeasurementBurst();
     return;
   }
-  if(_messageVirtualMeasurementSeenKeys.includes(cycleKey)){
-    // Repeated key: the window is oscillating, not converging. End the burst
-    // (no further internal re-render is scheduled), so the next externally
-    // initiated cycle starts fresh instead of being starved of retries.
+  const lastKey = _messageVirtualMeasurementSeenKeys.length ? _messageVirtualMeasurementSeenKeys[_messageVirtualMeasurementSeenKeys.length - 1] : null;
+  if(cycleKey !== lastKey && _messageVirtualMeasurementSeenKeys.includes(cycleKey)){
+    // Non-consecutive repeated key (A->B->A): the window is oscillating, not
+    // converging. End the burst (no further internal re-render is scheduled),
+    // so the next externally initiated cycle starts fresh instead of being
+    // starved of retries. A consecutive same-key pass (A->A) proceeds because
+    // heights changed while the window bounds did not (e.g. row shrink across
+    // two passes), still bounded by the absolute per-burst cap (#6717 re-gate).
     _resetMessageVirtualMeasurementBurst();
     return;
   }

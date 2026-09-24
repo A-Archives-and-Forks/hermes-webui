@@ -1284,6 +1284,42 @@ console.log(JSON.stringify({
     )
 
 
+def test_consecutive_same_key_row_shrink_converges_to_settled():
+    """#6717 re-gate: consecutive same-key passes (e.g. A->A->B->settled from
+    a row shrinking across two measurement passes with unchanged window bounds)
+    must NOT be cut short as oscillation. Only non-consecutive repeats (A->B->A)
+    represent cyclic oscillation; consecutive same-key passes continue toward
+    convergence while remaining bounded by the absolute cap."""
+    source = _measurement_burst_harness("""
+measurePlan = ['A', 'A', 'B'];  // R0 measures A, R1 internal measures A (consecutive), R2 internal measures B, then settled
+renderMessages({});             // external trigger: measures A -> burst starts
+flushRaf(); flushRaf();         // L1 -> L2: internal render measures A again (consecutive same key) -> must proceed!
+flushRaf(); flushRaf();         // L1 -> L2: internal render measures B -> proceeds!
+flushRaf(); flushRaf();         // L1 -> L2: internal render measures settled
+console.log(JSON.stringify({
+  renders: renderLog.length,
+  internal: renderLog.filter(r => r.internal).length,
+  burstActive: _messageVirtualMeasurementBurstActive,
+  seenKeys: _messageVirtualMeasurementSeenKeys,
+  queuedOrigin: _messageVirtualRenderQueuedOrigin,
+}));
+""")
+    metrics = json.loads(_run_node(source))
+    assert metrics["internal"] == 3, (
+        "consecutive same-key pass (row shrink) must NOT be cut short as oscillation: "
+        f"got {metrics['internal']} internal renders (expected 3)"
+    )
+    assert metrics["renders"] == 4, (
+        f"burst must converge to settled: {metrics['renders']} renders (expected 4 = 1 external + 3 internal)"
+    )
+    assert metrics["burstActive"] is False, (
+        f"burst must settle: burstActive {metrics['burstActive']}"
+    )
+    assert metrics["seenKeys"] == [], (
+        f"settlement must clear seen-key memory: seenKeys {metrics['seenKeys']}"
+    )
+
+
 def test_genuine_convergence_exceeding_two_renders_completes():
     """#6717 re-gate (b): a legitimate forward convergence A->B->C->settled
     (content reflow, fonts/images loading late, dynamic height) must be allowed

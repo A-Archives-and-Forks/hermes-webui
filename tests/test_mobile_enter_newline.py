@@ -3,13 +3,14 @@
 This module covers the three production changes in this PR, each with a test
 that provably fails when only that change is reverted:
 
-A. ``_isTouchOnlyDevice()`` replaces media-query-only touch detection.
+A. ``_isTouchOnlyDevice()`` supplements media-query touch detection for phones.
    Several iOS Safari builds report ``(any-pointer:fine)`` as **true** on a
    plain iPhone (Apple Pencil / pointer-emulation heuristics), so the upstream
    ``matchMedia('(pointer:coarse)') && !_hasFinePointerCoexisting()`` test
    evaluates false on exactly the devices it is meant to detect, and plain
-   Enter sends instead of inserting a newline. ``_isTouchOnlyDevice()`` checks
-   the phone/tablet UA **first** and never lets a fine-pointer signal veto it.
+   Enter sends instead of inserting a newline. Phone UAs bypass that unreliable
+   signal, while tablets still honor it so attached hardware keyboards retain
+   desktop Enter-to-send behavior.
 
 B. ``window._sendKey`` is initialised synchronously from ``localStorage``
    before the composer handler is registered. Without it, on a slow network the
@@ -43,6 +44,18 @@ INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 IPHONE_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+)
+IPAD_UA = (
+    "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+)
+ANDROID_TABLET_UA = (
+    "Mozilla/5.0 (Linux; Android 14; SM-X910) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+TOUCH_MAC_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
 )
 
 
@@ -197,6 +210,21 @@ DESKTOP_MATCHMEDIA = """
 })();
 """
 
+# A tablet / iPadOS-desktop UA with only a software keyboard: a coarse pointer
+# is present (touch screen) but no fine pointer (no attached hardware
+# keyboard or trackpad). This is the path that the production change leaves
+# alone — these devices must keep the mobile "Enter inserts newline" behavior.
+TABLET_NO_FINE_POINTER_MATCHMEDIA = """
+(() => {
+  const real = window.matchMedia.bind(window);
+  window.matchMedia = (q) => {
+    if (q === '(pointer:coarse)') return {matches: true, media: q};
+    if (q === '(any-pointer:fine)') return {matches: false, media: q};
+    return real(q);
+  };
+})();
+"""
+
 
 def _press_enter(page, *, shift=False, ctrl=False, meta=False, numpad=False):
     page.evaluate(
@@ -289,6 +317,112 @@ def test_android_phone_treats_enter_as_newline():
         sends = _send_count(page)
         browser.close()
     assert sends == 0, "plain Enter must insert a newline on an Android phone"
+
+
+def _run_enter_case(
+    playwright,
+    harness: Path,
+    *,
+    user_agent: str,
+    max_touch_points: int = 0,
+    matchmedia_shim: str = IOS_SAFARI_MATCHMEDIA_QUIRK,
+    expect_coarse: bool = True,
+    expect_fine: bool = True,
+) -> tuple[int, int]:
+    with playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        ctx = browser.new_context(
+            user_agent=user_agent,
+            viewport={"width": 1024, "height": 768},
+            has_touch=True,
+        )
+        ctx.add_init_script(
+            f"Object.defineProperty(navigator, 'maxTouchPoints', {{value: {max_touch_points}}});"
+        )
+        ctx.add_init_script(matchmedia_shim)
+        page = ctx.new_page()
+        page.goto(harness.as_uri())
+        page.wait_for_load_state("domcontentloaded")
+        # Sanity: the shim is actually in place, otherwise the test would be vacuous.
+        assert page.evaluate("matchMedia('(pointer:coarse)').matches") is expect_coarse
+        assert page.evaluate("matchMedia('(any-pointer:fine)').matches") is expect_fine
+        _press_enter(page)
+        sends = _send_count(page)
+        prevented = page.evaluate("__defaultPrevented")
+        browser.close()
+    return sends, prevented
+
+
+@pytest.mark.parametrize(
+    ("user_agent", "max_touch_points", "device"),
+    [
+        (IPAD_UA, 5, "iPad with Magic Keyboard"),
+        (ANDROID_TABLET_UA, 5, "Android tablet with hardware keyboard"),
+        (TOUCH_MAC_UA, 5, "touch Macintosh/iPadOS desktop UA"),
+    ],
+)
+def test_tablet_with_fine_pointer_keeps_enter_to_send(
+    user_agent: str,
+    max_touch_points: int,
+    device: str,
+):
+    """Tablet/touch-desktop UA + fine pointer must retain desktop Enter=send."""
+    playwright = _require_playwright()
+    harness = _write_harness()
+    sends, prevented = _run_enter_case(
+        playwright,
+        harness,
+        user_agent=user_agent,
+        max_touch_points=max_touch_points,
+    )
+
+    assert sends == 1, f"plain Enter must send on {device}"
+    assert prevented == 1, f"plain Enter must be consumed after sending on {device}"
+
+
+@pytest.mark.parametrize(
+    ("user_agent", "max_touch_points", "device"),
+    [
+        (IPAD_UA, 5, "iPad with software keyboard only"),
+        (ANDROID_TABLET_UA, 5, "Android tablet with software keyboard only"),
+        (TOUCH_MAC_UA, 5, "touch Macintosh/iPadOS desktop with software keyboard only"),
+    ],
+)
+def test_tablet_without_fine_pointer_inserts_newline(
+    user_agent: str,
+    max_touch_points: int,
+    device: str,
+):
+    """Control for the tablet-with-fine-pointer test.
+
+    A tablet / iPadOS-desktop UA reporting only a coarse pointer (no fine
+    pointer — i.e. no attached hardware keyboard) must keep the mobile
+    "plain Enter inserts a newline" behavior, because the production change
+    only short-circuits phone UAs and otherwise still falls back to the
+    media-query test ``(pointer:coarse) && !(any-pointer:fine)``.
+
+    Reverting the change to a phone-only match would break this test, and a
+    tablet shortcut that always returns true would invert
+    ``test_tablet_with_fine_pointer_keeps_enter_to_send``.
+    """
+    playwright = _require_playwright()
+    harness = _write_harness()
+    sends, prevented = _run_enter_case(
+        playwright,
+        harness,
+        user_agent=user_agent,
+        max_touch_points=max_touch_points,
+        matchmedia_shim=TABLET_NO_FINE_POINTER_MATCHMEDIA,
+        expect_fine=False,
+    )
+
+    assert sends == 0, (
+        f"plain Enter must insert a newline on {device} (no fine pointer "
+        "is exposed, so the media-query path should still classify it as touch-only)"
+    )
+    assert prevented == 0, (
+        f"Enter must fall through so the browser inserts the newline on {device}"
+    )
 
 
 def test_mobile_ctrl_enter_still_sends():

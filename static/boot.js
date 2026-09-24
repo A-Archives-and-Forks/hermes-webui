@@ -2388,26 +2388,16 @@ window._isImeEnter=_isImeEnter;
 function _hasFinePointerCoexisting(){
   try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
 }
-// Detect mobile/touch-only devices. On some iOS Safari versions
-// matchMedia('(pointer:coarse)') can be unreliable, so also check
-// the user agent for mobile indicators as a fallback.
+// Detect phone software keyboards without undoing #3076's hardware-input
+// guard for tablets. Some iOS Safari versions report (any-pointer:fine) on a
+// plain iPhone, so phone UAs bypass that unreliable signal. Tablets and
+// touch-capable desktop UAs still require a coarse pointer with no fine pointer.
 function _isTouchOnlyDevice(){
-  // Phone/tablet UA is authoritative and checked FIRST. Do NOT veto it with
-  // (any-pointer:fine): several iOS Safari builds report that query as true on
-  // plain iPhones (Apple Pencil / pointer-emulation heuristics), which is
-  // exactly why the media-query-only detection failed here. On a phone the
-  // software keyboard's return key must insert a newline; a user with a real
-  // Bluetooth keyboard still has Ctrl/Cmd+Enter and the send button.
   const ua=navigator.userAgent||'';
-  if(/iPhone|iPod|Android/i.test(ua)) return true;
-  // iPadOS 13+ Safari masquerades as Macintosh; touch points disambiguate it.
-  if(/iPad/i.test(ua)) return true;
+  if(/iPhone|iPod/i.test(ua)) return true;
+  if(/Android.*Mobile/i.test(ua)) return true;
   try{
-    if(/Macintosh/i.test(ua)&&(navigator.maxTouchPoints||0)>1) return true;
-  }catch(_){}
-  // Non-phone fallback: pure media-query detection for touch-primary devices.
-  try{
-    return matchMedia('(pointer:coarse)').matches&&!matchMedia('(any-pointer:fine)').matches;
+    return matchMedia('(pointer:coarse)').matches&&!_hasFinePointerCoexisting();
   }catch(_){}
   return false;
 }

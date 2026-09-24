@@ -5,6 +5,9 @@
 
 ### Added
 
+- **The settings file can live outside the state directory.** `HERMES_WEBUI_SETTINGS_FILE` points one
+  instance at its own `settings.json`, while sessions, workspaces and projects stay in the state
+  directory. It is read once at startup, so restart after changing it. (#6433 by @futureworld678-create)
 - **Full-session resolve concurrency is configurable.** `HERMES_WEBUI_MAX_SESSION_RESOLVE` sets how
   many full-transcript session resolves may run at once (default 2, a positive integer up to 64;
   zero, negative, non-numeric or out-of-range values fall back to 2). It is process-wide, so a
@@ -17,6 +20,14 @@
 
 ### Performance
 
+- **Reconnect, settle, cancel and undo no longer re-download the whole transcript.** Six recovery
+  paths (offline/bfcache refresh, stream-end settle, cancel sync, `/compress` preflight, `/retry` and
+  `/undo`) sent a bare `GET /api/session` that re-walked, re-redacted and re-serialized every row. The
+  author measured 4–15 s and 28 MB on a 5,003-row session, against 7 ms and 80 KB for the bounded tail.
+  They now request the 30-row tail. The two views that address rows by absolute index (outline jump,
+  jump-to-start) opt into the full transcript with the new `?msg_limit=all`, and session-level
+  `tool_calls` are windowed whenever the returned messages were actually truncated. A bare request
+  keeps its full-transcript contract. (#7310, #7625, #7628 by @happy5318)
 - **Opening a session while its task is still running is much faster.** Rebuilding the live
   snapshot from the run journal parsed the journal twice, walked every metering row and grew the
   reasoning text with repeated string concatenation, which is quadratic on long runs. The journal
@@ -28,6 +39,14 @@
 
 ### Fixed
 
+- **Approval and clarify prompts send a browser notification whenever you aren't looking at them.**
+  A card that surfaced through the normal prompt path never produced a notification, and the
+  visibility gate muted cards in a tab that was visible but unfocused. Now every approval or clarify
+  surfacing notifies unless it belongs to the session open in the pane and the tab is both visible
+  and focused. Notifications from other sessions still arrive while you work. When permission is
+  still undecided, the browser is asked at most once per page load, so a pending prompt's 1.5 s
+  re-surfacing no longer repeats the permission request or the "notifications denied" toast. (#7493 by
+  @CharlesMcquade)
 - **Delegated subagent sessions show inside their parent's project.** With a project selected in the
   sidebar, subagent sessions disappeared because `state.db` never gives them a `project_id`. Only
   subagent rows now inherit their parent's project, resolved once per lineage, so forks keep their

@@ -291,6 +291,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
 - Background agent error alerts -- banner when a non-active session encounters an error
+- Approval and clarification browser alerts notify once per pending owner when its session is not actively viewed. Local approval dismissal hides attention without resolving the prompt; resolution, replacement, and cancellation retire that owner's alert state. Denied or failed notification delivery can retry while the prompt remains pending.
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
@@ -361,6 +362,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
 | `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored. **Note (upgrade):** the default now follows `HERMES_HOME` — if you previously relocated `HERMES_HOME` to a non-default base **without** setting `HERMES_WEBUI_STATE_DIR`, your WebUI state now resolves to `$HERMES_HOME/webui` instead of the old platform-default `~/.hermes/webui`. To keep using the old location, set `HERMES_WEBUI_STATE_DIR` to it (or move the directory). Installs with `HERMES_HOME` unset or at the default base are unaffected. |
+| `HERMES_WEBUI_SETTINGS_FILE` | `<state dir>/settings.json` | Optional path for this instance's WebUI settings file (sessions, workspaces and projects stay in the state directory). Read once at startup, so restart after changing it |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |

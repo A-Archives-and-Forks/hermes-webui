@@ -39,6 +39,13 @@
 
 ### Fixed
 
+- **On a phone, Enter in the composer inserts a newline.** Some iPhones report a fine pointer to the
+  browser, so the phone-keyboard check fell through and plain Enter sent the message mid-sentence.
+  Phones (iPhone, iPod, and Android phones) now always get a newline on Enter; Ctrl/Cmd+Enter and
+  the Send button still send, and the Send-key setting still wins. Tablets and touch laptops keep
+  the existing check, so an iPad with a Magic Keyboard or an Android tablet with a Bluetooth
+  keyboard still sends on Enter (#3076). The saved Send-key preference is also read before the
+  first keypress, so the first Enter after a slow page load no longer sends. (#6746 by @happy5318)
 - **Sessions archived in the CLI stay archived in the WebUI.** A cron, webhook, Kanban or CLI
   session archived from the CLI came back as active in the sidebar whenever it had no WebUI sidecar,
   because the projection treated a missing sidecar as "not archived". A missing sidecar now means no

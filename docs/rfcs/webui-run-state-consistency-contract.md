@@ -171,7 +171,9 @@ writes.
 - **Viewed counts are generation-scoped.** Session mutation routes increment the
   persisted `transcript_generation` whenever edit, regenerate, retry, undo, clear,
   or truncate reduces the visible transcript, and record the retained count as
-  `transcript_generation_baseline`. A newer generation replaces an older one even
+  `transcript_generation_baseline`. Both fields survive the bounded `/api/sessions`
+  projection for visible and sidebar-reference rows, including cached responses.
+  A newer generation replaces an older one even
   when its count is lower; counts are monotonic only within one generation and
   merge by maximum there. A client first observing a newer generation acknowledges
   only that retained baseline, so messages added after the shrink remain unread

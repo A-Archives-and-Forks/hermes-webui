@@ -44,6 +44,16 @@
 
 ### Fixed
 
+- **CLI sessions you moved into a project stay in that project.** CLI sessions were cut to the
+  recent-session limit before project assignment was checked, so a CLI conversation you'd moved
+  into a project vanished from its project chip once enough newer sessions existed. The
+  assignment was still saved; only the row was gone. The recent limit now applies to unassigned
+  conversations only. Assigned ones stay in the payload (hidden from the main list once the recent
+  window is full) so the project chips can show them. Assigned rows have their own bound
+  (`CLI_PROJECT_ASSIGNED_CAP`, 200 across all projects, shared fairly so one busy project can't
+  take every slot), and a compressed CLI conversation keeps its project through its whole
+  continuation chain. Thanks @rodrigogs. (#6659)
+
 - **Two open WebUI windows no longer overwrite each other's unread state.** Two clients on the
   same origin (for example the desktop PWA and a browser tab) share one `localStorage`, but each
   kept its own in-memory copy of which sessions had been viewed. When one wrote, it replaced the

@@ -10497,8 +10497,8 @@ def _cli_visible_session_cap() -> int:
 # It has to bound the MERGED set, not one project: 200 rows x N projects grows
 # with the project count, and 1,000 assigned conversations spread over 5 projects
 # still returned all 1,000 — the exact reproduction from that finding. Pinned
-# equal to models.PROJECT_ASSIGNED_CLI_LIMIT (itself resolved from the shared
-# configurable sidebar window's ceiling on the model side) by
+# equal to models.PROJECT_ASSIGNED_CLI_LIMIT (an independent literal on the
+# model side; the test is what keeps the two in lockstep) by
 # test_route_merged_assigned_cap_is_the_existing_model_row_cap.
 CLI_PROJECT_ASSIGNED_CAP = 200
 

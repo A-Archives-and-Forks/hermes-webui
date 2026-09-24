@@ -10271,14 +10271,11 @@ def _run_agent_streaming(
         # loaded the default profile's `mcp_servers`, even when the session
         # was stamped with a non-default profile.  See issue #1968.
         #
-        # NOTE: `_servers` in `tools/mcp_tool.py` is a process-global registry
-        # keyed by server name.  This means once profile A registers a server
-        # named e.g. `postgres`, profile B's discovery sees it as already
-        # connected and skips it — even if B's config points at a different
-        # binary.  Fully fixing multi-profile concurrent use requires keying
-        # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
-        # lives outside this WebUI repo.  This change fixes the headline bug
-        # for users who run a single non-default profile per WebUI process.
+        # NOTE: hermes-agent keys MCP connections by `(profile_home, name)` only
+        # for a routed profile (override != process home).  The HERMES_HOME
+        # mirror above would make this turn's own profile look like the process
+        # profile, falling back to bare, cross-profile names, unless the agent
+        # honours the pin from `api.profiles._pin_process_profile_home()`.
         try:
             from api.agent_compat import agent_attr
             discover_mcp_tools = agent_attr("tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery")

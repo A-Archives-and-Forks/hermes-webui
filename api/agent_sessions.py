@@ -462,6 +462,10 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
+    # Agent lineage excludes tool children even when the parent has the same
+    # source (or no source); a timestamp overlap cannot override that boundary.
+    if child_source == 'tool':
+        return False
     if parent_source and child_source and parent_source != child_source:
         return False
     if parent.get('end_reason') not in {'compression', 'cli_close'}:

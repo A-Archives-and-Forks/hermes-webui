@@ -981,6 +981,58 @@ def test_continuation_classification_timestamp_tolerance_and_guards():
     assert not _is_continuation_session(make_parent(), make_child(started_at='not-a-number'))
 
 
+@pytest.mark.parametrize("parent_source", ["tool", ""])
+def test_tool_child_is_not_stitched_into_parent_lineage(_isolate, parent_source):
+    """A marker-less tool child stays independent even with a matching/empty source."""
+    from api.agent_sessions import (
+        read_importable_agent_session_rows,
+        read_session_lineage_metadata,
+        read_session_lineage_report,
+    )
+
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    parent_id, child_id = "tool_boundary_parent", "tool_boundary_child"
+    try:
+        _insert_state_row(
+            conn, parent_id, source=parent_source, title="Parent conversation",
+            started_at=t0, ended_at=t0 + 5, end_reason="compression",
+        )
+        _insert_state_row(
+            conn, child_id, source="tool", title="Tool conversation",
+            parent=parent_id, started_at=t0 + 4.5,
+        )
+        _insert_state_message(
+            conn, parent_id, role="user", content="parent request", timestamp=t0 + 1,
+        )
+        _insert_state_message(
+            conn, child_id, role="user", content="tool request", timestamp=t0 + 6,
+        )
+
+        projected = read_importable_agent_session_rows(
+            _isolate, limit=None, exclude_sources=None,
+        )
+        rows = {row["id"]: row for row in projected}
+        assert set(rows) == {parent_id, child_id}
+        assert rows[child_id]["relationship_type"] == "child_session"
+        assert "_lineage_root_id" not in rows[child_id]
+        assert "_lineage_tip_id" not in rows[parent_id]
+
+        metadata = read_session_lineage_metadata(_isolate, {parent_id, child_id})
+        assert metadata[child_id]["relationship_type"] == "child_session"
+        assert "_lineage_root_id" not in metadata[child_id]
+        assert read_session_lineage_report(_isolate, parent_id)["total_segments"] == 1
+        assert read_session_lineage_report(_isolate, child_id)["total_segments"] == 1
+
+        messages = models.get_state_db_session_messages(
+            child_id, stitch_continuations=True,
+        )
+        assert [message["content"] for message in messages] == ["tool request"]
+    finally:
+        conn.close()
+
+
 def test_state_db_stitch_keeps_branched_child_out_of_parent_transcript(_isolate):
     """#7021 r2: the open/import transcript stitcher (get_state_db_session_messages
     with stitch_continuations=True) must apply the same model_config branch-marker

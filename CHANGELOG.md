@@ -39,6 +39,14 @@
 
 ### Fixed
 
+- **A gateway reset or tool conversation no longer disappears into the parent session.** When a
+  session ended by compression, the sidebar also treated a gateway reset child (stamped
+  `_reset_from`) as its continuation, so that separate conversation vanished from the list and its
+  transcript was stitched into the parent's. Reset and tool children now stay separate, matching
+  Hermes Agent's own continuation rule; a real compression continuation still joins the chain. A
+  lineage marker that can't be read is treated as a boundary, which keeps the row visible rather
+  than merging it. A change to a session's lineage markers alone now also refreshes the sidebar.
+  (#6565 by @ruizanthony)
 - **A background tab stops polling a session that's gone, and still recovers after a profile
   switch in another tab.** A hidden tab polling a deleted session used to loop on 404s every six
   seconds. It now stops after three consecutive 404s but keeps the session as its resume target,

@@ -9349,6 +9349,13 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         return sidecar_messages
+    state_db_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_db_messages,
+    )
+    if not state_db_messages:
+        return sidecar_messages
+
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
     # newest (recovery / edited-in-place / missing-timestamp cases) is still
@@ -9408,6 +9415,11 @@ def _limited_webui_messages_for_display_with_sidecar(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
+    )
+    merged = _project_native_image_payload_conflicts_for_display(
+        sidecar_messages,
+        state_db_messages,
+        merged,
     )
     if cache_key is not None:
         _state_key = cache_key[4]
@@ -10104,7 +10116,35 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
 
 
 
-def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
+_LINEAGE_PARENT_SESSION_UNSET = object()
+
+
+def _webui_lineage_parent_session_for_display(session):
+    """Load the immediate parent only for display-eligible continuations."""
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id:
+        return None
+    if (
+        str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
+        and str(getattr(session, "compression_recovery_action", "") or "").strip()
+    ):
+        return None
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+    if source == "fork" or relationship == "child_session":
+        return None
+    try:
+        return get_session(parent_id, metadata_only=False)
+    except Exception:
+        return None
+
+
+def _merged_webui_lineage_messages_for_display(
+    session,
+    messages=None,
+    *,
+    parent_session=_LINEAGE_PARENT_SESSION_UNSET,
+) -> list:
     """Include immediate parent-only rows when a WebUI continuation sidecar is partial.
 
     Compression/continuation sessions should render as one conversation. Most
@@ -10115,23 +10155,9 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     subset of their parent.
     """
     primary_messages = list(messages if messages is not None else (getattr(session, "messages", []) or []))
-    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
-    if not parent_id:
-        return primary_messages
-    if (
-        str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
-        and str(getattr(session, "compression_recovery_action", "") or "").strip()
-    ):
-        return primary_messages
-    source = str(getattr(session, "session_source", "") or "").strip().lower()
-    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
-    if source == "fork" or relationship == "child_session":
-        return primary_messages
-    try:
-        parent = get_session(parent_id, metadata_only=False)
-    except Exception:
-        return primary_messages
-    parent_messages = list(getattr(parent, "messages", []) or [])
+    if parent_session is _LINEAGE_PARENT_SESSION_UNSET:
+        parent_session = _webui_lineage_parent_session_for_display(session)
+    parent_messages = list(getattr(parent_session, "messages", []) or [])
     if not parent_messages:
         return primary_messages
     if _messages_start_with_visible_prefix(primary_messages, parent_messages):
@@ -10611,7 +10637,6 @@ from api.models import (
     new_session,
     all_sessions,
     title_from,
-    _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
@@ -10625,6 +10650,8 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _project_native_image_payload_conflicts_for_display,
+    _suppress_native_image_display_mirrors,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
@@ -13371,13 +13398,33 @@ def _handle_session_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
             else:
+                state_db_messages = _suppress_native_image_display_mirrors(
+                    s,
+                    state_db_messages,
+                )
+                sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
+                lineage_parent = _webui_lineage_parent_session_for_display(s)
+                projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
+                    s,
+                    sidecar_messages,
+                    parent_session=lineage_parent,
+                )
                 _all_msgs = merge_session_messages_append_only(
-                    _webui_sidecar_lineage_messages_for_display(s),
+                    sidecar_messages,
                     state_db_messages,
                     truncation_watermark=getattr(s, "truncation_watermark", None),
                     truncation_boundary=getattr(s, "truncation_boundary", None),
                 )
-                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
+                _all_msgs = _merged_webui_lineage_messages_for_display(
+                    s,
+                    _all_msgs,
+                    parent_session=lineage_parent,
+                )
+                _all_msgs = _project_native_image_payload_conflicts_for_display(
+                    projection_sidecar_messages,
+                    state_db_messages,
+                    _all_msgs,
+                )
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -13529,7 +13576,7 @@ def _handle_session_get(handler, parsed) -> bool:
             "tool_calls": _session_tool_calls,
             "active_stream_id": getattr(s, "active_stream_id", None),
             "pending_user_message": getattr(s, "pending_user_message", None),
-            "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
+            "pending_attachments": getattr(s, "pending_attachments", []) if (load_messages or getattr(s, "pending_user_message", None)) else [],
             "pending_started_at": getattr(s, "pending_started_at", None),
             "pending_user_source": getattr(s, "pending_user_source", None),
             "context_length": _persisted_cl,
@@ -23167,6 +23214,7 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = effective_source
+    s._webui_pending_user_timestamp_identity = None
     if retained_user is not None:
         from api.process_event_utils import build_active_turn_token
 
@@ -25218,10 +25266,12 @@ def _handle_chat_sync(handler, body):
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
+                _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata_before_boundary,
+                _settle_current_turn_boundary,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
@@ -25286,6 +25336,33 @@ def _handle_chat_sync(handler, body):
             result=result,
             agent=agent,
         )
+        if (
+            isinstance(_active_turn_identity, dict)
+            and _active_turn_identity.get("agent_turn_boundary_resolved") is True
+            and not _active_turn_identity.get("token")
+        ):
+            _active_image_index = _find_active_turn_checkpoint_index(
+                _result_messages,
+                _previous_context_messages,
+                _active_turn_identity,
+                msg,
+            )
+            _active_image_content = (
+                _result_messages[_active_image_index].get("content")
+                if _active_image_index is not None
+                else None
+            )
+            if isinstance(_active_image_content, list) and any(
+                isinstance(part, dict)
+                and part.get("type") in {"image", "image_url", "input_image"}
+                for part in _active_image_content
+            ):
+                from api.process_event_utils import build_active_turn_token
+
+                _active_turn_identity["token"] = build_active_turn_token(
+                    f"sync:{s.session_id}:{_active_turn_identity['turn_id']}",
+                    time.time(),
+                )
         _turn_boundary = _active_turn_boundary(
             _result_messages, _previous_context_messages, _active_turn_identity, msg,
         )
@@ -25304,6 +25381,14 @@ def _handle_chat_sync(handler, body):
             _next_context_messages,
             msg,
         )
+        if _active_turn_identity.get("token"):
+            _next_context_messages = _settle_current_turn_boundary(
+                _previous_context_messages,
+                _next_context_messages,
+                _active_turn_identity,
+                msg,
+                getattr(s, "pending_user_source", None) or "webui",
+            )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
@@ -25313,6 +25398,9 @@ def _handle_chat_sync(handler, body):
             ),
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
+            verification_nudge_provenance={
+                "active_turn_identity": _active_turn_identity,
+            },
         )
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames

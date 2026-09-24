@@ -277,6 +277,31 @@ def test_reloading_an_adopting_profile_keeps_the_owners_connection(mcp_env):
 
 
 @requires_process_home_pin
+def test_deleting_an_adopting_profiles_last_server_detaches_its_tools_on_reload(mcp_env):
+    """A profile that adopted another profile's identical connection deletes its only
+    server: its reload must drop its tools (they were callable after reload before)
+    while the owner's connection keeps running."""
+    mcp_env.configure("profile-write", atlassian=mcp_env.atlassian("profile-read", read_only=True))
+    mcp_env.chat_turn("profile-read")
+    mcp_env.chat_turn("profile-write")
+    owner_conn = mcp_env.connection("profile-read")
+    assert mcp_env.connection("profile-write") is None  # adopted, not owned
+    assert READ_TOOLS <= _tool_names(mcp_env.tools("profile-write"))
+
+    mcp_env.configure("profile-write")  # no server left
+    output = mcp_env.reload("profile-write")
+
+    assert "Removed: atlassian" in output and "Reconnected" not in output
+    assert mcp_env.tools("profile-write")["total"] == 0
+    from tools.registry import registry
+    write_scope = hermes_constants.hermes_home_key(mcp_env.home("profile-write"))
+    assert all(registry.snapshot_registration(t, scope=write_scope) is None for t in READ_TOOLS)
+    assert mcp_env.connection("profile-read") is owner_conn
+    assert owner_conn.session is not None
+    assert READ_TOOLS <= _tool_names(mcp_env.tools("profile-read"))
+
+
+@requires_process_home_pin
 def test_root_profile_reload_leaves_named_profiles_running(mcp_env):
     mcp_env.configure("default", atlassian=mcp_env.atlassian("default", read_only=True))
     mcp_env.chat_turn("default")

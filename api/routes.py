@@ -29559,8 +29559,11 @@ def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
 def _mcp_tools_from_registry(server_summaries, view=None):
     """Read already-registered MCP tool schemas without probing MCP servers.
 
-    With a profile ``view`` (see ``api.mcp_runtime``), only tools of servers the
-    profile configures, registered in that profile's own registry slot, are listed.
+    With a profile ``view`` (see ``api.mcp_runtime``), only tools registered in
+    that profile's own registry slot are listed. The slot is the isolation check;
+    the raw ``mcp_servers`` config is not an allowlist: the agent merges portable
+    plugin servers into the running config at runtime, and their tools are
+    registered in the same slot without a ``config.yaml`` entry.
     """
     try:
         from tools.registry import registry
@@ -29580,9 +29583,8 @@ def _mcp_tools_from_registry(server_summaries, view=None):
         if not isinstance(toolset, str) or not toolset.startswith("mcp-"):
             continue
         server_name = toolset[len("mcp-"):]
-        if view is not None and not view.legacy and (
-            server_name not in server_summaries
-            or not registry_tool_owned_by_view(registry, tool_name, view)
+        if view is not None and not view.legacy and not registry_tool_owned_by_view(
+            registry, tool_name, view
         ):
             continue
         schema = registry.get_schema(tool_name) or {}

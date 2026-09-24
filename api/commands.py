@@ -286,6 +286,12 @@ def _run_reload_mcp_command() -> str:
             discover_mcp_tools = agent_attr(
                 "tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery"
             )
+            try:
+                register_mcp_servers = agent_attr(
+                    "tools.mcp_tool", "register_mcp_servers", "tools.mcp_tool_discovery"
+                )
+            except Exception:
+                register_mcp_servers = None  # older agent: no overlay reconciliation
         except Exception as exc:
             logger.warning("Failed to import MCP runtime for /reload-mcp", exc_info=True)
             raise RuntimeError("MCP runtime unavailable") from exc
@@ -332,6 +338,15 @@ def _run_reload_mcp_command() -> str:
                     # The wildcard also dropped connect backoff; keep that for this
                     # profile's own failed servers so the reload retries them now.
                     clear_profile_connect_cooldowns(_core, view)
+                    # A connection this profile ADOPTED (another profile's identical
+                    # route) is not torn down above, and ``discover_mcp_tools()``
+                    # returns before its reconcile step when the profile's config
+                    # has no server left, so the adopted tools would stay callable.
+                    # ``register_mcp_servers({})`` judges every server serving this
+                    # scope against the profile's config on disk and detaches only
+                    # this profile's overlay; the owner's connection keeps running.
+                    if register_mcp_servers is not None and view.registry_scope is not None:
+                        register_mcp_servers({})
                 new_tools = discover_mcp_tools()
 
                 with _lock:

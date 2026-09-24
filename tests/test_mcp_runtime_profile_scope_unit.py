@@ -217,12 +217,35 @@ class FakeAgent:
                     agent.retry_after.pop(key, None)
                     agent.failures.pop(key, None)
 
+        def register_mcp_servers(servers):
+            """The agent's overlay heal for the current scope: a server serving this
+            scope through adoption whose config entry is gone (or omitted from
+            ``servers`` and absent from the profile's config) loses only this
+            profile's overlay; the owner's connection is untouched."""
+            agent.calls.append(("register", agent.override.get(), dict(servers)))
+            scope = agent.scope() if scoped else None
+            if scope is None:
+                return []
+            cfg = yaml.safe_load(Path(agent.home(), "config.yaml").read_text()) or {}
+            configured = cfg.get("mcp_servers") or {}
+            with agent.lock:
+                for key, adopters in list(agent.adopters.items()):
+                    name = scope_mod._key_name(key)
+                    if scope in adopters and name not in servers and name not in configured:
+                        adopters.discard(scope)
+                        slot = agent.scoped_tools.get(scope, {})
+                        for tool in [t for t, (ts, _) in slot.items() if ts == f"mcp-{name}"]:
+                            del slot[tool]
+            return sorted(agent._merged(scope))
+
         def discover_mcp_tools():
             home = agent.home()
             agent.calls.append(("discover", agent.override.get()))
             cfg = yaml.safe_load(Path(home, "config.yaml").read_text()) or {}
             scope = agent.scope() if scoped else None
             names = []
+            if not cfg.get("mcp_servers"):
+                return names  # as the agent: nothing configured, no reconcile pass
             for name, srv in (cfg.get("mcp_servers") or {}).items():
                 key = agent.ledger_key(name, scope)
                 served = any(scope_mod._key_name(k) == name and agent.visible(k, scope) and scope is not None
@@ -243,6 +266,7 @@ class FakeAgent:
         mcp_mod.get_mcp_status = get_mcp_status
         mcp_mod.shutdown_mcp_servers = shutdown_mcp_servers
         mcp_mod.discover_mcp_tools = discover_mcp_tools
+        mcp_mod.register_mcp_servers = register_mcp_servers
         return {
             "hermes_constants": hc,
             "agent": agent_pkg,
@@ -420,6 +444,60 @@ def test_adopted_connection_serves_status_inventory_and_reload(monkeypatch, tmp_
     assert ("shutdown", write_scope, {"atlassian"}) in agent.calls
     assert agent.servers[(read_scope, "atlassian")] is owner_conn
     assert write_scope in agent.adopters[(read_scope, "atlassian")]
+
+
+def test_reload_with_an_empty_config_detaches_adopted_tools_but_keeps_the_owner(monkeypatch, tmp_path):
+    """Deleting a profile's last server must stop its tools on reload, even when the
+    connection was adopted from another profile: the adopter's overlay goes, the
+    owner's connection stays (master's wildcard shutdown stopped the owner too)."""
+    from api.routes import _handle_mcp_tools_list
+
+    agent = _install(monkeypatch, tmp_path)
+    read_scope = _profile_scope(agent, "profile-read")
+    write_scope = _profile_scope(agent, "profile-write")
+    owner_conn = agent.connect("atlassian", READ, scope=read_scope)
+    agent.adopt("atlassian", owner=read_scope, adopter=write_scope)
+    assert {t["name"] for t in _call("profile-write", _handle_mcp_tools_list)["tools"]} == set(READ)
+
+    _configure(agent, "profile-write", {})  # the user deleted the profile's only server
+    output = _reload("profile-write")
+
+    assert "Removed: atlassian" in output and "Reconnected" not in output
+    assert _call("profile-write", _handle_mcp_tools_list)["total"] == 0
+    assert not agent.scoped_tools.get(write_scope)
+    assert write_scope not in agent.adopters.get((read_scope, "atlassian"), ())
+    # The owner is untouched: same connection, same tools.
+    assert agent.servers[(read_scope, "atlassian")] is owner_conn
+    assert {t["name"] for t in _call("profile-read", _handle_mcp_tools_list)["tools"]} == set(READ)
+    # The teardown stayed scoped to this profile (never the process-wide wildcard) and the
+    # overlay reconcile ran under this profile's home before rediscovery.
+    shutdowns = [c for c in agent.calls if c[0] == "shutdown"]
+    assert shutdowns == [("shutdown", write_scope, {"atlassian"})]
+    assert ("register", str(agent.base / "profiles" / "profile-write"), {}) in agent.calls
+
+
+def test_portable_plugin_tools_are_listed_for_their_profile_without_a_config_entry(monkeypatch, tmp_path):
+    """The agent merges plugin-provided (portable) MCP servers into the running config;
+    they never appear in the profile's raw ``mcp_servers``. Their tools must still be
+    listed for the profile whose registry slot holds them, and for no other profile."""
+    from api.routes import _handle_mcp_tools_list, _handle_notes_sources_list
+
+    agent = _install(monkeypatch, tmp_path)
+    write_scope = _profile_scope(agent, "profile-write")
+    agent.connect("notes-plugin", ["mcp__notes-plugin__search_notes"], scope=write_scope)
+
+    inventory = _call("profile-write", _handle_mcp_tools_list)
+    assert [(t["name"], t["server"]) for t in inventory["tools"]] == [
+        ("mcp__notes-plugin__search_notes", "notes-plugin")
+    ]
+    assert inventory["source"] == "tool_registry"
+    monkeypatch.setenv("HERMES_WEBUI_EXTERNAL_NOTES_SOURCES", "1")
+    notes = _call("profile-write", _handle_notes_sources_list)
+    assert [s["name"] for s in notes["sources"]] == ["notes-plugin"]
+    assert notes["sources"][0]["tool_count"] == 1
+    # Isolation still holds: another profile's slot does not list them.
+    assert _call("profile-read", _handle_mcp_tools_list)["total"] == 0
+    assert _call("default", _handle_mcp_tools_list)["total"] == 0
 
 
 def test_skewed_routing_hides_runtime_and_refuses_reload(monkeypatch, tmp_path):

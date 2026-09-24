@@ -338,6 +338,221 @@ def test_get_session_projects_marked_payload_conflict_in_full_and_limited_paths(
     }
 
 
+@pytest.mark.parametrize("msg_limit", [None, 5])
+@pytest.mark.parametrize("removed_payload_matches_retained", [False, True])
+def test_truncation_watermark_keeps_proven_retained_image_row_only(
+    monkeypatch, tmp_path, msg_limit, removed_payload_matches_retained,
+):
+    import api.config
+    import api.models as models
+    import api.session_ops
+    from api import routes
+
+    session_id = f"native-image-truncated-route-{msg_limit}"
+    timestamp = 860.0
+    retained_tail_timestamp = 880.0
+    sidecar_payload = "SIDECAR-IMAGE-PAYLOAD-A"
+    state_payload = "STATE-DB-IMAGE-PAYLOAD-B"
+    removed_payload = (
+        sidecar_payload if removed_payload_matches_retained
+        else "STATE-DB-REMOVED-IMAGE-PAYLOAD"
+    )
+    seed, identity, _ = _settle_image_turn(
+        session_id=session_id,
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in seed.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    older_rows = [
+        {"role": "user", "content": "Earlier prompt", "timestamp": 100.0},
+        {"role": "assistant", "content": "Earlier response", "timestamp": 101.0},
+    ]
+    seed.messages[:0] = [dict(row) for row in older_rows]
+    seed.context_messages[:0] = [dict(row) for row in older_rows]
+    sidecar_attachments = [{
+        "name": "sidecar-owned.png",
+        "mime": "image/png",
+        "is_image": True,
+    }]
+    retained_sidecar_row = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "_state_db_row_id": 42,
+        "api_content": sidecar_payload,
+        "attachments": sidecar_attachments,
+    }
+    retained_tail_row = {
+        "role": "assistant",
+        "content": "Retained after Undo",
+        "timestamp": retained_tail_timestamp,
+    }
+    seed.messages.extend([retained_sidecar_row, retained_tail_row])
+    seed.context_messages.extend([retained_sidecar_row, retained_tail_row])
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+            "content TEXT, timestamp REAL, active INTEGER DEFAULT 1, api_content TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO messages (id, session_id, role, content, timestamp, api_content) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (42, session_id, "user", mirror, timestamp, state_payload),
+                (43, session_id, "user", mirror, timestamp, removed_payload),
+                (44, session_id, "user", mirror, retained_tail_timestamp, "SAME-SECOND-REMOVED-PAYLOAD"),
+            ],
+        )
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    session = models.Session(
+        session_id=session_id,
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=seed.messages,
+        context_messages=seed.context_messages,
+        truncation_watermark=retained_tail_timestamp,
+        truncation_boundary=retained_tail_timestamp,
+        source_tag="webui",
+        session_source="webui",
+    )
+    session.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS.pop(session_id, None)
+    state_rows = models.get_state_db_session_messages(session_id)
+    marked_state_rows = models._suppress_native_image_display_mirrors(
+        session,
+        state_rows,
+    )
+    assert all(
+        message["_webui_unmatched_native_image_mirror"] is True
+        for message in marked_state_rows[:2]
+    )
+
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_: True)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda *_: {})
+    monkeypatch.setattr(routes, "find_run_summary", lambda *_: None)
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr(api.session_ops, "regeneration_state", lambda _session: ([], []))
+    monkeypatch.setattr(api.session_ops, "regeneration_authority", lambda *_args, **_kwargs: None)
+    response = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: (
+            response.update(payload=payload, status=status) or payload
+        ),
+    )
+    query = f"session_id={session_id}&resolve_model=0"
+    if msg_limit is not None:
+        query += f"&msg_limit={msg_limit}"
+    routes._handle_session_get(None, SimpleNamespace(path="/api/session", query=query))
+
+    assert response["status"] == 200
+    public_session = response["payload"]["session"]
+    public_messages = public_session["messages"]
+    if msg_limit is not None:
+        assert len(public_messages) == msg_limit
+        assert public_session["message_count"] > len(public_messages)
+    public_mirrors = [
+        message for message in public_messages
+        if message.get("content") == mirror
+    ]
+    assert len(public_mirrors) == 1
+    assert public_mirrors[0]["attachments"] == sidecar_attachments
+    assert any(
+        message.get("content") == "Retained after Undo"
+        for message in public_messages
+    )
+    assert next(
+        message for message in public_messages
+        if message.get("content") == "Describe this image"
+    )["attachments"][0]["name"] == "sample.png"
+
+    first_public = None
+    first_context = None
+    for _ in range(3):
+        display = models.reconciled_state_db_messages_for_session(
+            session,
+            state_messages=state_rows,
+        )
+        context = models.reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=state_rows,
+        )
+        display_row_42 = [
+            message for message in display
+            if message.get("_state_db_row_id") == 42
+        ]
+        context_row_42 = [
+            message for message in context
+            if message.get("_state_db_row_id") == 42
+        ]
+        assert len(display_row_42) == 1
+        assert display_row_42[0]["api_content"] == sidecar_payload
+        assert display_row_42[0]["attachments"] == sidecar_attachments
+        assert len(context_row_42) == 2
+        assert {message["api_content"] for message in context_row_42} == {
+            sidecar_payload, state_payload,
+        }
+        assert not any(
+            message.get("_state_db_row_id") in (43, 44)
+            for message in (*display, *context)
+        )
+        assert any(
+            message.get("_active_turn_token") == identity["token"]
+            for message in context
+        )
+        public = public_session_projection({"messages": display})["messages"]
+        replay = _sanitize_messages_for_agent(context)
+        assert sum(message.get("content") == mirror for message in public) == 1
+        replay_row_42 = [
+            message for message in replay
+            if message.get("content") == mirror
+        ]
+        assert len(replay_row_42) == 2
+        assert {message["api_content"] for message in replay_row_42} == {
+            sidecar_payload, state_payload,
+        }
+        if first_public is None:
+            first_public = public
+            first_context = replay
+        else:
+            assert public == first_public
+            assert replay == first_context
+
+    session.truncation_boundary = timestamp - 10
+    advanced_state_copy = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": retained_tail_timestamp + 5,
+        "_state_db_row_id": 42,
+        "api_content": state_payload,
+    }
+    advanced_context = models.reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=[advanced_state_copy],
+    )
+    assert not any(
+        message.get("timestamp") == retained_tail_timestamp + 5
+        for message in advanced_context
+    )
+
+
 def test_get_session_projects_parent_only_payload_conflict_without_losing_parent_rows(
     monkeypatch, tmp_path,
 ):

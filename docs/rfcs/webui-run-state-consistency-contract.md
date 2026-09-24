@@ -199,8 +199,11 @@ and 5; it does not mark every run-state boundary implemented.
    share the existing sidecar bubble only when its valid durable row ID, exact
    timestamp, and exact visible user content match; keep the sidecar-owned row
    and its display metadata. Distinct row IDs, ambiguous or invalid identities,
-   and different visible user text remain separate. Fill a missing payload from
-   the other copy; repeated reconciliation must remain bounded and idempotent.
+   and different visible user text remain separate only while eligible under
+   the existing edit/undo truncation watermark and checkpoint-order rules;
+   removed rows must not reappear in display or model replay. Fill a missing
+   payload from the other copy; repeated reconciliation must remain bounded
+   and idempotent.
    Agent state.db alone cannot restore the original attachment if the WebUI
    sidecar is lost.
    Visible interim assistant progress must remain visible timeline content; a

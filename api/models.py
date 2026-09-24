@@ -11581,6 +11581,95 @@ def _merge_session_messages_append_only_impl(
         and boundary_ts is not None
         and boundary_ts < watermark_timestamp
     )
+
+    def _state_row_is_truncated(
+        msg, key, content_key, timestamp, checkpoint_consumed,
+        *, retained_native_image_row: bool | None = None,
+    ):
+        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
+        # past the watermark. Because Session.save() no longer auto-clears the
+        # watermark, an unconditional `timestamp > watermark` skip would become
+        # permanent and silently drop legitimate future state.db-only recovery
+        # rows once the session moves forward past the edit boundary. Once the
+        # sidecar's own max timestamp is beyond the watermark, allow state rows
+        # newer than the sidecar tail to merge.
+        #
+        # The sidecar's max timestamp can also EQUAL the watermark when the new
+        # post-edit USER turn has been checkpointed into the sidecar (its
+        # timestamp == the advanced watermark) but its ASSISTANT reply exists
+        # only in state.db (recovery before the sidecar tail advances). In that
+        # state truncation_boundary < watermark proves the session is genuinely
+        # advanced, so the post-watermark state-only reply is legitimate
+        # post-edit content and must merge through (not be dropped as a replaced
+        # tail). The conservative skip still applies for boundary is None and
+        # boundary == watermark (not-advanced / legacy).
+        #
+        # CRITICAL: the boundary-advanced signal may only bypass the skip AFTER
+        # state replay has consumed the sidecar's visible checkpoint
+        # (state_replay_idx >= len(sidecar_visible_sequence)). A deleted suffix
+        # row with ts > watermark that appears in state.db BEFORE the edited
+        # checkpoint must still be skipped — otherwise the advanced signal would
+        # resurrect it. The sidecar-max-timestamp signal needs no such gate (a
+        # sidecar tail beyond the watermark is itself proof the checkpoint has
+        # advanced).
+        sidecar_advanced_past_watermark = (
+            watermark_timestamp is not None
+            and (
+                (max_sidecar_timestamp is not None
+                 and max_sidecar_timestamp > watermark_timestamp)
+                or (watermark_advanced_by_boundary and checkpoint_consumed)
+            )
+        )
+        message_key_seen = key in seen_message_keys
+        content_key_seen = content_key in seen_content_keys
+        if retained_native_image_row is not None:
+            # A marked image mirror needs durable row proof; an equal scalar
+            # projection from another row cannot exempt it from the watermark.
+            message_key_seen = content_key_seen = retained_native_image_row
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp > watermark_timestamp
+            and not message_key_seen
+            and (
+                not sidecar_advanced_past_watermark
+                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
+            )
+        ):
+            return True
+        # When a truncation watermark is active, state.db may contain original
+        # messages that were replaced by Edit (old content with old timestamp).
+        # The timestamp-based filter above catches messages AFTER the watermark,
+        # but messages BEFORE it (like the original pre-edit content) slip through.
+        # If a state.db message's content is not present in the sidecar and its
+        # timestamp is before the watermark, it's a replaced/stale row — skip it.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp < watermark_timestamp
+            and not message_key_seen
+            and not content_key_seen
+        ):
+            return True
+        # Same-second edit: if timestamp equals the watermark and the message
+        # content is not in the sidecar, it's a replaced message edited at the
+        # same second — skip it. The edited version (same timestamp, different
+        # content) is in the sidecar and survives this check.
+        #
+        # Only apply the same-second guard to user messages. An assistant reply
+        # (or tool message) at the same second as the watermark is a legitimate
+        # post-edit recovery row — the sidecar holds only the edited user
+        # checkpoint, so the assistant reply's content won't be in it and would
+        # be silently dropped without this role guard.
+        return (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp == watermark_timestamp
+            and not message_key_seen
+            and not content_key_seen
+            and str(msg.get("role", "")).lower() == "user"
+        )
+
     for source_message in state_messages:
         preserve_native_image_row = (
             isinstance(source_message, dict)
@@ -11607,11 +11696,37 @@ def _merge_session_messages_append_only_impl(
                 if row_id_valid and row_id is not None
                 else None
             )
-            if (
+            row_id_fast_path_allowed = (
                 existing is not None
                 and row_id not in ambiguous_row_ids
                 and _row_id_fast_path_allowed(existing, msg)
+            )
+            existing_timestamp, existing_timestamp_valid = (
+                _message_exact_timestamp_details(existing)
+            )
+            incoming_timestamp, incoming_timestamp_valid = (
+                _message_exact_timestamp_details(msg)
+            )
+            retained_native_image_row = (
+                row_id_fast_path_allowed
+                and sidecar_row_id_counts.get(row_id, 0) == 1
+                and state_row_id_counts.get(row_id, 0) == 1
+                and existing_timestamp_valid
+                and incoming_timestamp_valid
+                and existing_timestamp is not None
+                and existing_timestamp == incoming_timestamp
+                and str(msg.get("role") or "").lower() == "user"
+            )
+            if _state_row_is_truncated(
+                msg,
+                key,
+                content_key,
+                timestamp,
+                state_replay_idx >= len(sidecar_visible_sequence),
+                retained_native_image_row=retained_native_image_row,
             ):
+                continue
+            if row_id_fast_path_allowed:
                 existing_api_content = _session_message_api_content_key(existing)
                 incoming_api_content = _session_message_api_content_key(msg)
                 if (
@@ -11620,7 +11735,8 @@ def _merge_session_messages_append_only_impl(
                     and existing_api_content != incoming_api_content
                 ):
                     # Row identity does not establish which provider payload is
-                    # newer. Fall through so both conflicting versions survive.
+                    # newer. A unique exact row match proves this row survived
+                    # truncation, so preserve both versions for model context.
                     pass
                 else:
                     if existing_api_content is None and incoming_api_content is not None:
@@ -11743,83 +11859,9 @@ def _merge_session_messages_append_only_impl(
                     _copy_api_content_sidecar(existing, msg)
                 _merge_session_display_metadata(existing, msg)
                 continue
-        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
-        # past the watermark. Because Session.save() no longer auto-clears the
-        # watermark, an unconditional `timestamp > watermark` skip would become
-        # permanent and silently drop legitimate future state.db-only recovery
-        # rows once the session moves forward past the edit boundary. Once the
-        # sidecar's own max timestamp is beyond the watermark (the session has
-        # advanced), allow state rows newer than the sidecar tail to merge.
-        #
-        # The sidecar's max timestamp can also EQUAL the watermark when the new
-        # post-edit USER turn has been checkpointed into the sidecar (its
-        # timestamp == the advanced watermark) but its ASSISTANT reply exists
-        # only in state.db (recovery before the sidecar tail advances). In that
-        # state truncation_boundary < watermark proves the session is genuinely
-        # advanced, so the post-watermark state-only reply is legitimate
-        # post-edit content and must merge through (not be dropped as a replaced
-        # tail). The conservative skip still applies for boundary is None and
-        # boundary == watermark (not-advanced / legacy).
-        #
-        # CRITICAL: the boundary-advanced signal may only bypass the skip AFTER
-        # state replay has consumed the sidecar's visible checkpoint
-        # (state_replay_idx >= len(sidecar_visible_sequence)). A deleted suffix
-        # row with ts > watermark that appears in state.db BEFORE the edited
-        # checkpoint must still be skipped — otherwise the advanced signal would
-        # resurrect it. The sidecar-max-timestamp signal needs no such gate (a
-        # sidecar tail beyond the watermark is itself proof the checkpoint has
-        # advanced).
         checkpoint_consumed = state_replay_idx >= len(sidecar_visible_sequence)
-        sidecar_advanced_past_watermark = (
-            watermark_timestamp is not None
-            and (
-                (max_sidecar_timestamp is not None
-                 and max_sidecar_timestamp > watermark_timestamp)
-                or (watermark_advanced_by_boundary and checkpoint_consumed)
-            )
-        )
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp > watermark_timestamp
-            and key not in seen_message_keys
-            and (
-                not sidecar_advanced_past_watermark
-                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
-            )
-        ):
-            continue
-        # When a truncation watermark is active, state.db may contain original
-        # messages that were replaced by Edit (old content with old timestamp).
-        # The timestamp-based filter above catches messages AFTER the watermark,
-        # but messages BEFORE it (like the original pre-edit content) slip through.
-        # If a state.db message's content is not present in the sidecar and its
-        # timestamp is before the watermark, it's a replaced/stale row — skip it.
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp < watermark_timestamp
-            and key not in seen_message_keys
-            and content_key not in seen_content_keys
-        ):
-            continue
-        # Same-second edit: if timestamp equals the watermark and the message
-        # content is not in the sidecar, it's a replaced message edited at the
-        # same second — skip it.  The edited version (same timestamp, different
-        # content) is in the sidecar and survives this check.
-        #
-        # Only apply the same-second guard to user messages.  An assistant reply
-        # (or tool message) at the same second as the watermark is a legitimate
-        # post-edit recovery row — the sidecar holds only the edited user
-        # checkpoint, so the assistant reply's content won't be in it and would
-        # be silently dropped without this role guard.
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp == watermark_timestamp
-            and key not in seen_message_keys
-            and content_key not in seen_content_keys
-            and str(msg.get("role", "")).lower() == "user"
+        if _state_row_is_truncated(
+            msg, key, content_key, timestamp, checkpoint_consumed,
         ):
             continue
         # Check for true duplicates using full-precision timestamp (#3346).

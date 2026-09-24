@@ -44,6 +44,11 @@
 
 ### Fixed
 
+- **Switching profiles no longer rebuilds the model list from scratch.** A profile switch used to
+  delete the saved models cache, so the next model-list load re-queried every provider. Each
+  profile now keeps its own cached model list across switches. The cache is still thrown away when
+  that profile's `config.yaml`, `.env` values, or model-provider plugins change, and when the
+  profile is deleted or recreated. (#7632 by @carlotestor)
 - **Picking a model from a named custom provider sends the right model name.** Choosing a model
   that belongs to a non-default custom provider (for example `@custom:my-server:model-x`) sent
   the whole picker id, prefix included, to the provider, which rejected the request. The

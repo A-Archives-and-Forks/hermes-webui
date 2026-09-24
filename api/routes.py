@@ -17155,8 +17155,9 @@ def handle_post(handler, parsed) -> bool:
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
+            # The per-profile disk snapshot is fingerprint-guarded, so keep it.
             from api.config import invalidate_models_cache
-            invalidate_models_cache()
+            invalidate_models_cache(delete_disk=False)
             try:
                 from api.gateway_watcher import restart_watcher_for_profile
                 restart_watcher_for_profile(name)

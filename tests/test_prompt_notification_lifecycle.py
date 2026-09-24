@@ -134,3 +134,29 @@ console.log(JSON.stringify({shown}));
 ''', ('_startClarifyFallbackPoll',))
     assert result == dict(shown=[])
 
+
+
+def test_default_permission_is_auto_requested_once_not_every_poll_tick():
+    """A pending prompt re-surfaces on every 1.5s poll tick; with permission still
+    'default' (a second browser/device) the automatic, non-gesture request must be
+    made at most once per page, so the user is not re-prompted and re-toasted
+    "notifications denied" on every tick. The explicit Send-test path still asks."""
+    result = run(r'''
+const window=global.window={_notificationsEnabled:true};
+let requests=0; const toasts=[];
+global.t=(k)=>k;
+global.showToast=(msg)=>toasts.push(msg);
+global.updateNotificationPermissionStatus=()=>{};
+window.Notification=global.Notification=function(){};
+Notification.permission='default';
+Notification.requestPermission=()=>{requests++;return Promise.resolve('default');};
+global.assistantDisplayName=()=> 'Hermes';
+global._notificationOptions=()=>({});
+Object.defineProperty(global,'navigator',{value:{}});
+const p={approval_id:'id'};
+for (let i=0;i<5;i++){ _notifyPromptCard('approval','s',p); await flush(); await flush(); }
+const autoRequests=requests, autoToasts=toasts.length, seenAfterAuto=_promptNotifySeen.size;
+await sendBrowserNotification('Test','body',{force:true}); await flush();
+console.log(JSON.stringify({autoRequests,autoToasts,seenAfterAuto,forcedRequests:requests-autoRequests}));
+''', ('sendBrowserNotification', '_showPwaNotification', 'requestNotificationPermission'))
+    assert result == dict(autoRequests=1, autoToasts=1, seenAfterAuto=0, forcedRequests=1)

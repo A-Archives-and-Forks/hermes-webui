@@ -9643,6 +9643,14 @@ function sendBrowserNotification(title,body,options={}){
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
     return false;
   }
+  // Permission still 'default': prompt-card owners retry on every 1.5s poll
+  // tick while pending, so an automatic (non-gesture) request is made at most
+  // once per page — otherwise each tick re-prompts and re-toasts "denied".
+  // The explicit "Send test" (force) path always asks.
+  if(!force){
+    if(sendBrowserNotification._autoPermissionRequested) return false;
+    sendBrowserNotification._autoPermissionRequested=true;
+  }
   return requestNotificationPermission().then(p => p==='granted' ? deliver() : false).catch(() => false);
 }
 

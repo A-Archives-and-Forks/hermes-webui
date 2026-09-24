@@ -375,10 +375,13 @@ def test_route_cap_bounds_the_reviewers_five_project_reproduction(fake_hermes_ho
     # Bounded by a FAIR draw, not by truncating the head of the list: the rows
     # are grouped per project, so a flat `sessions[:200]` would have handed
     # project-0 every slot and left the other four unreachable — the starvation
-    # greptile rejected as P1.
+    # greptile rejected as P1. The recent window (20 rows) is RESERVED first —
+    # all of them belong to project-0 here — and the remaining 180-slot budget
+    # spreads round-robin over the undrawn rows of every project.
     counts = _assigned_project_counts(kept)
     assert len(counts) == project_count
-    assert set(counts.values()) == {routes.CLI_PROJECT_ASSIGNED_CAP // project_count}
+    assert counts["project-0"] == routes._cli_visible_session_cap() + 36
+    assert {counts[f"project-{project}"] for project in range(1, project_count)} == {36}
 
 
 def test_route_cap_splits_the_merged_budget_fairly_between_projects(fake_hermes_home):
@@ -401,15 +404,24 @@ def test_route_cap_splits_the_merged_budget_fairly_between_projects(fake_hermes_
 
     kept = routes._cap_recent_cli_sessions(rows)
 
-    half = routes.CLI_PROJECT_ASSIGNED_CAP // 2
-    assert _assigned_project_counts(kept) == {"project-a": half, "project-b": half}
+    # 20 of the 200 assigned rows are project-a's recent window, RESERVED
+    # before the draw; the remaining 180-slot budget spreads round-robin over
+    # the undrawn rows, so project-a adds 90 and project-b gets 90.
+    half = (routes.CLI_PROJECT_ASSIGNED_CAP - routes._cli_visible_session_cap()) // 2
+    assert _assigned_project_counts(kept) == {
+        "project-a": routes._cli_visible_session_cap() + half,
+        "project-b": half,
+    }
     assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
     # Newest first within each project: the draw keeps the head of each queue.
     kept_ids = {row["session_id"] for row in kept}
     for project in ("project-a", "project-b"):
         assert f"{project}-0000" in kept_ids
-        assert f"{project}-{half - 1:04d}" in kept_ids
-        assert f"{project}-{half:04d}" not in kept_ids
+    assert "project-a-0019" in kept_ids and "project-a-0020" in kept_ids
+    assert f"project-a-{routes._cli_visible_session_cap() + half - 1:04d}" in kept_ids
+    assert f"project-a-{routes._cli_visible_session_cap() + half:04d}" not in kept_ids
+    assert f"project-b-{half - 1:04d}" in kept_ids
+    assert f"project-b-{half:04d}" not in kept_ids
 
 
 def test_route_cap_shrinks_every_share_instead_of_dropping_projects(fake_hermes_home):
@@ -434,10 +446,95 @@ def test_route_cap_shrinks_every_share_instead_of_dropping_projects(fake_hermes_
     kept = routes._cap_recent_cli_sessions(rows)
 
     counts = _assigned_project_counts(kept)
-    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
     assert len(counts) == project_count
-    assert min(counts.values()) >= 1
-    assert set(counts.values()) == {routes.CLI_PROJECT_ASSIGNED_CAP // project_count}
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    assert min(counts.values()) >= 4
+    assert set(counts.values()) <= {4, 5, routes._cli_visible_session_cap() + 5}
+    # project-00's newest rows own the reserved recent window, on top of its
+    # equal share of the remaining budget.
+    assert counts["project-00"] == routes._cli_visible_session_cap() + 5
+
+
+def test_route_cap_never_drops_the_recent_window_the_base_shows(fake_hermes_home):
+    """The 2026-09-24 re-gate reproduction: the fair draw must not remove a
+    row the base displays.
+
+    11 projects x 20 sessions, with ALL 20 newest conversations in one project.
+    Spending the whole assigned budget round-robin before the recent window is
+    applied hands that project only ~19 of 200 slots; the keep loop then drops
+    its undrawn newest rows, and sessions visible on the default list today
+    appear in neither the default payload nor behind their project chip.
+
+    The fix reserves the rows the recent window itself would show (the first
+    ``cli_cap`` CLI rows in sort order, assigned or not) before the fair draw
+    spends only the remaining budget across starved projects. Assert all 20
+    newest stay in the payload, and that the draw still starves nothing else.
+    """
+    project_count = 11
+    rows = []
+    # The 20 newest sessions, all assigned to project-00 (newest-first list).
+    rows.extend(
+        {
+            "session_id": f"project-00-recent-{index:02d}",
+            "is_cli_session": True,
+            "project_id": "project-00",
+        }
+        for index in range(20)
+    )
+    # Then 20 older rows per remaining project: 11 projects x 20 sessions, the
+    # review's literal reproduction.
+    for project in range(1, project_count):
+        rows.extend(
+            {
+                "session_id": f"project-{project:02d}-{index:03d}",
+                "is_cli_session": True,
+                "project_id": f"project-{project:02d}",
+            }
+            for index in range(20)
+        )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    kept_ids = {row["session_id"] for row in kept}
+    missing = [f"project-00-recent-{index:02d}" for index in range(20)
+               if f"project-00-recent-{index:02d}" not in kept_ids]
+    assert not missing, f"the base shows these rows; the draw dropped {missing}"
+    counts = _assigned_project_counts(kept)
+    assert counts["project-00"] == 20
+    # The reservation consumed the recent window's share of the budget; the
+    # remaining assigned budget still reaches the other projects.
+    assert min(counts[f"project-{project:02d}"] for project in range(1, project_count)) >= 1
+    assert len(kept) <= routes.CLI_PROJECT_ASSIGNED_CAP
+
+
+def test_route_cap_reservation_spends_the_draw_budget_not_adds_to_it(fake_hermes_home):
+    """The reserved recent rows count AGAINST the assigned cap, not on top.
+
+    A cli_cap-sized recent window fully assigned to one project must leave the
+    round-robin with nothing to spend: total assigned rows in the payload stay
+    at the cap, never cap + draw.
+    """
+    rows = [
+        {
+            "session_id": f"assigned-{index:03d}",
+            "is_cli_session": True,
+            "project_id": "solo",
+        }
+        for index in range(routes.CLI_PROJECT_ASSIGNED_CAP)
+    ]
+
+    kept = routes._cap_recent_cli_sessions(rows, cli_cap=20)
+
+    # The 20 newest rows own the recent window (reserved, paid by it); the
+    # draw keeps the rest of this project's history chip-reachable up to the
+    # assigned cap — 200 assigned rows in total, only the window rendering.
+    assigned = [row for row in kept if row.get("project_id")]
+    assert len(assigned) == routes.CLI_PROJECT_ASSIGNED_CAP
+    visible = [row for row in assigned if not row.get("default_hidden")]
+    assert [row["session_id"] for row in visible] == [
+        f"assigned-{index:03d}" for index in range(20)
+    ]
+    assert all(row.get("default_hidden") for row in assigned[20:])
 
 
 def test_route_cap_bound_wins_when_projects_outnumber_slots(fake_hermes_home):
@@ -465,11 +562,16 @@ def test_route_cap_bound_wins_when_projects_outnumber_slots(fake_hermes_home):
 
     counts = _assigned_project_counts(kept)
     assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
-    assert set(counts.values()) == {1}
-    assert len(counts) == routes.CLI_PROJECT_ASSIGNED_CAP
+    # The recent window is reserved for the newest rows (project-000 keeps all
+    # 3 of its rows); the remaining budget still reaches one row per project —
+    # the draw never gives a project a second row while another has none.
+    assert counts["project-000"] == 3
+    assert set(counts.values()) <= {1, 2, 3}
+    assert sum(n for p, n in counts.items() if p != "project-000") == routes.CLI_PROJECT_ASSIGNED_CAP - 3
+    assert len(counts) == 186
     # The projects that keep a row are the ones with the most recent activity,
     # i.e. the head of the newest-first merged list.
-    assert counts.keys() == {
+    assert set(counts.keys()) <= {
         f"project-{project:03d}" for project in range(routes.CLI_PROJECT_ASSIGNED_CAP)
     }
 

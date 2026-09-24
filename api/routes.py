@@ -10594,10 +10594,39 @@ def _cap_recent_cli_sessions(
         project_id = str(session.get("project_id") or "").strip()
         if project_id:
             rows_by_project.setdefault(project_id, []).append(index)
-    drawn = (
-        None if project_cap <= 0
-        else _draw_assigned_cli_rows_fairly(rows_by_project, project_cap)
-    )
+    if project_cap > 0 and rows_by_project:
+        # Reserve the CLI rows the recent window already shows — the first
+        # ``cli_cap`` CLI rows in sort order, assigned or not — before the fair
+        # draw spreads the REST of the assigned budget across projects. Without
+        # this, a project holding all the newest sessions can lose its newest
+        # rows in the draw and the payload drops sessions the base displays
+        # (2026-09-24 re-gate reproduction: 11 projects x 20 sessions, all 20
+        # newest in one project, ``p0-19`` vanished from the payload).
+        reserved: set[int] = set()
+        seen_cli = 0
+        for index, session in enumerate(sessions):
+            if not _is_cli_session_for_settings(session):
+                continue
+            if seen_cli >= cli_cap:
+                break
+            seen_cli += 1
+            reserved.add(index)
+        # The reserved rows have already been paid for by the recent window;
+        # draw the remaining budget over the queues MINUS those rows, so the
+        # reservation cannot double-spend slots the draw would have granted.
+        remaining_rows_by_project: dict[str, list[int]] = {
+            project: [index for index in indices if index not in reserved]
+            for project, indices in rows_by_project.items()
+        }
+        assigned_reserved = sum(
+            1 for index in reserved
+            if str(sessions[index].get("project_id") or "").strip()
+        )
+        drawn = reserved | _draw_assigned_cli_rows_fairly(
+            remaining_rows_by_project, max(project_cap - assigned_reserved, 0)
+        )
+    else:
+        drawn = None if project_cap <= 0 else set()
     kept = []
     recent_seen = 0
     unassigned_seen = 0

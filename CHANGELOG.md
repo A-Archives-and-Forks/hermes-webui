@@ -44,6 +44,12 @@
 
 ### Fixed
 
+- **Two open WebUI windows no longer overwrite each other's unread state.** Two clients on the
+  same origin (for example the desktop PWA and a browser tab) share one `localStorage`, but each
+  kept its own in-memory copy of which sessions had been viewed. When one wrote, it replaced the
+  other's newer record, so read chats came back as unread or new completions lost their dot. Each
+  write now merges with what is on disk, keeps the newer record per session, and remembers
+  deletions and cleared completion dots so they don't come back. (#7577 by @snoyberg)
 - **Switching profiles no longer rebuilds the model list from scratch.** A profile switch used to
   delete the saved models cache, so the next model-list load re-queried every provider. Each
   profile now keeps its own cached model list across switches. The cache is still thrown away when

@@ -162,7 +162,7 @@ gate rather than inventing values without source support.
 ## Authoritative emitted events (`/api/chat/stream`)
 
 These are the **real wire `event:` names** emitted by `api/streaming.py` today
-(23 names). Clients and docs must use this table — not the semantic draft above —
+(24 names). Clients and docs must use this table — not the semantic draft above —
 when integrating with the live chat SSE relay.
 
 | Wire name | Role |
@@ -179,6 +179,7 @@ when integrating with the live chat SSE relay.
 | `title` | Session title update (often after `done`) |
 | `title_status` | Title generation status / skip reason |
 | `warning` | Non-fatal provider/fallback warning |
+| `runtime_model` | Local Agent serving identity observed at output or successful completion |
 | `apperror` | Terminal application error (no trailing `stream_end`) |
 | `cancel` | Run cancelled |
 | `done` | Turn finalized (session payload); title/`stream_end` may follow |
@@ -198,6 +199,31 @@ Relay close set (stop draining the live queue): `stream_end`, `cancel`,
 The semantic taxonomy table remains a draft for the proposed per-session
 endpoint vocabulary and must be confirmed during maintainer review before that
 endpoint claims parity.
+
+### Observed local runtime model
+
+The local worker emits `runtime_model` with
+`{session_id, stream_id, model, provider?, fallback_active, phase}`. The IDs
+refer to the original run-journal owner even if compression rotates the Agent's
+session. `phase="observed_output"` means the Agent's own model was read at a
+nonempty token/reasoning callback or after successful completion (including a
+non-streaming reply or credential self-heal). It does not promise that a turn
+which emitted partial output will finish successfully. Missing Agent model
+sends no observation; the configured selection is not used as serving proof.
+`fallback_active` is true only when the Agent explicitly reports its fallback
+flag. Consecutive identical observations are deduplicated within the turn.
+
+Fallback lifecycle warnings invalidate older serving evidence and reset the
+deduplication; status text alone never establishes the replacement model. A
+fresh observation after the warning reestablishes it, including when a buffered
+success notice arrives after output. Durable replay retains the event IDs.
+The journal summary and HTTP `runtime_journal_snapshot.runtime_model` project
+the latest valid observation from the same session/stream event window, or null
+if a warning or malformed latest observation invalidated it. No previous run's
+footer or selected route fills an unknown current run. This is a local-worker
+producer; gateway attribution and frontend presentation are separate concerns
+(see #6272 and #7181). `route_observed` remains reserved for route-only data,
+not successful output.
 
 ## Cursor and resume semantics
 

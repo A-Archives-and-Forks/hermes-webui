@@ -2760,11 +2760,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _currentActivityBurstId=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentActivityBurstId)||0)||0;
   let _currentLiveSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
   let _assistantSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
-  let _lastRunJournalSeq=reconnecting
-    ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
+  // #7640: the replay floor is only as trustworthy as the recovery state behind
+  // it. A cache that kept the cursor but lost the live assistant projection must
+  // not raise `after_seq`: the server would then replay only the tail (often just
+  // `stream_end`), and the missing journal range never gets a chance to rebuild
+  // the body — the settled footer paints over a blank message until a reload.
+  // Fall back to the zero floor whenever the state cannot be validated.
+  const _replayCursorInflight=reconnecting?INFLIGHT[activeSid]:null;
+  let _lastRunJournalSeq=(typeof _runJournalReplayFloorForInflight==='function')
+    ? _runJournalReplayFloorForInflight(_replayCursorInflight)
     : 0;
-  let _lastRunJournalEventId=reconnecting
-    ? String((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId)||'')
+  let _lastRunJournalEventId=(typeof _runJournalReplayEventIdForInflight==='function')
+    ? _runJournalReplayEventIdForInflight(_replayCursorInflight)
     : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
@@ -4846,7 +4853,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    // #7680 re-gate (9/22): strip backtick wrappers so the bare-token
+    // match below sees a plain ``MEDIA:path`` and the bare class
+    // (no backtick in the exclusion set) captures the full filename
+    // even when the path itself contains a backtick.
+    const normalized = String(chunk).replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
+    const m=/^MEDIA:([^\s\)\]]+)$/.exec(normalized);
     const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
     if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
@@ -4894,23 +4906,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
+    // #7680 re-gate (9/22): strip backtick wrappers first so the bare
+    // class (no backtick in the exclusion set) captures the full
+    // filename even when the path itself contains a backtick.
+    // The pre-pass replaces `` `MEDIA:path` `` with ``MEDIA:path``
+    // so the wrapped form is consumed before the bare scan.
+    const normalized = combined.replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
-    while((m=re.exec(combined))){
+    while((m=re.exec(normalized))){
       const matchEnd = m.index + m[0].length;
       if(m.index>last){
-        const slice = combined.slice(last, m.index);
+        const slice = normalized.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
-        const candidate = combined.slice(m.index);
+      if(matchEnd===normalized.length && !_smdMediaRefHasReliableBoundary(m[1])){
+        const candidate = normalized.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
         } else {
           writeCurrent(candidate);
         }
-        last = combined.length;
+        last = normalized.length;
         break;
       }
       if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
@@ -4918,7 +4936,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
-    const rest = combined.slice(last);
+    const rest = normalized.slice(last);
     if(rest){
       const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);

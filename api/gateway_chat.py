@@ -38,6 +38,7 @@ from api.config import (
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.turn_journal import append_turn_journal_event_for_stream
 
 logger = logging.getLogger(__name__)
 
@@ -1419,6 +1420,21 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
+            # #6366 re-gate: record the durable same-stream completion
+            # event in the crash-safe turn journal. The run journal's
+            # terminal state is only reached on its own ``stream_end``
+            # write path, so a Gateway run whose terminal write is lost
+            # would otherwise leave no completion evidence at all and
+            # stale-cancel recovery would re-append a duplicate
+            # recovered row after the valid final answer.
+            try:
+                append_turn_journal_event_for_stream(
+                    session_id,
+                    stream_id,
+                    {"event": "completed", "created_at": time.time()},
+                )
+            except Exception:
+                logger.debug("Failed to append completed turn journal event", exc_info=True)
             success_writeback_committed = True
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal

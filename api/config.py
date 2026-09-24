@@ -7926,20 +7926,48 @@ def _active_profile_home() -> Path:
 
 
 def _models_cache_env_fingerprint(path: Path) -> list:
-    """Sorted non-empty ``.env`` key names, parsed like provider detection; values never recorded."""
+    """``[key, HMAC(value)]`` per non-empty ``.env`` entry, parsed like provider detection.
+
+    Values are keyed-hashed with the WebUI signing key so the cache file never holds a secret.
+    """
+    import hmac
+    from api.auth import _signing_key
     from api.providers import _load_env_file
 
-    return sorted(k for k, v in _load_env_file(Path(path).expanduser()).items() if v)
+    key = _signing_key()
+    return [
+        [k, hmac.new(key, v.encode("utf-8"), hashlib.sha256).hexdigest()]
+        for k, v in sorted(_load_env_file(Path(path).expanduser()).items())
+        if v
+    ]
 
 
 def _declares_model_provider_kind(plugin_dir: Path) -> bool:
-    for manifest in (plugin_dir / "plugin.yaml", plugin_dir / "plugin.yml"):
-        try:
-            lines = manifest.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+    # Same parse as the agent's providers._declares_model_provider_kind: PyYAML, then a line scan.
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest = plugin_dir / filename
+        if not manifest.is_file():
             continue
-        pairs = (line.partition(":") for line in lines if not line[:1].isspace())
-        return any(k.strip() == "kind" and v.strip().strip("\"'") == "model-provider" for k, _, v in pairs)
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        try:
+            import yaml as _yaml
+
+            data = _yaml.safe_load(text)
+            if isinstance(data, dict):
+                return str(data.get("kind", "")).strip() == "model-provider"
+        except Exception:
+            pass
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            if key.strip() == "kind":
+                return value.strip().strip("\"'") == "model-provider"
+        return False
     return False
 
 
@@ -8148,10 +8176,10 @@ def _load_stale_models_cache_from_disk() -> dict | None:
     The main cache loader enforces metadata stamps for a full cold-path cache hit.
     This helper intentionally does not apply that stricter policy, so we can still
     recover a useful fallback payload when the strict loader rejected cache because
-    metadata or fingerprint fields are stale. It DOES still enforce the schema
-    version: a cross-schema cache can have an incompatible groups/badge shape, so
-    serving it to the picker could surface a broken catalog — schema mismatch is a
-    hard reject even on the fallback path.
+    the WebUI version stamp is stale. It DOES still enforce the schema version (a
+    cross-schema cache can have an incompatible groups/badge shape) and the source
+    fingerprint: a snapshot built from other config/auth/.env/plugin sources is a
+    wrong catalog, not merely an old one, so it is never served.
     """
     try:
         import json as _j
@@ -8164,6 +8192,8 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
+            return None
+        if cache.get("_source_fingerprint") != _models_cache_source_fingerprint():
             return None
         aliases = cache.get("aliases")
         if not isinstance(aliases, dict):

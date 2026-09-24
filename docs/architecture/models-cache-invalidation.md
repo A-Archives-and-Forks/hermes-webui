@@ -31,9 +31,12 @@ the fingerprint captured at publish time.
 | --- | --- | --- |
 | `config_yaml` | stat identity: `mtime_ns` + size (`_models_cache_file_fingerprint`) | The file is rewritten only on deliberate user edits, and any edit can change the provider/model set, so the cheap conservative identity wins. |
 | `auth_json` | content hash with a volatile-key deny-list (`_auth_store_semantic_fingerprint`, `_AUTH_FINGERPRINT_VOLATILE_KEYS`) | The credential store is rewritten roughly every 14 minutes by credential-pool / OAuth refresh; none of those rotating fields feed `detected_providers` or the returned catalog, and stat identity made the 24h cache churn on every refresh (RCA `t_d127953d` / `t_16551f61`). |
-| `env` | sorted **names** of non-empty `.env` keys, parsed by `providers._load_env_file` (`_models_cache_env_fingerprint`); values are never recorded | Env credentials decide `detected_providers`; rotating a value does not. |
-| `plugins` | `[relpath, mtime_ns, size]` of every non-bytecode file of each model-provider plugin, discovered like `providers._scan_home_layer` (`_models_cache_plugin_fingerprint`) | The loader execs plugin code that builds `fallback_models`, so any file edit must invalidate, even without a `version` bump. |
+| `env` | `[key, HMAC-SHA256(signing key, value)]` per non-empty `.env` entry, parsed by `providers._load_env_file` (`_models_cache_env_fingerprint`); plaintext values are never recorded | Env keys decide `detected_providers` and values such as `LM_BASE_URL` decide which endpoint is probed, so both key and value changes invalidate. |
+| `plugins` | `[relpath, mtime_ns, size]` of every non-bytecode file of each model-provider plugin, discovered like `providers._scan_home_layer`, flat manifests parsed with PyYAML like the agent (`_models_cache_plugin_fingerprint`) | The loader execs plugin code that builds `fallback_models`, so any file edit must invalidate, even without a `version` bump. |
 | `catalog` | baked-in provider catalog sha256 (`_PROVIDER_MODELS` + `_PROVIDER_DISPLAY`) plus the Codex local catalog (`_codex_models_cache_fingerprint`, `_CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS`) | A restart after a catalog change must not keep serving a persisted payload for up to 24h (#2443). Codex rewrites `~/.codex/models_cache.json` on its own timer, bumping `mtime_ns` and size while models, `etag`, and `client_version` stay identical, so the Codex axis hashes **content** with only the refresh timestamps (`fetched_at`, `updated_at`) removed (#7540, #7556). |
+
+The over-budget stale fallback (`_load_stale_models_cache_from_disk`) tolerates a stale
+`_webui_version` but never a source-fingerprint mismatch: such a snapshot is a wrong catalog.
 
 ## Invariant: deny-lists are one-directional
 

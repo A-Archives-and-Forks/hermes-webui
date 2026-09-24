@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,7 +33,6 @@ def env(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
     monkeypatch.setattr(profiles._tls, "profile", None, raising=False)
     monkeypatch.setattr(cfg, "_models_cache_path", tmp_path / "models_cache.json")
-    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_invoke_models_rebuild", lambda _builder: _catalog("fresh-model"))
     for attr in ("_cfg_mtime", "_cfg_path", "_cfg_fingerprint"):
         monkeypatch.setattr(cfg, attr, getattr(cfg, attr), raising=False)
@@ -74,10 +74,10 @@ def _switch_to_demo_and_fetch() -> str:
     return _fetch_as_demo()["default_model"]
 
 
-def _write_plugin(home: Path, version: str = "1.0.0", *, flat: bool = False, code: str | None = None, sub: str | None = None) -> Path:
+def _write_plugin(home: Path, version: str = "1.0.0", *, flat: bool = False, code: str | None = None, sub: str | None = None, kind: str = "model-provider") -> Path:
     d = home / "plugins" / ("" if flat else "model-providers") / "acme"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "plugin.yaml").write_text(f"name: acme\nkind: model-provider\nversion: {version}\n", encoding="utf-8")
+    (d / "plugin.yaml").write_text(f"name: acme\nkind: {kind}\nversion: {version}\n", encoding="utf-8")
     for name, text in (("__init__.py", code), ("models.py", sub)):
         if text is not None:
             (d / name).write_text(text, encoding="utf-8")
@@ -92,13 +92,15 @@ def _env(text: str):
 # (id, source state before the snapshot is saved, change made after it, model served after the switch)
 _CASES = [
     ("unchanged", None, None, "snapshot-model"),
-    ("env-value-rotated", _env("DEEPSEEK_API_KEY=sk-one\n"), _env("DEEPSEEK_API_KEY=sk-two\n"), "snapshot-model"),
+    ("env-value-rotated", _env("DEEPSEEK_API_KEY=sk-one\n"), _env("DEEPSEEK_API_KEY=sk-two\n"), "fresh-model"),
+    ("env-base-url-changed", _env("LM_BASE_URL=http://127.0.0.1:1234/v1\n"), _env("LM_BASE_URL=http://127.0.0.1:5678/v1\n"), "fresh-model"),
     ("env-key-added", None, _env("DEEPSEEK_API_KEY=sk-new\n"), "fresh-model"),
     ("env-key-removed", _env("DEEPSEEK_API_KEY=sk-old\nOTHER=1\n"), _env("OTHER=1\n"), "fresh-model"),
     # provider detection reads `export KEY=` as key `export KEY`, so the credential is gone
     ("env-export-prefix", _env("DEEPSEEK_API_KEY=sk-old\n"), _env("export DEEPSEEK_API_KEY=sk-old\n"), "fresh-model"),
     ("plugin-installed", None, lambda h: _write_plugin(h), "fresh-model"),
     ("plugin-installed-flat", None, lambda h: _write_plugin(h, flat=True), "fresh-model"),
+    ("plugin-installed-flat-yaml-comment", None, lambda h: _write_plugin(h, flat=True, kind="model-provider # valid YAML comment"), "fresh-model"),
     ("plugin-removed", lambda h: _write_plugin(h), lambda h: shutil.rmtree(h / "plugins"), "fresh-model"),
     ("plugin-version-bumped", lambda h: _write_plugin(h, flat=True), lambda h: _write_plugin(h, "2.0.0", flat=True), "fresh-model"),
     ("plugin-code-edited", lambda h: _write_plugin(h, code="M = (1,)\n"), lambda h: (h / "plugins/model-providers/acme/__init__.py").write_text("M = (1, 2)\n"), "fresh-model"),
@@ -116,6 +118,52 @@ def test_switch_serves_snapshot_only_while_sources_are_unchanged(env, before, ch
         change(env.home)
     assert _switch_to_demo_and_fetch() == expected
     assert "sk-" not in env.cache.read_text(encoding="utf-8")  # the fingerprint never records a secret
+
+
+@pytest.mark.parametrize("change", [_env("LM_BASE_URL=http://127.0.0.1:5678/v1\n"), lambda h: _write_plugin(h, flat=True)], ids=["env", "plugin"])
+def test_slow_rebuild_never_serves_fingerprint_mismatched_snapshot_as_stale_fallback(env, monkeypatch, change):
+    _env("LM_BASE_URL=http://127.0.0.1:1234/v1\n")(env.home)
+    _save_demo_snapshot(env)
+    change(env.home)
+    profiles.set_request_profile("demo")
+    try:
+        assert cfg._load_models_cache_from_disk() is None
+        assert cfg._load_stale_models_cache_from_disk() is None
+    finally:
+        profiles.clear_request_profile()
+    release = threading.Event()
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", lambda _b: release.wait(5) and _catalog("fresh-model"))
+    try:
+        assert _switch_to_demo_and_fetch() != "snapshot-model"
+    finally:
+        release.set()
+
+
+def test_stale_fallback_still_serves_snapshot_when_only_webui_version_differs(env, monkeypatch):
+    _save_demo_snapshot(env)
+    monkeypatch.setattr(cfg, "_current_webui_version", lambda: "v-other")
+    profiles.set_request_profile("demo")
+    try:
+        assert cfg._load_models_cache_from_disk() is None
+        assert cfg._load_stale_models_cache_from_disk()["default_model"] == "snapshot-model"
+    finally:
+        profiles.clear_request_profile()
+
+
+@pytest.mark.parametrize("manifest", [
+    "kind: model-provider # valid YAML comment\n",
+    "kind: model-provider\n",
+    "kind: 'model-provider'\n",
+    "name: x\nkind: tool\n",
+    "meta:\n  kind: model-provider\n",
+    "# kind: model-provider\n",
+    "kind: [unclosed\nkind: model-provider\n",
+])
+def test_manifest_kind_parse_matches_agent(tmp_path, manifest):
+    agent = pytest.importorskip("providers")
+    (tmp_path / "plugin.yaml").write_text(manifest, encoding="utf-8")
+    assert cfg._declares_model_provider_kind(tmp_path) == agent._declares_model_provider_kind(tmp_path)
 
 
 def test_same_profile_config_edit_still_deletes_disk_cache(env, monkeypatch):
@@ -147,7 +195,17 @@ def test_env_fingerprint_keys_match_provider_env_loader(env):
 
     _env("export A=1\nB='x'\nC=\n# D=1\n")(env.home)
     loaded = sorted(k for k, v in _load_env_file(env.home / ".env").items() if v)
-    assert cfg._models_cache_env_fingerprint(env.home / ".env") == loaded
+    fp = cfg._models_cache_env_fingerprint(env.home / ".env")
+    assert [k for k, _ in fp] == loaded
+    assert all(len(h) == 64 and h not in ("1", "x") for _, h in fp)
+
+
+def test_env_fingerprint_is_keyed_not_a_plain_value_hash(env):
+    import hashlib
+
+    _env("DEEPSEEK_API_KEY=sk-secret\n")(env.home)
+    (_, digest), = cfg._models_cache_env_fingerprint(env.home / ".env")
+    assert digest != hashlib.sha256(b"sk-secret").hexdigest()
 
 
 def test_plugin_bytecode_cache_does_not_churn_fingerprint(env):

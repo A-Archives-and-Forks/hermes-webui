@@ -44,6 +44,15 @@
 
 ### Fixed
 
+- **Gateway-backend turns survive a WebUI restart.** With the Gateway runs API enabled
+  (`HERMES_WEBUI_CHAT_BACKEND=gateway` + `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`), the Gateway
+  runs the turn, but restarting the WebUI still marked it interrupted, because the Gateway `run_id`
+  only lived in process memory. The run is now saved on the session as soon as the Gateway admits
+  it, with an `Idempotency-Key` so the Gateway keeps a durable record. On startup the WebUI
+  reattaches: it follows `GET /v1/runs/{id}` until the run settles and writes the real final
+  answer back. Text streamed before the restart isn't replayed; the settled answer replaces it.
+  Stop on a reattached turn goes to the Gateway that owns the run. Thanks @carlotestor. (#7785)
+
 - **Fewer self-inflicted console errors: git badge on CLI/subagent sessions, pollers after a
   profile switch, and the PWA startup preload.** Three separate sources of noise in DevTools, all
   caused by the WebUI itself. `/api/git-info` returned 404 for any session without a WebUI sidecar

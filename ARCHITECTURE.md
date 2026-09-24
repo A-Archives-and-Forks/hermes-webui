@@ -278,6 +278,26 @@ visibility stage decides whether recovered background rows are shown. In
 are merged; cross-profile scoping, visibility, deduplication, and final route
 limits remain downstream responsibilities.
 
+#### Compression lineage and session-list invalidation
+
+`api.agent_sessions._is_continuation_session()` is the shared classifier for
+sidebar projection, lineage metadata/reporting, and `state.db` transcript
+stitching. It uses the direct parent link, no conflicting non-empty source,
+`compression` or `cli_close` parent end reason, and the existing two-second
+`started_at` overlap allowance. A `source="tool"` child is always a separate
+conversation, even when its parent is also a tool session or has no source.
+A direct `_branched_from`, `_delegate_from`, or `_reset_from` marker in the
+child's `model_config` also makes a boundary; inherited ancestor markers do
+not. Malformed or unverifiable marker evidence fails closed as a boundary.
+The overlap allowance is the existing master policy, not a new window set by
+this change.
+
+The gateway watcher's cheap database fingerprint includes `model_config`, so
+a marker-only update causes a fresh projection. Its published-payload hash
+covers every emitted session field, not just ID, activity time and message
+count; a changed projected title or lineage field can therefore emit
+`sessions_changed` even without message-row churn.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:

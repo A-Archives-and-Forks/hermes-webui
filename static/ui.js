@@ -16640,7 +16640,8 @@ function _processWakeupCardHtml(info, rawText, extras){
 
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
-  if(!(options&&options._internalMeasurement)){ _resetMessageVirtualMeasurementBurst(); }
+  // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
+  if(!(options&&options._internalMeasurement) && typeof _resetMessageVirtualMeasurementBurst==='function'){ _resetMessageVirtualMeasurementBurst(); }
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has

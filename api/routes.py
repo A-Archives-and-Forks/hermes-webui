@@ -29346,17 +29346,34 @@ def _parse_mcp_enabled(value) -> bool:
     return True
 
 
-def _mcp_runtime_status_by_name() -> dict[str, dict]:
+def _mcp_runtime_status_by_name(servers=None, view=None) -> dict[str, dict]:
     """Return already-known MCP runtime status without starting servers.
 
     ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
     configuration; it does not probe or spawn MCP subprocesses. If Hermes Agent
     is unavailable, fall back to an empty map so the API remains safe.
+
+    Call it inside ``mcp_runtime_scope()`` and pass its ``view``: the agent
+    filters a routed profile's connections itself, but its launch-profile view
+    is process-wide, so rows are narrowed to the connections serving ``view``
+    (``api.mcp_runtime.filter_runtime_status_to_view``). ``servers`` (the
+    profile's ``mcp_servers`` WebUI displays) is passed as ``configured`` when
+    supported so both read the same config.
     """
     try:
         from api.agent_compat import agent_attr
+        from api.mcp_runtime import accepts_keywords, filter_runtime_status_to_view
         get_mcp_status = agent_attr("tools.mcp_tool", "get_mcp_status", "tools.mcp_tool_discovery")
-        statuses = get_mcp_status()
+        if isinstance(servers, dict) and accepts_keywords(get_mcp_status, "configured"):
+            # Invalid entries are summarized as invalid_config by WebUI; keep them
+            # out of the agent call so one bad entry cannot blank every status.
+            statuses = get_mcp_status(configured={
+                str(name): scfg for name, scfg in servers.items() if isinstance(scfg, dict)
+            })
+        else:
+            statuses = get_mcp_status()
+        if view is not None and isinstance(statuses, list):
+            statuses = filter_runtime_status_to_view(statuses, view)
     except Exception:
         return {}
     if not isinstance(statuses, list):
@@ -29539,10 +29556,18 @@ def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
     return tools
 
 
-def _mcp_tools_from_registry(server_summaries):
-    """Read already-registered MCP tool schemas without probing MCP servers."""
+def _mcp_tools_from_registry(server_summaries, view=None):
+    """Read already-registered MCP tool schemas without probing MCP servers.
+
+    With a profile ``view`` (see ``api.mcp_runtime``), only tools registered in
+    that profile's own registry slot are listed. The slot is the isolation check;
+    the raw ``mcp_servers`` config is not an allowlist: the agent merges portable
+    plugin servers into the running config at runtime, and their tools are
+    registered in the same slot without a ``config.yaml`` entry.
+    """
     try:
         from tools.registry import registry
+        from api.mcp_runtime import registry_tool_owned_by_view
     except Exception:
         return []
     tools = []
@@ -29558,6 +29583,10 @@ def _mcp_tools_from_registry(server_summaries):
         if not isinstance(toolset, str) or not toolset.startswith("mcp-"):
             continue
         server_name = toolset[len("mcp-"):]
+        if view is not None and not view.legacy and not registry_tool_owned_by_view(
+            registry, tool_name, view
+        ):
+            continue
         schema = registry.get_schema(tool_name) or {}
         server_summary = server_summaries.get(server_name, {
             "name": server_name,
@@ -29569,22 +29598,45 @@ def _mcp_tools_from_registry(server_summaries):
     return tools
 
 
+def _mcp_profile_runtime_inventory(servers, purpose, *, include_tools=True):
+    """Build server summaries and tools from ONE runtime view of the request profile.
+
+    Status, tool count and inventory are all read inside the same
+    ``mcp_runtime_scope()`` so they describe the same profile's connections.
+    When that profile scope cannot be confirmed, runtime data is withheld rather
+    than showing another profile's connection. Passive: never starts or probes
+    MCP servers.
+    """
+    from api.mcp_runtime import mcp_runtime_scope
+
+    runtime = {}
+    tools = []
+    source = "none"
+    with mcp_runtime_scope(purpose) as view:
+        if view.trusted:
+            runtime = _mcp_runtime_status_by_name(servers, view)
+        server_summaries = {
+            str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+            for name, scfg in servers.items()
+        }
+        if include_tools and view.trusted:
+            tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+            source = "mcp_runtime_status"
+            if not tools:
+                tools = _mcp_tools_from_registry(server_summaries, view)
+                source = "tool_registry" if tools else "none"
+    return server_summaries, tools, source, view.scope_label
+
+
 def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
     cfg = get_config_for_profile_home(get_active_hermes_home())
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
-    server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
-        for name, scfg in servers.items()
-    }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
-    source = "mcp_runtime_status"
-    if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
-        source = "tool_registry" if tools else "none"
+    server_summaries, tools, source, runtime_scope = _mcp_profile_runtime_inventory(
+        servers, "/api/mcp/tools"
+    )
     tools.sort(key=lambda row: (row.get("server", ""), row.get("name", "")))
     unavailable_servers = [
         summary["name"] for summary in server_summaries.values()
@@ -29595,6 +29647,7 @@ def _handle_mcp_tools_list(handler):
         "total": len(tools),
         "source": source,
         "inventory_scope": "already_known_runtime_only",
+        "runtime_scope": runtime_scope,
         "unavailable_servers": unavailable_servers,
     })
 
@@ -29784,21 +29837,15 @@ def _handle_notes_sources_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
-    server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
-        for name, scfg in servers.items()
-    }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
-    source = "mcp_runtime_status"
-    if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
-        source = "tool_registry" if tools else "none"
+    server_summaries, tools, source, runtime_scope = _mcp_profile_runtime_inventory(
+        servers, "/api/notes/sources"
+    )
     return j(handler, {
         "enabled": True,
         "sources": _notes_sources_from_mcp_inventory(server_summaries, tools),
         "source": source,
         "inventory_scope": "already_known_runtime_only",
+        "runtime_scope": runtime_scope,
         "attach_supported": False,
         "automatic_recall_unchanged": True,
         "recent_ai_notes": _joplin_recent_ai_notes(limit=6),
@@ -30089,15 +30136,14 @@ def _handle_mcp_servers_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
-    result = [
-        _server_summary(name, scfg, runtime.get(str(name)))
-        for name, scfg in servers.items()
-    ]
+    server_summaries, _tools, _source, runtime_scope = _mcp_profile_runtime_inventory(
+        servers, "/api/mcp/servers", include_tools=False
+    )
     return j(handler, {
-        "servers": result,
+        "servers": list(server_summaries.values()),
         "toggle_supported": True,
         "reload_required": True,
+        "runtime_scope": runtime_scope,
     })
 
 

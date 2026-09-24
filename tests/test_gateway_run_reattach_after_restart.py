@@ -1,5 +1,4 @@
 """A gateway-owned run must survive a WebUI restart instead of being marked interrupted."""
-import contextlib
 from collections import OrderedDict
 import io
 import json
@@ -7,7 +6,6 @@ import os
 import threading
 import urllib.error
 from email.message import Message
-from unittest import mock
 
 import pytest
 
@@ -266,36 +264,40 @@ def test_reattach_skips_idle_sidecars_without_parsing_them(isolated_sessions, mo
 
 
 @pytest.mark.parametrize("default_backend", ["gateway", "local"])
-def test_reattach_resolves_gateway_from_the_session_profile(isolated_sessions, monkeypatch, default_backend):
-    """The process may restart under another default profile, even a local one; poll the session profile's gateway."""
+@pytest.mark.parametrize("session_profile, process_profile", [("default", "work"), ("work", "default")])
+def test_reattach_resolves_gateway_from_the_session_profile(
+    isolated_sessions, tmp_path, monkeypatch, default_backend, session_profile, process_profile,
+):
+    """Poll the session profile's own gateway, root included, whatever profile the process restarted under."""
+    root = tmp_path / "hermes"
+    for name, home in (("default", root), ("work", root / "profiles" / "work")):
+        home.mkdir(parents=True, exist_ok=True)
+        (home / ".env").write_text(
+            f"HERMES_WEBUI_GATEWAY_BASE_URL=http://{name}-gateway:8642\nHERMES_WEBUI_GATEWAY_API_KEY={name}-key\n"
+        )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
+    monkeypatch.setattr(profiles, "_active_profile", process_profile)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL")
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    profiles._reload_dotenv(root if process_profile == "default" else root / "profiles" / "work")
     if default_backend == "local":
         monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND")
         monkeypatch.delenv("HERMES_WEBUI_GATEWAY_USE_RUNS_API")
     sid, stream_id = _orphaned_gateway_turn()
     s = models.Session.load(sid)
-    s.profile = "work"
+    s.profile = session_profile
     s.save(touch_updated_at=False)
     models.SESSIONS.clear()
-    scopes = []
-
-    @contextlib.contextmanager
-    def fake_scope(profile_name, purpose="", logger_override=None):
-        scopes.append(profile_name)
-        with mock.patch.dict(os.environ, {
-            "HERMES_WEBUI_GATEWAY_BASE_URL": f"http://{profile_name}-gateway:8642",
-            "HERMES_WEBUI_GATEWAY_API_KEY": f"{profile_name}-key",
-        }):
-            yield
-
-    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
-    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "default-key")
     seen = _poll_until_completed(monkeypatch)
 
+    assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == f"{process_profile}-key"
     assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
     _wait_for_reattach_threads()
 
-    assert scopes == ["work"]
-    assert {(b, k, r) for b, k, r in seen} == {("http://work-gateway:8642", "work-key", "run_survivor")}
+    assert {(b, k, r) for b, k, r in seen} == {
+        (f"http://{session_profile}-gateway:8642", f"{session_profile}-key", "run_survivor"),
+    }
     saved = _saved(sid)
     assert saved["messages"][-1]["content"] == "answer"
     assert saved["active_stream_id"] is None and saved["gateway_run"] is None
@@ -398,3 +400,33 @@ def test_failed_recovery_checkpoint_never_admits_the_run(isolated_sessions, monk
 
     gateway_chat._run_gateway_chat_streaming(s.session_id, "hi", "test-model", "/tmp", stream_id, [])
     assert stream_id not in STREAMS
+
+
+@pytest.mark.parametrize("stopped_by", ["user", "gateway"])
+def test_cancelled_replayed_admission_keeps_the_prompt_and_is_not_reattached(isolated_sessions, monkeypatch, stopped_by):
+    sid, stream_id = _orphaned_gateway_turn(run_id="")
+    s = models.Session.load(sid)
+    s.gateway_run["request"] = {"input": "long task"}
+    s.save(touch_updated_at=False)
+    models.SESSIONS.clear()
+    monkeypatch.setattr(gateway_chat, "_admit_gateway_run", lambda *a, **k: "run_replayed")
+    state = "running" if stopped_by == "user" else "cancelled"
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {"run_id": r, "status": state})
+    monkeypatch.setattr(gateway_chat, "stop_gateway_run", lambda run_id: True)
+
+    assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
+    if stopped_by == "user":
+        assert gateway_chat.wait_for_gateway_run_id(stream_id, 5.0) == (True, "run_replayed")
+        assert streaming.cancel_stream(stream_id)
+    _wait_for_reattach_threads()
+
+    saved = _saved(sid)
+    assert [(m["role"], m["content"]) for m in saved["messages"][:3]] == [
+        ("user", "earlier"), ("assistant", "earlier reply"), ("user", "long task"),
+    ]
+    assert len(saved["messages"]) == 4 and saved["messages"][3]["_error"] is True
+    assert "Task cancelled" in saved["messages"][3]["content"]
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
+    assert saved["pending_user_message"] is None
+    models.SESSIONS.clear()
+    assert gateway_chat.resume_gateway_runs_after_restart() == []

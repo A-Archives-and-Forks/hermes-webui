@@ -979,9 +979,19 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
-def _resume_gateway_run_for_session(session) -> bool:
+def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
+    """URL and key of the session's own profile, root included, never the process-active profile."""
     from api import profiles as _profiles
-    from api.config import create_stream_channel, get_config, register_session_writeback_owner, register_stream_owner
+    from api.config import get_config_for_profile_home
+
+    home = _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
+    environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
+    environ.update(_profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home)))
+    return _gateway_base_url(get_config_for_profile_home(home), environ), _gateway_api_key(environ)
+
+
+def _resume_gateway_run_for_session(session) -> bool:
+    from api.config import create_stream_channel, register_session_writeback_owner, register_stream_owner
 
     run = (session.gateway_run if session is not None else None) or {}
     stream_id = str(run.get("stream_id") or "")
@@ -989,9 +999,7 @@ def _resume_gateway_run_for_session(session) -> bool:
     if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
         return False
     sid = session.session_id
-    # URL and key come together from the session's profile, never the process default.
-    with _profiles.profile_scope_for_detached_worker(session.profile, "gateway reattach", logger_override=logger):
-        endpoint = (_gateway_base_url(get_config()), _gateway_api_key())
+    endpoint = _gateway_endpoint_for_profile(session.profile)
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
@@ -1080,6 +1088,19 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if terminal_session_persisted:
             error_payload["terminal_session_persisted_session_id"] = session.session_id
         return error_payload
+
+
+def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
+    """Keep the prompt and a cancel marker when the run ended cancelled and Stop did not already settle it."""
+    from api.streaming import _persist_cancelled_turn
+
+    with _get_session_agent_lock(session_id):
+        session = get_session(session_id)
+        if not _stream_writeback_is_current(session, stream_id):
+            return
+        _persist_cancelled_turn(session, message="Cancelled by gateway")
+        session.gateway_run = None
+        session.save()
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -1318,6 +1339,7 @@ def _run_gateway_chat_streaming(
                 put_gateway_event("apperror", error_payload)
                 return
             if final_text is None:
+                _settle_gateway_cancelled_turn(session_id, stream_id)
                 return
         else:
             # Legacy gateway path: emit unsupported approval notice once per session,

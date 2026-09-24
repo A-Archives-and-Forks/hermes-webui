@@ -123,6 +123,9 @@ var _approvalFallbackPollInFlight = false, _approvalPollingSessionId = 'sid1';
 var _clarifyEventSource = null, _clarifyFallbackTimer = null, _clarifyHealthTimer = null;
 var _clarifyFallbackPollInFlight = false, _clarifyPollingSessionId = null, _clarifyMissingEndpointWarned = false;
 var _approvalPendingBySession = new Map();
+var _approvalProfilePausedSessionId = null, _clarifyProfilePausedSessionId = null;
+function _approvalPromptGeneration(){ return 0; }
+function _clarifyPromptGeneration(){ return 0; }
 function _approvalPollingSessionMissingOrMismatched(sid){ return !sid || !S.session || S.session.session_id !== sid; }
 function _hideApprovalCardIfOwner(){ calls.hide++; }
 function _hideClarifyCardIfOwner(){ calls.hide++; }
@@ -256,3 +259,79 @@ def test_stale_profile_mismatch_does_not_stop_replacement_poller(start_fn, stop_
     assert r["polling"] == "sid1", "a late 409 from a replaced poller must not stop its successor"
     assert r["timerAlive"] is True
     assert r["inFlight"] is True, "the successor's in-flight guard must not be cleared by the stale request"
+
+
+def _run_profile_round_trip(kind):
+    """Mismatch 409 pauses the poller; the cookie comes back, focus returns, and
+    the pending prompt for the still-open session must be fetched and shown."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    approval = kind == "approval"
+    fns = [
+        _extract_fn(SESSIONS_JS, "_sessionProfileMismatchFromError"),
+        _extract_fn(MESSAGES_JS, "startApprovalPolling"),
+        _extract_fn(MESSAGES_JS, "_startApprovalFallbackPoll"),
+        _extract_fn(MESSAGES_JS, "stopApprovalPollingForSession"),
+        _extract_fn(MESSAGES_JS, "stopApprovalPolling"),
+        _extract_fn(MESSAGES_JS, "startClarifyPolling"),
+        _extract_fn(MESSAGES_JS, "_startClarifyFallbackPoll"),
+        _extract_fn(MESSAGES_JS, "stopClarifyPollingForSession"),
+        _extract_fn(MESSAGES_JS, "stopClarifyPolling"),
+        _extract_fn(MESSAGES_JS, "_resumeProfilePausedPromptPollers"),
+    ]
+    harness = _HARNESS.replace("STATUS", "409").replace("BODY", json.dumps(_MISMATCH))
+    harness = harness.replace("async function api(){", "var mismatch = true;\nasync function api(){\n  if (!mismatch) { calls.api++; return {pending: {id: 'p1'}}; }")
+    harness = harness.replace("function showApprovalForSession(){}", "function showApprovalForSession(){ calls.shown = (calls.shown||0) + 1; }")
+    harness = harness.replace("function showClarifyForSession(){}", "function showClarifyForSession(){ calls.shown = (calls.shown||0) + 1; }")
+    start = "startApprovalPolling" if approval else "startClarifyPolling"
+    timer = "_approvalPollTimer" if approval else "_clarifyFallbackTimer"
+    script = harness + "\n".join(fns) + f"""
+const tick = () => new Promise(r => setTimeout(r, 0));
+(async () => {{
+  {start}('sid1');
+  await tick();
+  const stoppedOnMismatch = {timer} === null;
+  _resumeProfilePausedPromptPollers();   // focus while still mismatched
+  await tick();
+  const stoppedAgain = {timer} === null;
+  const apiWhileMismatched = calls.api;
+  mismatch = false;                      // other tab switched the cookie back
+  _resumeProfilePausedPromptPollers();   // focus/visibility returns
+  await tick();
+  process.stdout.write(JSON.stringify({{stoppedOnMismatch, stoppedAgain, apiWhileMismatched,
+    api: calls.api, shown: calls.shown || 0, running: {timer} !== null}}));
+}})();
+"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.parametrize("kind", ["approval", "clarify"])
+def test_profile_round_trip_rearms_paused_poller_and_shows_pending(kind):
+    r = _run_profile_round_trip(kind)
+    assert r["stoppedOnMismatch"] is True
+    assert r["stoppedAgain"] is True, "a still-mismatched profile must stop the re-armed poller again"
+    assert r["apiWhileMismatched"] == 2
+    assert r["api"] == 3, "the poller must fetch again once the profile is back"
+    assert r["shown"] == 1, "the pending card must be shown after the profile round-trip"
+    assert r["running"] is True
+
+
+def test_resume_does_not_rearm_for_a_different_open_session():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    script = _HARNESS.replace("STATUS", "409").replace("BODY", "{}") + _extract_fn(
+        MESSAGES_JS, "_resumeProfilePausedPromptPollers") + """
+var started = 0;
+function startApprovalPolling(){ started++; }
+function startClarifyPolling(){ started++; }
+_approvalProfilePausedSessionId = 'old'; _clarifyProfilePausedSessionId = 'old';
+_resumeProfilePausedPromptPollers();
+process.stdout.write(String(started));
+"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout == "0"

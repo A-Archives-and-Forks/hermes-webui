@@ -430,3 +430,101 @@ def test_cancelled_replayed_admission_keeps_the_prompt_and_is_not_reattached(iso
     assert saved["pending_user_message"] is None
     models.SESSIONS.clear()
     assert gateway_chat.resume_gateway_runs_after_restart() == []
+
+
+def _two_profile_gateways(tmp_path, monkeypatch, process_profile):
+    root = tmp_path / "hermes"
+    for name, home in (("default", root), ("work", root / "profiles" / "work")):
+        home.mkdir(parents=True, exist_ok=True)
+        (home / ".env").write_text(
+            f"HERMES_WEBUI_GATEWAY_BASE_URL=http://{name}-gateway:8642\nHERMES_WEBUI_GATEWAY_API_KEY={name}-key\n"
+        )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
+    monkeypatch.setattr(profiles, "_active_profile", process_profile)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL")
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    profiles._reload_dotenv(root if process_profile == "default" else root / "profiles" / "work")
+
+
+def _reattach_under_profile(session_profile, run_id):
+    sid, stream_id = _orphaned_gateway_turn(run_id=run_id)
+    s = models.Session.load(sid)
+    s.profile = session_profile
+    s.save(touch_updated_at=False)
+    models.SESSIONS.clear()
+    assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
+    assert gateway_chat.wait_for_gateway_run_id(stream_id, 5.0) == (True, run_id)
+    return sid, stream_id
+
+
+@pytest.mark.parametrize("session_profile, process_profile", [("default", "work"), ("work", "default")])
+def test_stop_reaches_the_gateway_that_owns_a_reattached_run(
+    isolated_sessions, tmp_path, monkeypatch, session_profile, process_profile,
+):
+    _two_profile_gateways(tmp_path, monkeypatch, process_profile)
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {"run_id": r, "status": "running"})
+    sent = []
+
+    class _Resp(io.BytesIO):
+        status = 200
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            sent.append((req.full_url, req.get_header("Authorization")))
+            resp = _Resp(b"{}")
+            resp.geturl = lambda: req.full_url
+            return resp
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "build_opener", lambda *a: _Opener())
+    _sid, stream_id = _reattach_under_profile(session_profile, "run_to_stop")
+
+    assert gateway_chat.stop_gateway_run("run_to_stop")
+    assert streaming.cancel_stream(stream_id)
+    _wait_for_reattach_threads()
+
+    assert sent == [
+        (f"http://{session_profile}-gateway:8642/v1/runs/run_to_stop/stop", f"Bearer {session_profile}-key"),
+    ]
+    assert stream_id not in gateway_chat._STREAM_ENDPOINTS
+
+
+@pytest.mark.parametrize("session_profile, process_profile", [("default", "work"), ("work", "default")])
+def test_approval_reply_reaches_the_gateway_that_owns_a_reattached_run(
+    isolated_sessions, tmp_path, monkeypatch, session_profile, process_profile,
+):
+    from unittest.mock import MagicMock
+
+    import api.route_approvals as approvals
+    import api.runner_client as runner_client
+    from api import config, routes
+
+    _two_profile_gateways(tmp_path, monkeypatch, process_profile)
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {
+        "run_id": r, "status": "waiting_for_approval",
+        "approval": {"event": "approval.request", "approval_id": "appr-1", "command": "rm -rf build", "description": "d"},
+    })
+    monkeypatch.setattr(config, "gateway_supports_approval_identity_v1", lambda *a, **k: True)
+    replies = []
+
+    def fake_respond(self, run_id, approval_id, choice):
+        replies.append((self.base_url, self.api_key, run_id, approval_id, choice))
+        return {"ok": True}
+
+    monkeypatch.setattr(runner_client.HttpRunnerClient, "respond_approval", fake_respond)
+    sid, stream_id = _reattach_under_profile(session_profile, "run_parked")
+    try:
+        for _ in range(500):
+            if approvals.gateway_pending_mirror(sid, approval_id="appr-1", run_id="run_parked"):
+                break
+            threading.Event().wait(0.01)
+        handler = MagicMock()
+        handler.wfile = io.BytesIO()
+        routes._handle_approval_respond(handler, {"session_id": sid, "choice": "once", "approval_id": "appr-1"})
+
+        handler.send_response.assert_called_with(200)
+        assert replies == [(f"http://{session_profile}-gateway:8642", f"{session_profile}-key", "run_parked", "appr-1", "once")]
+    finally:
+        streaming.cancel_stream(stream_id)
+        _wait_for_reattach_threads()
+        approvals._pending.pop(sid, None)

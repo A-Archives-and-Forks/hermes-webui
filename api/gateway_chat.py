@@ -47,6 +47,21 @@ _STREAM_RUN_IDS: dict[str, str] = {}
 _STREAM_RUN_LIFECYCLE: dict[str, dict[str, Any]] = {}
 _STREAM_RUN_STARTING_CONDITION = threading.Condition()
 GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
+# stream_id -> (base_url, api_key) of the Gateway the stream's run lives on, for Stop
+# and approval replies; a reattached run's Gateway need not be the process profile's.
+_STREAM_ENDPOINTS: dict[str, tuple[str, str]] = {}
+
+
+def gateway_run_endpoint(run_id: str) -> tuple[str, str]:
+    """URL and key of the Gateway that owns run_id; the process Gateway if no live stream holds it."""
+    run_id = str(run_id or "").strip()
+    with _STREAM_RUN_STARTING_CONDITION:
+        for stream_id, mapped in list(_STREAM_RUN_IDS.items()):
+            if run_id and mapped == run_id and stream_id in _STREAM_ENDPOINTS:
+                return _STREAM_ENDPOINTS[stream_id]
+    from api.config import get_config
+
+    return _gateway_base_url(get_config()), _gateway_api_key()
 
 
 def _mark_gateway_run_starting(stream_id: str) -> None:
@@ -820,11 +835,7 @@ def stop_gateway_run(run_id: str) -> bool:
     run_id = str(run_id or "").strip()
     if not run_id:
         return False
-    from api.config import get_config
-
-    cfg = get_config()
-    base_url = _gateway_base_url(cfg)
-    api_key = _gateway_api_key()
+    base_url, api_key = gateway_run_endpoint(run_id)
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1234,6 +1245,8 @@ def _run_gateway_chat_streaming(
             model_provider=model_provider,
         )
         base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        with _STREAM_RUN_STARTING_CONDITION:
+            _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
             from api.config import _main_model_request_overrides
             _gw_overrides = _main_model_request_overrides(
@@ -1778,6 +1791,8 @@ def _run_gateway_chat_streaming(
         if runs_api_pending_marked and gateway_run_id_pending(stream_id):
             _finish_gateway_run_starting(stream_id)
         _clear_gateway_run_starting(stream_id)
+        with _STREAM_RUN_STARTING_CONDITION:
+            _STREAM_ENDPOINTS.pop(stream_id, None)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this

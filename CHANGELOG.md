@@ -39,6 +39,12 @@
 
 ### Fixed
 
+- **Picking a model from a named custom provider sends the right model name.** Choosing a model
+  that belongs to a non-default custom provider (for example `@custom:my-server:model-x`) sent
+  the whole picker id, prefix included, to the provider, which rejected the request. The
+  `@custom:<slug>:` prefix is now stripped before sending and the provider is routed from the
+  slug. Endpoint-style slugs such as `custom:localhost:11434` keep their host and port.
+  (#6895 by @webtecnica, fixes #6884)
 - **A gateway reset or tool conversation no longer disappears into the parent session.** When a
   session ended by compression, the sidebar also treated a gateway reset child (stamped
   `_reset_from`) as its continuation, so that separate conversation vanished from the list and its

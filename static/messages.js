@@ -8139,6 +8139,9 @@ let _approvalSSEHealthTimer = null;
 let _approvalPollingSessionId = null;
 // Session whose poller stopped on a profile-mismatch 409; re-armed on focus/visibility.
 let _approvalProfilePausedSessionId = null;
+// Bumped on every focus/visibility return. A mismatch 409 for a request that began before
+// the latest return may predate a cookie switch-back, so it earns one retry before pausing.
+let _promptPollerFocusEpoch = 0;
 
 function _startApprovalFallbackPoll(sid) {
   _approvalProfilePausedSessionId = null;
@@ -8151,6 +8154,7 @@ function _startApprovalFallbackPoll(sid) {
     }
     if (_approvalFallbackPollInFlight) return;
     _approvalFallbackPollInFlight = true;
+    const focusEpoch = _promptPollerFocusEpoch;
     try {
       const generation = _approvalPromptGeneration(sid);
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
@@ -8172,8 +8176,9 @@ function _startApprovalFallbackPoll(sid) {
       // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
       if (typeof _sessionProfileMismatchFromError === 'function' && _sessionProfileMismatchFromError(e)
           && _approvalPollTimer === pollTimer) {
-        stopApprovalPolling();
-        _approvalProfilePausedSessionId = sid;
+        // Focus returned mid-request: the cookie may be back, so retry once (after finally).
+        if (focusEpoch !== _promptPollerFocusEpoch) queueMicrotask(_tick);
+        else { stopApprovalPolling(); _approvalProfilePausedSessionId = sid; }
       }
     }
     finally { if (_approvalPollTimer === pollTimer) _approvalFallbackPollInFlight = false; }
@@ -9337,6 +9342,7 @@ function _startClarifyFallbackPoll(sid) {
     }
     if (_clarifyFallbackPollInFlight) return;
     _clarifyFallbackPollInFlight = true;
+    const focusEpoch = _promptPollerFocusEpoch;
     try {
       const generation = _clarifyPromptGeneration(sid);
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
@@ -9363,8 +9369,8 @@ function _startClarifyFallbackPoll(sid) {
       // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
       if (typeof _sessionProfileMismatchFromError === "function" && _sessionProfileMismatchFromError(e)) {
         if (_clarifyFallbackTimer === pollTimer) {
-          stopClarifyPolling();
-          _clarifyProfilePausedSessionId = sid;
+          if (focusEpoch !== _promptPollerFocusEpoch) queueMicrotask(_tick);
+          else { stopClarifyPolling(); _clarifyProfilePausedSessionId = sid; }
         }
         return;
       }
@@ -9441,6 +9447,7 @@ function stopClarifyPolling() {
 // profile just 409s once and pauses them again.
 function _resumeProfilePausedPromptPollers() {
   if (typeof document !== 'undefined' && document.hidden) return;
+  _promptPollerFocusEpoch++;
   const current = (S.session && S.session.session_id) || null;
   const approvalSid = _approvalProfilePausedSessionId;
   const clarifySid = _clarifyProfilePausedSessionId;

@@ -124,6 +124,7 @@ var _clarifyEventSource = null, _clarifyFallbackTimer = null, _clarifyHealthTime
 var _clarifyFallbackPollInFlight = false, _clarifyPollingSessionId = null, _clarifyMissingEndpointWarned = false;
 var _approvalPendingBySession = new Map();
 var _approvalProfilePausedSessionId = null, _clarifyProfilePausedSessionId = null;
+var _promptPollerFocusEpoch = 0;
 function _approvalPromptGeneration(){ return 0; }
 function _clarifyPromptGeneration(){ return 0; }
 function _approvalPollingSessionMissingOrMismatched(sid){ return !sid || !S.session || S.session.session_id !== sid; }
@@ -335,3 +336,68 @@ process.stdout.write(String(started));
     out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     assert out.stdout == "0"
+
+
+def _run_late_409_after_focus(kind, cookie_back):
+    """The request starts under the old profile, focus returns while it is in flight,
+    then the old-profile 409 lands. The poller must retry once under the current
+    cookie instead of pausing for good; it pauses only if the retry also mismatches."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    approval = kind == "approval"
+    fns = [
+        _extract_fn(SESSIONS_JS, "_sessionProfileMismatchFromError"),
+        _extract_fn(MESSAGES_JS, "startApprovalPolling"),
+        _extract_fn(MESSAGES_JS, "_startApprovalFallbackPoll"),
+        _extract_fn(MESSAGES_JS, "stopApprovalPollingForSession"),
+        _extract_fn(MESSAGES_JS, "stopApprovalPolling"),
+        _extract_fn(MESSAGES_JS, "startClarifyPolling"),
+        _extract_fn(MESSAGES_JS, "_startClarifyFallbackPoll"),
+        _extract_fn(MESSAGES_JS, "stopClarifyPollingForSession"),
+        _extract_fn(MESSAGES_JS, "stopClarifyPolling"),
+        _extract_fn(MESSAGES_JS, "_resumeProfilePausedPromptPollers"),
+    ]
+    harness = _HARNESS.replace("STATUS", "409").replace("BODY", json.dumps(_MISMATCH))
+    harness = harness.replace("async function api(){", """var mismatch = true, releaseFirst = null;
+async function api(){
+  if (!releaseFirst) { await new Promise(r => { releaseFirst = r; }); return _mismatchThrow(); }
+  if (!mismatch) { calls.api++; return {pending: {id: 'p1'}}; }
+  return _mismatchThrow();
+}
+function _mismatchThrow(){""")
+    harness = harness.replace("function showApprovalForSession(){}", "function showApprovalForSession(){ calls.shown = (calls.shown||0) + 1; }")
+    harness = harness.replace("function showClarifyForSession(){}", "function showClarifyForSession(){ calls.shown = (calls.shown||0) + 1; }")
+    start = "startApprovalPolling" if approval else "startClarifyPolling"
+    timer = "_approvalPollTimer" if approval else "_clarifyFallbackTimer"
+    script = harness + "\n".join(fns) + f"""
+const tick = () => new Promise(r => setTimeout(r, 0));
+(async () => {{
+  {start}('sid1');
+  await tick();                          // first request is in flight under the old cookie
+  mismatch = {'false' if cookie_back else 'true'};   // other tab switches the cookie (back or not)
+  _resumeProfilePausedPromptPollers();   // focus returns: nothing paused yet, so nothing to restart
+  releaseFirst();                        // the late old-profile 409 lands
+  for (let i = 0; i < 5; i++) await tick();
+  process.stdout.write(JSON.stringify({{api: calls.api, shown: calls.shown || 0,
+    running: {timer} !== null}}));
+}})();
+"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.parametrize("kind", ["approval", "clarify"])
+def test_late_409_after_focus_retries_once_and_shows_pending(kind):
+    r = _run_late_409_after_focus(kind, cookie_back=True)
+    assert r["api"] == 2, "a 409 for a request that predates focus must be retried once"
+    assert r["shown"] == 1, "the pending prompt must be shown after the retry"
+    assert r["running"] is True, "polling must keep running after the successful retry"
+
+
+@pytest.mark.parametrize("kind", ["approval", "clarify"])
+def test_late_409_after_focus_pauses_when_retry_still_mismatches(kind):
+    r = _run_late_409_after_focus(kind, cookie_back=False)
+    assert r["shown"] == 0
+    assert r["running"] is False, "a retry that still mismatches must pause, not loop"

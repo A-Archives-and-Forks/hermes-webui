@@ -39,6 +39,13 @@
 
 ### Fixed
 
+- **Sessions archived in the CLI stay archived in the WebUI.** A cron, webhook, Kanban or CLI
+  session archived from the CLI came back as active in the sidebar whenever it had no WebUI sidecar,
+  because the projection treated a missing sidecar as "not archived". A missing sidecar now means no
+  opinion, so the state.db `archived` flag applies; archiving or unarchiving in the WebUI still wins.
+  In all-profiles mode, a CLI archive in another profile now refreshes the cached session list.
+  (#7548, #7798 by @webtecnica)
+
 - **Approval and clarify prompts send a browser notification whenever you aren't looking at them.**
   A card that surfaced through the normal prompt path never produced a notification, and the
   visibility gate muted cards in a tab that was visible but unfocused. Now every approval or clarify

@@ -81,7 +81,7 @@ def test_cli_archived_session_without_sidecar_retains_archived_state(tmp_path, m
     clear_cli_sessions_cache()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     try:
-        import api.profiles
+        import api.profiles  # noqa: F401  # makes the monkeypatch target below importable
         monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: str(tmp_path))
     except Exception:
         pass

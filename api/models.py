@@ -11727,6 +11727,16 @@ def _merge_session_messages_append_only_impl(
             ):
                 continue
             if row_id_fast_path_allowed:
+                # This state row replays the sidecar row it resolved to, so it
+                # consumes that position in the replay sequence exactly like the
+                # ordinary and multimodal-mirror paths do. Without this the
+                # checkpoint never reads as consumed and a later state-only
+                # reply after an edited checkpoint is truncated.
+                if (
+                    state_replay_idx < len(sidecar_visible_messages)
+                    and sidecar_visible_messages[state_replay_idx] is existing
+                ):
+                    state_replay_idx += 1
                 existing_api_content = _session_message_api_content_key(existing)
                 incoming_api_content = _session_message_api_content_key(msg)
                 if (

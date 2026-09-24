@@ -4067,6 +4067,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "tool_calls": tool_calls,
         "last_assistant_text": assistant_text,
         "last_reasoning_text": reasoning_text,
+        "runtime_model": runtime_model_from_events(session_id, stream_id, events),
         "activity_burst_anchors": activity_burst_anchors,
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,
@@ -7183,7 +7184,35 @@ def _context_length_lookup_inputs_for_model(
         if not effective_provider:
             effective_provider = _canonical_context_provider(model_cfg.get("provider"))
         if not effective_base_url:
-            effective_base_url = str(model_cfg.get("base_url") or "").strip()
+            # #7535: the global model.base_url may only fill an empty slot when
+            # the session provider IS the configured model.provider owner
+            # (mirror the ownership predicate used for model_cfg's API key in
+            # _context_length_config_api_key_for_provider). A built-in registry
+            # provider (empty base_url by design) must keep the slot empty so
+            # the registry endpoint resolves instead of another provider's URL.
+            #
+            # Two shapes cannot own the slot and therefore cannot conflict, so
+            # they keep master's backfill: a config that declares no provider
+            # at all (the profile-setup path writes model.base_url without one)
+            # and the two spellings of the same built-in id (opencode_go ==
+            # opencode-go), folded through api.config._canonicalise_provider_id
+            # so distinct custom:* slugs stay distinct.
+            _model_cfg_provider = _canonical_context_provider(model_cfg.get("provider"))
+            _owner_provider = _model_cfg_provider
+            _session_provider = effective_provider
+            try:
+                from api.config import _canonicalise_provider_id as _canon_provider_id
+
+                _owner_provider = _canon_provider_id(_owner_provider) or _owner_provider
+                _session_provider = _canon_provider_id(_session_provider) or _session_provider
+            except Exception:
+                pass
+            if (
+                not effective_provider
+                or not _model_cfg_provider
+                or _providers_match_for_context(_owner_provider, _session_provider)
+            ):
+                effective_base_url = str(model_cfg.get("base_url") or "").strip()
 
     custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
     if not isinstance(custom_providers, list):
@@ -9103,9 +9132,11 @@ def _parse_msg_limit(raw):
     """Parse and clamp the ``?msg_limit=`` query value.
 
     Returns a positive int clamped to ``[1, _MAX_MSG_LIMIT]``, or ``None`` when
-    the value is absent/empty/malformed (the bare no-``msg_limit`` path, which
-    intentionally returns the full transcript for callers that need it).
-    Extracted from the handler so the clamp expression has direct test coverage.
+    the value is absent/empty/malformed.  ``?msg_limit=all`` also returns
+    ``None`` — an explicit escape hatch for the full-transcript paths the
+    frontend genuinely needs; the handler distinguishes it from a bare request
+    via :func:`_resolve_effective_msg_limit`.  Extracted from the handler so
+    the clamp expression has direct test coverage.
     """
     if not raw:
         return None
@@ -9114,6 +9145,26 @@ def _parse_msg_limit(raw):
     except (TypeError, ValueError):
         return None
     return max(1, min(value, _MAX_MSG_LIMIT))
+
+
+def _resolve_effective_msg_limit(raw_limit):
+    """Resolve the effective ``msg_limit`` for ``GET /api/session``.
+
+    Returns ``(effective_limit, explicit_all)``.
+
+    - numeric ``?msg_limit=N`` → clamped int (existing pagination).
+    - ``?msg_limit=all`` → ``(None, True)``: explicit full-transcript escape
+      hatch.  Frontend paths that address rows by absolute transcript index
+      (outline jump, jump-to-start) genuinely need everything; they pass
+      ``all`` instead of relying on the bare no-limit shape.
+    - any other bare shape (no limit) → ``(None, False)``: the historical
+      full-transcript contract is preserved (contract tests pin tool-row
+      preservation and the runtime-journal snapshot on this shape), so the
+      bounded-window fix is enforced at the frontend call sites instead.
+    """
+    explicit_all = str(raw_limit or "").strip().lower() == "all"
+    limit = _parse_msg_limit(raw_limit)
+    return limit, explicit_all
 
 
 # If a sidecar JSON file exceeds this threshold, the display-path tail
@@ -10839,6 +10890,7 @@ from api.streaming import (
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
+    runtime_model_from_events,
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     _summary_from_events,
     bound_run_journal_snapshot_args,
@@ -13151,8 +13203,10 @@ def _handle_session_get(handler, parsed) -> bool:
     # payload; the existing _messages_truncated signal covers the clamped
     # case (the client sees there are more rows than returned). Parsing +
     # clamping live in _parse_msg_limit so the expression has direct test
-    # coverage; None means the bare no-msg_limit path (full transcript).
-    msg_limit = _parse_msg_limit(query.get("msg_limit", [None])[0])
+    # coverage.  The frontend recovery paths request a bounded tail
+    # explicitly (msg_limit=30), and the two absolute-index paths opt in to
+    # the full transcript via msg_limit=all (#7310/#7625).
+    _raw_msg_limit = query.get("msg_limit", [None])[0]
     # ?msg_before=N — 0-based index into the full message array.
     # Returns messages before this index (for scroll-to-top lazy loading).
     # Combined with msg_limit for paging.
@@ -13161,6 +13215,9 @@ def _handle_session_get(handler, parsed) -> bool:
         msg_before = int(_msg_before) if _msg_before else None
     except (ValueError, TypeError):
         msg_before = None
+    msg_limit, _msg_limit_explicit_all = _resolve_effective_msg_limit(
+        _raw_msg_limit,
+    )
     # ?expand_renderable=1 is retained for compatibility with older
     # frontends. msg_limit now counts visible transcript rows by default, so
     # the flag no longer changes the server-side pagination semantics.
@@ -13370,9 +13427,13 @@ def _handle_session_get(handler, parsed) -> bool:
             _messages_offset = 0
         # Index of the first returned message in the full message array.
         # Frontend uses this as cursor for scroll-to-top paging.
+        # Session-level tool_calls windowing keys off whether the returned
+        # message array was actually truncated (msg_before paging, any
+        # effective msg_limit) rather than whether a limit parameter was
+        # present — the full-transcript shape returns everything, so the
+        # length comparison alone decides (#7310/#7625).
         _windowed_messages = (
             load_messages
-            and msg_limit is not None
             and (msg_before is not None or len(_truncated_msgs) < len(_all_msgs))
         )
         # Resolve effective context_length with model-metadata fallback so
@@ -20631,6 +20692,16 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
 
 
 _MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+# #7680 re-gate (9/22): two-pass scan.
+#   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
+#      the wrapping backticks so the bare-token pass below sees a
+#      plain ``MEDIA:path`` and the closing backtick is not consumed
+#      as part of the path.
+#   2. ``MEDIA:[^\s\)\]]+`` (bare, no backtick in the exclusion
+#      class) so a filename that legally contains a backtick
+#      (``report`final.png``) is captured in full instead of being
+#      truncated at the first backtick.
+_BACKTICK_MEDIA_RE = re.compile(r"`MEDIA:([^`\s]+)`")
 
 
 def _message_content_text(content) -> str:
@@ -20690,6 +20761,10 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         )
         if "MEDIA:" not in text:
             continue
+        # #7680 re-gate: strip backtick wrappers first so the bare
+        # class below captures the full path even when the filename
+        # itself contains a backtick.
+        text = _BACKTICK_MEDIA_RE.sub(lambda m: f"MEDIA:{m.group(1)}", text)
         for ref in _MEDIA_TOKEN_RE.findall(text):
             if "://" in ref:
                 continue
@@ -21882,6 +21957,99 @@ def _handle_live_models(handler, parsed):
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
 
+            def _custom_provider_models_discover_is_false(_cp):
+                """True when ``discover_models`` is an explicit ``false`` opt-out.
+
+                Mirrors ``api.config._provider_discover_allowed`` / Hermes
+                Agent ``model_switch_providers._discover_flag``: ``discover_models``
+                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
+                (case-insensitive) mean False.  Used to decide whether a
+                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
+                when discovery is off) rather than per-model metadata.
+                """
+                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
+                if isinstance(_discover, str):
+                    return _discover.strip().lower() in {"false", "no", "0"}
+                return not bool(_discover)
+
+            def _custom_provider_allowlist_ids(_cp):
+                """Plural ``models`` list only — the explicit allowlist signal.
+
+                The singular ``model`` field is sticky/default metadata, NOT an
+                allowlist: it must not gate live-catalog filtering, otherwise a
+                provider configured with only ``model: assistant`` (no ``models``
+                list) would be collapsed to a single model.  Only an explicit
+                ``models`` allowlist expresses "show exactly these models".
+
+                An auto-discovered catalog is NOT an allowlist: when Hermes
+                persisted discovery results back into config (``models: {...}``
+                plus ``models_discovered: true``), that mapping is a snapshot
+                of what the gateway exposed at discovery time.  Gating on it
+                would permanently pin the live catalog to the first-discovery
+                set, silently dropping any model the user pulls in later
+                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+                is the shared predicate the ``/api/models`` path already uses;
+                when it says "discovered", return no allowlist and let the
+                live probe win.  An explicit ``discover_models: false`` opt-out
+                re-pins the catalog (the predicate accounts for it), so a
+                hand-pinned discovered catalog still filters.
+
+                A dict-shaped ``models`` mapping that is NOT marked discovered is
+                *per-model metadata* written by the Hermes Agent setup flow
+                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+                not a catalog narrow: treating its keys as an allowlist would
+                collapse the live picker to the single saved default (keyless
+                Ollama) while the CLI live-probe shows the full catalog.  Only an
+                explicit ``discover_models: false`` opts into treating the dict
+                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+                shapes remain plain allowlists.
+
+                The plural value is decoded through ``_parse_config_string_list()``
+                because ``hermes config set`` / JSON-mode editor saves persist
+                lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
+                Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
+                made a serialized allowlist fall through to ``[]``, which the
+                caller reads as "no allowlist configured" and floods the picker
+                with the full upstream catalog — the same class of bug as the
+                ``skills.disabled`` regression (#7120 / #7134).
+                """
+                from api.config import _provider_models_are_discovered_catalog
+
+                if _provider_models_are_discovered_catalog(_cp):
+                    return []
+                _ids = []
+                _models = _cp.get("models")
+                # Serialized shapes only: ``hermes config set`` / JSON-mode
+                # editor saves persist lists as quoted JSON-array strings
+                # (``'["chat-a","chat-b"]'``) or Python literals
+                # (``"['chat-a']"``).  Decode those through the shared helper so
+                # they are honored; native dict/list values are walked below so
+                # dict *entries* keep their id|model|name metadata (the decoder
+                # str()-ifies list members, which would mangle them).
+                if isinstance(_models, str):
+                    _models = _parse_config_string_list(_models)
+                if isinstance(_models, dict):
+                    # A dict-shaped ``models`` is per-model metadata written by
+                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+                    # ``discover_models: false`` opt-out treats the dict keys as a
+                    # pinned allowlist; otherwise return the empty allowlist so the
+                    # live probe returns the full catalog.
+                    if not _custom_provider_models_discover_is_false(_cp):
+                        return []
+                    for _mid in _models:
+                        if isinstance(_mid, str) and _mid.strip():
+                            _ids.append(_mid.strip())
+                elif isinstance(_models, (list, tuple)):
+                    for _item in _models:
+                        if isinstance(_item, str) and _item.strip():
+                            _ids.append(_item.strip())
+                        elif isinstance(_item, dict):
+                            _mid = _item.get("id") or _item.get("model") or _item.get("name")
+                            if _mid and str(_mid).strip():
+                                _ids.append(str(_mid).strip())
+                return _ids
+
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
             # Fall back to the custom_providers entries from config.yaml so
@@ -21890,11 +22058,13 @@ def _handle_live_models(handler, parsed):
             # Collect config-specified model IDs separately so they don't
             # prevent the live fetch below from running (#3718).
             _config_ids = []
+            _allowlist_ids = []
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
                         custom_provider_entry = _cp
                     _config_ids.extend(_custom_provider_model_ids(_cp))
+                    _allowlist_ids.extend(_custom_provider_allowlist_ids(_cp))
             
             # Always try live fetch for custom providers — config entries are a
             # fallback, not a replacement.  The live endpoint should return ALL
@@ -21965,15 +22135,39 @@ def _handle_live_models(handler, parsed):
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
 
-                # If live fetch succeeded, merge with config entries (live takes
-                # priority).  If live fetch failed, fall back to config-only list.
+                # If live fetch succeeded, filter the live catalog down to the
+                # config-declared models allowlist first, then append any
+                # allowlisted models the live endpoint didn't return.  Custom
+                # providers (esp. New-API-style gateways) expose their ENTIRE
+                # catalog via /v1/models — including image/audio models that
+                # are not chat models.  The picker must not surface models the
+                # user never declared in config.yaml.  Only a NON-EMPTY explicit
+                # ``models`` allowlist gates the filter — a provider configured
+                # with just a singular ``model`` (no ``models`` list) keeps the
+                # unfiltered live catalog.  When no allowlist is configured,
+                # return the live list as-is (preserves the pre-filter
+                # discovery behaviour).
+                #
+                # An empty allowlist (``models: []``, ``models: "[]"``, or a
+                # value that decodes to no usable ids) is deliberately treated
+                # as "not configured", NOT as "allow nothing".  Gating on
+                # declared-ness instead would emit an EMPTY picker and make the
+                # provider unselectable — a harder failure than surfacing a few
+                # extra models, and unrecoverable from the UI because
+                # ``custom_providers`` is hand-edited in config.yaml (the WebUI
+                # has no write path for it).  ``[]`` in practice means a
+                # leftover/placeholder key, not an intentional deny-all, and no
+                # deny-all use case exists: a provider the user wants hidden is
+                # removed from ``custom_providers`` outright.
                 if ids:
-                    _live_set = set(ids)
-                    for _cid in _config_ids:
-                        if _cid not in _live_set:
-                            ids.append(_cid)
+                    if _allowlist_ids:
+                        _allowlist_set = set(_allowlist_ids)
+                        ids = [m for m in ids if m in _allowlist_set] or []
+                        for _aid in _allowlist_ids:
+                            if _aid not in ids:
+                                ids.append(_aid)
                 else:
-                    ids = list(_config_ids)
+                    ids = list(_allowlist_ids or _config_ids)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider

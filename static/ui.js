@@ -7723,6 +7723,16 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
+  // #7680 re-gate (9/22): two-pass scan.
+  //   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
+  //      the wrapping backticks so the bare-token pass below sees a
+  //      plain ``MEDIA:path`` and the closing backtick is not consumed
+  //      as part of the path.
+  //   2. ``MEDIA:[^\s\)\]]+`` (bare, no backtick in the exclusion
+  //      class) so a filename that legally contains a backtick
+  //      (``report`final.png``) is captured in full instead of being
+  //      truncated at the first backtick.
+  s=s.replace(/`MEDIA:([^`\s]+)`/g,'MEDIA:$1');
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
@@ -9170,6 +9180,12 @@ function _stripForTTS(text){
   // Strip links, keep text
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
+  // #7680 re-gate (9/22): TTS does not need the backtick-aware
+  // terminator. Inline code was already stripped at the top of this
+  // function (`:9137`), so a bare ``MEDIA:[^\s]+`` is correct and
+  // round-trips the original filename including a backtick in the
+  // path — the only thing the TTS ever does with the captured
+  // substring is throw it away.
   text=text.replace(/MEDIA:[^\s]+/g,'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
@@ -10337,7 +10353,11 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    // Bounded tail (msg_limit=30) — a bare reload used to pull and re-redact
+    // the ENTIRE transcript on every offline/bfcache recovery (#7310/#7625).
+    // truncation signal + _oldestIdx are read below, so the Load-earlier
+    // paging gate still works after the windowed refresh.
+    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
     S.session = data.session;
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.messages = data.session.messages || [];

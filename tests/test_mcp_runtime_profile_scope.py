@@ -51,7 +51,10 @@ WRITE_TOOL = "mcp__atlassian__jira_create_issue"
 
 FAKE_SERVER = textwrap.dedent('''
     import os
-    from mcp.server.fastmcp import FastMCP
+    try:  # mcp 1.x (CI pins mcp<2)
+        from mcp.server.fastmcp import FastMCP
+    except ImportError:  # mcp 2.x renamed the high-level server to MCPServer
+        from mcp.server import MCPServer as FastMCP
 
     mcp = FastMCP("fake-atlassian")
 

@@ -39,6 +39,14 @@
 
 ### Fixed
 
+- **An image turn's provider context stays out of your message bubble, and Edit/Undo no longer
+  brings a removed image turn back.** When an image turn was mirrored into the Agent's state.db,
+  its rich provider payload could appear in the user bubble, and after Edit or Undo a removed
+  image-turn row could come back in the full, paginated and model-context reads. The bubble now
+  shows what you typed, the payload stays in model context only, and removed rows stay removed,
+  including a same-timestamp duplicate row and a reply that exists only in state.db after an
+  edited checkpoint. (#7754, @starship-s)
+
 - **MCP status, tool inventory and `/reload-mcp` follow the profile you're using.** With several
   profiles in one WebUI, a chat turn mirrored its profile into the process environment, so the Agent
   saw every profile as the launch profile. The MCP panel could then show another profile's servers,

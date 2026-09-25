@@ -106,16 +106,38 @@ Windows 用户不要直接 `python server.py`——请用仓库自带的原生�
 
 ### 1. 首次准备
 
-原生 Windows 路径要求 Python 3.11+ 与 hermes-agent 已安装。推荐在
-PowerShell 中创建 Windows 虚拟环境并安装依赖：
+原生 Windows 路径要求 Python 3.11+ 与 hermes-agent 已安装。
+**关键：依赖要装在 `start.ps1` 实际使用的那个解释器里。** `start.ps1`
+启动时会优先用 `<hermes-agent>\venv\Scripts\python.exe`，找不到才回退
+到 PATH 上的 `python`——WebUI 仓库本地的 `venv\` 永远不会被它挑中。
+所以把 `requirements.txt` 装到 hermes-agent 的 venv，而不是在 WebUI
+仓库下新建一个 venv。
 
-```powershell
-python -m venv venv
-venv\Scripts\pip install -r requirements.txt
+hermes-agent 的常见安装位置（任选其一，取决于当初的安装方式）：
+
+```text
+%USERPROFILE%\.hermes\hermes-agent            # 官方安装器默认
+%LOCALAPPDATA%\hermes\hermes-agent            # 备选
+%ProgramW6432%\hermes\hermes-agent           # 全局安装
 ```
 
-> 注意：在 WSL2 里创建的虚拟环境是 Linux 格式（`venv/bin/python`），
-> 原生 Windows Python 无法使用，必须用 Windows 原生 `python -m venv` 重建。
+在该目录下创建 venv 并装依赖（下面以默认的 `%USERPROFILE%\.hermes\hermes-agent`
+为例）：
+
+```powershell
+cd $env:USERPROFILE\.hermes\hermes-agent
+python -m venv venv
+.\venv\Scripts\pip.exe install -r C:\path\to\hermes-webui\requirements.txt
+```
+
+如果 hermes-agent 装在其它位置，把第一行 `cd` 换成对应目录即可。
+
+> 备选：在 WebUI 仓库本地建 venv 也可以（`python -m venv venv` +
+> `venv\Scripts\pip install -r requirements.txt`），但这只在
+> `<hermes-agent>\venv\Scripts\python.exe` 不存在、且 PATH 上的
+> `python.exe` 恰好指向你装依赖时用的那个解释器时，`start.ps1` 才
+> 会用上你装的依赖——非常容易踩坑。最稳的路径仍然是装到 hermes-agent
+> 的 venv。
 
 ### 2. 带密码启动（前台）
 
@@ -137,6 +159,14 @@ $env:HERMES_WEBUI_PASSWORD = "你的密码"
 
 > **绑定 `0.0.0.0` 前先设密码**：一旦绑定所有接口，任何能路由到该端口的设备
 > 都能触达界面，密码认证是唯一防线。参见文末"安全边界"。
+>
+> **改完密码先验证一下**：`start.sh` / `start.ps1` / `bootstrap.py` 都会
+> 加载仓库根目录的 `.env`，且 `.env` 里的值会**覆盖**命令行内联的
+> `HERMES_WEBUI_PASSWORD=`。如果你以前在 `.env` 里写过旧密码、现在又
+> 想换成新的，单纯在命令行里 export 是没用的——`.env` 里的旧值会盖掉它。
+> 改完密码后用浏览器打开登录页确认**真的要求输入密码**，没有跳过直接
+> 进入主界面就说明 `.env` 还在用旧值，需要先清理或显式
+> `HERMES_WEBUI_PRESERVE_ENV=1`（仅 `bootstrap.py` 支持）再启动。
 
 ### 3. Windows 防火墙
 
@@ -160,9 +190,14 @@ New-NetFirewallRule -DisplayName "Hermes WebUI (Tailscale only)" `
 - 不要写 `-Profile Any -RemoteAddress Any` 这类全放行规则——那是把服务
   直接暴露到公网的行为，见"安全边界"。
 
-### 4. Windows 开机自启
+## 四、WSL 用户：Windows 开机自启
 
-官方自启通道是任务计划程序 + WSL 启动脚本，配套脚本在
+> **本节只适用于在 WSL2 内运行 WebUI 的用户。** 原生 Windows 启动请看
+> 上一节"三、Windows 原生部署"——`start.ps1` 本身不自带开机自启
+> （Windows 登录时不会自动拉起 PowerShell 脚本），需要自启的话请改
+> 用 WSL 路径或自行配置 NSSM / Task Scheduler 启动 `start.ps1`。
+
+官方 WSL 自启通道是 **Windows 任务计划程序 + WSL 启动脚本**，配套脚本在
 [`scripts/windows/setup_webui_autostart.ps1`](../scripts/windows/setup_webui_autostart.ps1)。
 它注册一个"登录时启动"的计划任务，通过 `wsl.exe` 在 WSL 发行版内执行启动脚本。
 该脚本幂等：重复运行只更新已有任务，不会创建重复项。
@@ -206,24 +241,34 @@ $HOME/.hermes/webui/logs/hermes_webui.log
 
 ---
 
-## 四、常见问题
+## 五、常见问题
 
 | 症状 | 可能原因 | 处理 |
 |---|---|---|
 | 手机打不开地址 | WebUI 没绑定到可达接口 | 方案 A 检查 Serve 状态（`tailscale serve status`）；方案 B 确认 `HERMES_WEBUI_HOST=0.0.0.0` 且防火墙已放行 Tailscale |
 | 任务计划已建但 WebUI 没起来 | WSL 脚本路径写错/发行版不对 | 用正确的 `-WslScriptPath` 与 `-Distro` 重跑注册脚本 |
-| 打开 WSL 才启动，登录时不启动 | 用的是会话级自启而非计划任务 | 安装 Windows 计划任务 |
+| 打开 WSL 才启动，登录时不启动 | 用的是会话级自启而非计划任务 | 按"四、WSL 用户：Windows 开机自启"装任务计划程序 |
 | 健康检查失败但进程存在 | 端口不一致或仍在启动 | 核对 `HERMES_WEBUI_PORT` 与 `hermes_webui.log` |
 | 提示需要密码但没设过 | 界面要求认证 | 设置 `HERMES_WEBUI_PASSWORD` 后重启 |
 
 ---
 
-## 五、安全边界（重要）
+## 六、安全边界（重要）
 
 **区分三种暴露范围：**
 
 1. **Tailscale 私有（推荐）**：仅你的 tailnet 设备可达。Serve 方案连端口都不用开；
-   直连 IP 方案也只需对 `100.64.0.0/10` 放行。WireGuard 加密 + 应用层密码认证。
+   直连 IP 方案（"二、方案 B"）则要看 `HERMES_WEBUI_HOST` 设的是什么：
+
+   - **首选：** `HERMES_WEBUI_HOST=$(tailscale ip -4)`——只绑 Tailscale
+     虚拟网卡，其他接口根本不开 8787，连防火墙关了也安全。
+   - **次选：** `HERMES_WEBUI_HOST=0.0.0.0` + Windows 防火墙**只对
+     `100.64.0.0/10` 放行**（"三、3 防火墙"）。"仅 tailnet 可达"
+     这条结论完全靠这条防火墙规则兜底——**一旦放行规则被改回
+     `Any`、或防火墙被关闭，WebUI 立刻对 LAN/公网开放**，因为
+     `0.0.0.0` 是所有接口，不是只绑 Tailscale 网卡。
+
+   WireGuard 端到端加密 + 应用层密码认证是双层保险。
 2. **局域网（LAN）**：`HERMES_WEBUI_HOST=0.0.0.0` 且防火墙对私有网段放行。
    同一 WiFi 下的其他设备都能触达——密码认证是必需品，且不建议用于公共 WiFi。
 3. **公网**：端口对互联网开放。**不推荐**。WebUI 本身只做简单的登录限速（每个 IP

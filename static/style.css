@@ -3000,7 +3000,12 @@
 
   @media(max-width:900px){
     .workspace-panel-edge-toggle{display:none!important;}
-    .rightpanel{display:none}
+    /* 641-900px band: same closed-inert contract as the <=640px slide-in
+       overlay below (#7713) — visibility (not display) so the panel can still
+       slide when a future transition is added, and the closed subtree stays
+       out of the tab order either way. */
+    .rightpanel{visibility:hidden;pointer-events:none;}
+    .rightpanel.mobile-open{visibility:visible;pointer-events:auto;}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
@@ -3091,12 +3096,21 @@
     /* Files button in topbar */
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     /* Right panel: slide-over from right */
+    /* Closed = inert (#7713): the drawer parks off-screen but keeps
+       display:flex so the slide can animate, which leaves its controls in the
+       keyboard tab order — a keyboard user tabs off-screen into 5 invisible
+       buttons and can even fire the hidden file picker. visibility:hidden
+       (delayed past the slide-out) removes the subtree from the tab order
+       while -- unlike display:none -- still letting the right transition run;
+       pointer-events:none stops the parked panel swallowing clicks aimed at
+       the chat underneath it. */
     .rightpanel{display:flex!important;position:fixed;
       --mobile-rightpanel-width:min(300px, 100vw);
       right:calc(-1 * var(--mobile-rightpanel-width))!important;
-      top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;padding-top:var(--app-titlebar-safe-top);box-sizing:border-box;transition:right .25s ease;
+      top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;padding-top:var(--app-titlebar-safe-top);box-sizing:border-box;transition:right .25s ease,visibility 0s linear .25s;
+      visibility:hidden;pointer-events:none;
       box-shadow:none!important;}
-    .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
+    .rightpanel.mobile-open{right:0!important;visibility:visible;pointer-events:auto;transition:right .25s ease,visibility 0s linear 0s;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
     .rightpanel .resize-handle{display:none;}
     .rightpanel .panel-header{row-gap:8px;}
     .rightpanel .panel-actions{align-items:center;gap:8px;}

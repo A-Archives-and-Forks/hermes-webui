@@ -24,8 +24,23 @@ _GATE = (
 
 def test_server_import_activates_agent_before_ruamel_only_yaml(tmp_path):
     agent_dir = tmp_path / "agent"
-    agent_dir.mkdir()
-    (agent_dir / "run_agent.py").write_text("class AIAgent: pass\n", encoding="utf-8")
+    ruamel_dir = agent_dir / "managed" / "ruamel"
+    ruamel_dir.mkdir(parents=True)
+    # Importing the fixture Agent exposes its managed dir, which ships a ruamel stub.
+    (agent_dir / "run_agent.py").write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent / 'managed'))\n"
+        "class AIAgent: pass\n",
+        encoding="utf-8",
+    )
+    (ruamel_dir / "__init__.py").write_text("", encoding="utf-8")
+    (ruamel_dir / "yaml.py").write_text(
+        "from types import SimpleNamespace\n"
+        "class YAML:\n"
+        "    def __init__(self, *a, **k): self.representer = SimpleNamespace()\n"
+        "    def load(self, stream): return {'backend': 'managed-ruamel'}\n",
+        encoding="utf-8",
+    )
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("HERMES_WEBUI_") and k != "PYTHONPATH"}
     env.update(
@@ -39,7 +54,7 @@ def test_server_import_activates_agent_before_ruamel_only_yaml(tmp_path):
         "from api import yaml_compat\n"
         "assert sys.modules['run_agent'].__file__ == sys.argv[1], sys.modules['run_agent'].__file__\n"
         "assert yaml_compat.BACKEND == 'ruamel'\n"
-        "assert yaml_compat.safe_load('a: 1') == {'a': 1}\n"
+        "assert yaml_compat.safe_load('a: 1') == {'backend': 'managed-ruamel'}\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", script, str(agent_dir / "run_agent.py")],

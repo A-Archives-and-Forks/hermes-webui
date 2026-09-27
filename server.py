@@ -97,20 +97,8 @@ except ImportError:  # pragma: no cover - resource is Unix-only
     resource = None
 from urllib.parse import urlparse
 
-# Hermes' managed runtime activates its dependencies on importing the agent.
-# Bootstrap validated the same import before launching this process.
-if os.environ.get("HERMES_WEBUI_AGENT_DIR"):
-    # The Agent bootstrap hardens sys.path and removes the script's empty-path
-    # entry. Preserve the WebUI package root for subsequent `api` imports.
-    webui_root = os.path.dirname(os.path.abspath(__file__))
-    if webui_root not in sys.path:
-        sys.path.insert(0, webui_root)
-    # The probe adds this source checkout to PYTHONPATH only for its own child.
-    # A script launch starts with the WebUI directory on sys.path, not cwd.
-    agent_dir = os.environ["HERMES_WEBUI_AGENT_DIR"]
-    if agent_dir not in sys.path:
-        sys.path.insert(1, agent_dir)
-    from run_agent import AIAgent  # noqa: F401
+from managed_agent_startup import activate_managed_agent
+activate_managed_agent()
 
 logger = logging.getLogger(__name__)
 

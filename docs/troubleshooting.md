@@ -106,6 +106,12 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+### Hermes package-managed runtime bootstrap order
+
+When Hermes uses its package manager, importing `run_agent` activates the installed dependency environment. WebUI's bootstrap and server must import the agent before WebUI modules that need packages such as PyYAML; otherwise the bootstrap reports that no Python can import both, or the server exits before binding. If a restart still fails, inspect the current service journal and the selected interpreter rather than installing dependencies into an obsolete Agent venv.
+
+---
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.

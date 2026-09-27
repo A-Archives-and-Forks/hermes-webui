@@ -3000,12 +3000,11 @@
 
   @media(max-width:900px){
     .workspace-panel-edge-toggle{display:none!important;}
-    /* 641-900px band: same closed-inert contract as the <=640px slide-in
-       overlay below (#7713) — visibility (not display) so the panel can still
-       slide when a future transition is added, and the closed subtree stays
-       out of the tab order either way. */
-    .rightpanel{visibility:hidden;pointer-events:none;}
-    .rightpanel.mobile-open{visibility:visible;pointer-events:auto;}
+    /* NOTE: the 641-900px band intentionally keeps display:none (#7866 review):
+       the off-canvas geometry for that band is #6952's scope and still open, so
+       swapping display for visibility here would leave an invisible 300px flex
+       item reserving layout space. This branch fixes the shipped <=640px drawer. */
+    .rightpanel{display:none}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}

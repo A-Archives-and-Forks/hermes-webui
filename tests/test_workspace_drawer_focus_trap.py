@@ -8,13 +8,19 @@ invisible controls and focus disappears off-screen — and activating
 ``workspaceFileInput`` from there opens a file picker for a panel that is not on
 screen (#7713).
 
-The closed drawer must be inert, and the open drawer focusable — in BOTH compact
-bands (``max-width:640px`` slide-in overlay and the 641-900px band). The probe
+The closed drawer must be inert, and the open drawer focusable — on the shipped
+compact band (``max-width:640px`` slide-in overlay). The probe
 drives the browser's REAL tab sequence from a control placed immediately before
 the panel, because that is the walk the user takes; a computed-style or
 ``el.tabIndex`` assertion cannot see a future rule that re-enables focus on a
 hidden subtree (and under ``visibility:hidden`` Chrome still honours a
 programmatic ``el.focus()`` even though the element is no longer tabbable).
+
+The 641-900px band is deliberately NOT covered here: its off-canvas geometry
+belongs to #6952 (still open), and until that lands the band uses
+``display:none``, which already keeps the subtree out of the tab order. Swapping
+that band to visibility now would reserve 300px of layout for an invisible flex
+item (#7866 review).
 
 The production stylesheet is loaded unchanged, so the same test also pins that the
 open drawer keeps working after the inert rules were added.
@@ -27,9 +33,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
-# Both compact bands that give .rightpanel the off-screen treatment: the <=640px
-# slide-in overlay and the 641-900px band. The fix must cover both.
-_BANDS = ({"width": 390, "height": 780}, {"width": 800, "height": 780})
+# The shipped compact band: the <=640px slide-in overlay, probed at its widest
+# and narrowest points so the fix is pinned at both edges.
+_BANDS = ({"width": 390, "height": 780}, {"width": 640, "height": 780})
 
 # The drawer's control set as named in the issue: two icon buttons, the hidden
 # file input, and the two tab-strip buttons — all of them reachable by Tab once

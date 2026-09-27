@@ -105,6 +105,11 @@ if os.environ.get("HERMES_WEBUI_AGENT_DIR"):
     webui_root = os.path.dirname(os.path.abspath(__file__))
     if webui_root not in sys.path:
         sys.path.insert(0, webui_root)
+    # The probe adds this source checkout to PYTHONPATH only for its own child.
+    # A script launch starts with the WebUI directory on sys.path, not cwd.
+    agent_dir = os.environ["HERMES_WEBUI_AGENT_DIR"]
+    if agent_dir not in sys.path:
+        sys.path.insert(1, agent_dir)
     from run_agent import AIAgent  # noqa: F401
 
 logger = logging.getLogger(__name__)

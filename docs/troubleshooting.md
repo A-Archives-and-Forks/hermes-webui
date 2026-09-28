@@ -108,7 +108,23 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ### Hermes package-managed runtime bootstrap order
 
-When Hermes uses its package manager, importing `run_agent` activates the installed dependency environment. WebUI's bootstrap and server must import the agent before WebUI modules that need packages such as PyYAML; otherwise the bootstrap reports that no Python can import both, or the server exits before binding. If a restart still fails, inspect the current service journal and the selected interpreter rather than installing dependencies into an obsolete Agent venv.
+For package-managed Hermes installs, the server activates the discovered Agent's
+`hermes_bootstrap` dependency layer before importing WebUI modules that need
+third-party packages. It must **not** import `run_agent` at that point:
+`api.config` first selects the active profile, then profile-sensitive Agent
+application modules can be imported. Importing skills under the launch/base home
+before selecting a named profile can disable their context-local home resolution
+and force turns and model-catalog scopes into the legacy whole-turn lock.
+
+The dependency layer retains Agent-owned activation and re-exec behavior; WebUI
+does not choose generation directories or install into an obsolete Agent venv.
+Legacy Agents and browser-only fixtures without `hermes_bootstrap.py` skip this
+early activation. Failures inside a present bootstrap are surfaced, not treated
+as an absent Agent. The interpreter compatibility probe may still import
+`run_agent` in its disposable subprocess; that import must not leak into server
+startup. If a restart fails, inspect the current service journal and selected
+interpreter. This ordering repair does not remove the static fallback lock or
+change cross-profile credential handling.
 
 ---
 

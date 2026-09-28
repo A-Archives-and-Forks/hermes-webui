@@ -19,10 +19,10 @@ def test_server_activates_agent_before_ruamel_only_webui_config(tmp_path):
     agent_dir = tmp_path / "agent"
     ruamel_dir = agent_dir / "managed" / "ruamel"
     ruamel_dir.mkdir(parents=True)
-    (agent_dir / "run_agent.py").write_text(
+    (agent_dir / "run_agent.py").write_text("class AIAgent: pass\n", encoding="utf-8")
+    (agent_dir / "hermes_bootstrap.py").write_text(
         "import sys\nfrom pathlib import Path\n"
-        "sys.path.insert(0, str(Path(__file__).parent / 'managed'))\n"
-        "class AIAgent: pass\n",
+        "sys.path.insert(0, str(Path(__file__).parent / 'managed'))\n",
         encoding="utf-8",
     )
     (ruamel_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -55,7 +55,8 @@ def test_server_activates_agent_before_ruamel_only_webui_config(tmp_path):
         "from api import yaml_compat\n"
         "from api.onboarding import _load_yaml_config\n"
         "from pathlib import Path\n"
-        "assert 'run_agent' in sys.modules\n"
+        "assert 'hermes_bootstrap' in sys.modules\n"
+        "import run_agent\n"
         "assert sys.modules['run_agent'].__file__ == sys.argv[2]\n"
         "assert yaml_compat.BACKEND == 'ruamel'\n"
         "assert _load_yaml_config(Path(sys.argv[1])) == {'integration_marker': 'ruamel'}\n"

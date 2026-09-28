@@ -1,4 +1,4 @@
-"""The managed Agent must initialize before WebUI imports, without hiding api."""
+"""Dependency bootstrap precedes WebUI imports; Agent application imports do not."""
 
 import os
 import subprocess
@@ -12,10 +12,10 @@ import bootstrap
 def test_server_keeps_api_importable_after_agent_hardens_sys_path(tmp_path):
     agent_dir = tmp_path / "agent"
     agent_dir.mkdir()
-    (agent_dir / "run_agent.py").write_text(
+    (agent_dir / "run_agent.py").write_text("class AIAgent: pass\n", encoding="utf-8")
+    (agent_dir / "hermes_bootstrap.py").write_text(
         "import sys\n"
-        "sys.path[:] = [path for path in sys.path if path != '']\n"
-        "class AIAgent: pass\n",
+        "sys.path[:] = [path for path in sys.path if path != '']\n",
         encoding="utf-8",
     )
     webui_root = os.path.dirname(os.path.dirname(__file__))
@@ -32,7 +32,8 @@ def test_server_keeps_api_importable_after_agent_hardens_sys_path(tmp_path):
         + repr(os.path.join(webui_root, "server.py")) + ")\n"
         "module = importlib.util.module_from_spec(spec)\n"
         "spec.loader.exec_module(module)\n"
-        "assert 'run_agent' in sys.modules\n"
+        "assert 'hermes_bootstrap' in sys.modules\n"
+        "import run_agent\n"
         "assert sys.modules['run_agent'].__file__ == "
         + repr(str(agent_dir / "run_agent.py")) + "\n"
     )
@@ -73,11 +74,12 @@ def test_server_starts_without_agent_class(tmp_path, agent_source):
     assert result.returncode == 0, result.stderr
 
 
-def test_server_does_not_hide_agent_internal_import_failure(tmp_path):
+def test_server_does_not_hide_bootstrap_internal_import_failure(tmp_path):
     agent_dir = tmp_path / "broken-agent"
     agent_dir.mkdir()
-    (agent_dir / "run_agent.py").write_text(
-        "import deliberately_missing_agent_dependency\nclass AIAgent: pass\n",
+    (agent_dir / "run_agent.py").write_text("class AIAgent: pass\n", encoding="utf-8")
+    (agent_dir / "hermes_bootstrap.py").write_text(
+        "import deliberately_missing_agent_dependency\n",
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -90,3 +92,71 @@ def test_server_does_not_hide_agent_internal_import_failure(tmp_path):
     )
     assert result.returncode != 0
     assert "No module named 'deliberately_missing_agent_dependency'" in result.stderr
+
+
+@pytest.mark.parametrize("with_bootstrap", [False, True])
+def test_server_defers_application_import_until_profile_selection(tmp_path, with_bootstrap):
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "run_agent.py").write_text(
+        "raise AssertionError('premature application import')\n", encoding="utf-8",
+    )
+    if with_bootstrap:
+        (agent_dir / "hermes_bootstrap.py").write_text(
+            "import sys\nassert not any(n.startswith('api.') for n in sys.modules)\n",
+            encoding="utf-8",
+        )
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
+    script = (
+        "import builtins, sys\n"
+        "original = builtins.__import__\n"
+        "def check(name, *args, **kwargs):\n"
+        "    if name == 'api.request_logging':\n"
+        "        assert 'run_agent' not in sys.modules\n"
+        f"        assert ('hermes_bootstrap' in sys.modules) is {with_bootstrap!r}\n"
+        "        raise SystemExit(0)\n"
+        "    return original(name, *args, **kwargs)\n"
+        "builtins.__import__ = check\n"
+        "import server\n"
+        "raise SystemExit('WebUI imports not reached')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_bootstrap_reexec_keeps_webui_importable(tmp_path):
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "run_agent.py").write_text(
+        "raise AssertionError('premature application import')\n", encoding="utf-8",
+    )
+    (agent_dir / "hermes_bootstrap.py").write_text(
+        "import os, sys\n"
+        "if not os.environ.get('TEST_BOOTSTRAP_REEXEC'):\n"
+        "    os.environ['TEST_BOOTSTRAP_REEXEC'] = '1'\n"
+        "    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])\n"
+        "sys.path[:] = [p for p in sys.path if p not in ('', '.')]\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("TEST_BOOTSTRAP_REEXEC", None)
+    env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
+    script = (
+        "import os, sys\n"
+        "from managed_agent_startup import activate_managed_agent\n"
+        "activate_managed_agent()\n"
+        "assert os.environ['TEST_BOOTSTRAP_REEXEC'] == '1'\n"
+        "assert 'run_agent' not in sys.modules\n"
+        "import api.config\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

@@ -20,7 +20,8 @@ def activate_managed_agent() -> None:
     # Bootstrap's probe adds the checkout to its own PYTHONPATH, not ours.
     if agent_dir not in sys.path:
         sys.path.insert(1, agent_dir)
-    # Importing a real Agent activates its managed dependencies. An Agent-less
-    # browser fixture can provide a shim with no AIAgent; keep it optional here.
-    # Errors *inside* a present Agent are not missing-Agent signals.
-    importlib.import_module("run_agent")
+    # Activate dependencies without importing the application: api.config must
+    # select the active profile before Agent modules cache profile-sensitive paths.
+    # Older Agents and browser-only shims have no bootstrap layer to activate.
+    if (Path(agent_dir) / "hermes_bootstrap.py").is_file():
+        importlib.import_module("hermes_bootstrap")

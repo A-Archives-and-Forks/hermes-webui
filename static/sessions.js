@@ -7858,7 +7858,9 @@ function _sessionDisplayTitle(s){
   const strip=(typeof _stripAttachedFilesMarker==='function')
     ? _stripAttachedFilesMarker
     : (text)=>String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
-  const title=strip(rawTitle);
+  let title=strip(rawTitle);
+  // Nesting under the parent already marks a delegated run; drop the agent's "Subagent: " prefix.
+  if(typeof _isDelegatedSubagentRow==='function'&&_isDelegatedSubagentRow(s)) title=title.replace(/^Subagent:\s*/i,'');
   return title||'Untitled';
 }
 

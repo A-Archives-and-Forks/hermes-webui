@@ -135,28 +135,38 @@ def test_bootstrap_reexec_keeps_webui_importable(tmp_path):
     (agent_dir / "run_agent.py").write_text(
         "raise AssertionError('premature application import')\n", encoding="utf-8",
     )
+    webui_root = os.path.dirname(os.path.dirname(__file__))
+    server = os.path.join(webui_root, "server.py")
+    # Match Agent's script relaunch: isolated Python, only the Agent root added,
+    # and run_path(server.py), which does not add the script's directory.
+    check = (
+        "import builtins, os, sys, runpy\n"
+        f"sys.path.insert(0, {str(agent_dir)!r})\n"
+        "original = builtins.__import__\n"
+        "def checked(name, *args, **kwargs):\n"
+        "    if name == 'api.request_logging':\n"
+        "        assert os.environ['TEST_BOOTSTRAP_REEXEC'] == '1'\n"
+        "        assert 'hermes_bootstrap' in sys.modules\n"
+        "        assert 'run_agent' not in sys.modules\n"
+        "        raise SystemExit(0)\n"
+        "    return original(name, *args, **kwargs)\n"
+        "builtins.__import__ = checked\n"
+        f"sys.argv = [{server!r}]\n"
+        f"runpy.run_path({server!r}, run_name='__main__')\n"
+    )
     (agent_dir / "hermes_bootstrap.py").write_text(
         "import os, sys\n"
         "if not os.environ.get('TEST_BOOTSTRAP_REEXEC'):\n"
         "    os.environ['TEST_BOOTSTRAP_REEXEC'] = '1'\n"
-        "    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])\n"
-        "sys.path[:] = [p for p in sys.path if p not in ('', '.')]\n",
+        f"    os.execv(sys.executable, [sys.executable, '-I', '-c', {check!r}])\n",
         encoding="utf-8",
     )
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env.pop("TEST_BOOTSTRAP_REEXEC", None)
     env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
-    script = (
-        "import os, sys\n"
-        "from managed_agent_startup import activate_managed_agent\n"
-        "activate_managed_agent()\n"
-        "assert os.environ['TEST_BOOTSTRAP_REEXEC'] == '1'\n"
-        "assert 'run_agent' not in sys.modules\n"
-        "import api.config\n"
-    )
     result = subprocess.run(
-        [sys.executable, "-c", script], cwd=os.path.dirname(os.path.dirname(__file__)),
+        [sys.executable, server], cwd=agent_dir,
         env=env, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr

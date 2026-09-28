@@ -7858,9 +7858,7 @@ function _sessionDisplayTitle(s){
   const strip=(typeof _stripAttachedFilesMarker==='function')
     ? _stripAttachedFilesMarker
     : (text)=>String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
-  let title=strip(rawTitle);
-  // Nesting under the parent already marks a delegated run; drop the agent's "Subagent: " prefix.
-  if(typeof _isDelegatedSubagentRow==='function'&&_isDelegatedSubagentRow(s)) title=title.replace(/^Subagent:\s*/i,'');
+  const title=strip(rawTitle);
   return title||'Untitled';
 }
 
@@ -8134,6 +8132,13 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     // exception above, so unrelated truly-empty sessions are still hidden.
     (activeSidForSidebar&&s.parent_session_id===activeSidForSidebar&&_isChildSession(s)) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
+}
+
+// Nesting under the parent already marks a delegated run, so the nested label drops the
+// agent's "Subagent: " prefix. Display only: rename and search keep _sessionDisplayTitle().
+function _nestedChildTitle(s){
+  const title=_sessionDisplayTitle(s);
+  return _isDelegatedSubagentRow(s)?title.replace(/^Subagent:\s*/i,''):title;
 }
 
 function _isDelegatedSubagentRow(s){
@@ -8972,7 +8977,7 @@ function renderSessionListFromCache(){
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
-        const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
+        const childTitle=_nestedChildTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
         return `-> ${childTitle}${parentNote} - ${childTime}`;

@@ -44,6 +44,14 @@
 
 ### Fixed
 
+- **A phone that drops off the network no longer turns a live stream into a server error.** When a
+  client vanished at the network layer (left the Wi-Fi, a Tailscale peer dropped), the next write on
+  a long-lived stream (chat, gateway events, terminal output, approvals, clarify) failed with a
+  routing error such as "No route to host". That wasn't recognised as a disconnect, so it ended as a
+  500 with a traceback in the log instead of a quiet disconnect. Those routing errors are now treated
+  like any other disconnect at the stream's single write point; real server errors such as a full
+  disk still surface. Thanks @fedebyes. (#7857)
+
 - **Delegated subagent rows under a chat no longer repeat "Subagent: ".** Under a parent's "N
   children" badge, each delegated child read `-> Subagent: Audit the retry path…`, which spent the
   narrowest rows in the sidebar on a word the badge and indent already say. Those nested rows now

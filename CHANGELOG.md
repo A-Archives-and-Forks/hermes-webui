@@ -44,6 +44,24 @@
 
 ### Fixed
 
+- **A brief server error while reloading no longer forgets which conversation you had open.** If
+  the session's metadata request failed with a transient error (a 500, a timeout, a dropped
+  connection) during a page reload, the WebUI treated that as proof the saved session no longer
+  existed: it cleared the saved session id and the `/session/<id>` address, so the next reload
+  opened a blank new chat instead of your conversation. It now keeps both on any non-404 failure
+  and shows the usual "Failed to load session" message, so reloading once the server recovers
+  brings the conversation back. A real 404 (the session was deleted) still clears them as before.
+  Thanks @starship-s. (#7071)
+
+- **Adding, toggling or deleting an MCP server no longer writes expanded secrets or half-applied
+  changes.** MCP writes edited the same cached, environment-expanded config the runtime reads, so a
+  save could write resolved `${VAR}` values into `config.yaml`, leave the runtime changed after the
+  save itself failed, or persist another request's in-flight edit. Each MCP write now pins the
+  active profile's config path under the config lock, edits a private copy of the raw file
+  (placeholders, masked values and unrelated sections preserved), refuses to save when the existing
+  file can't be read as a mapping, and reloads the runtime only after the atomic save succeeds.
+  Thanks @franksong2702. (#7822)
+
 - **WebUI starts again after `hermes update` moves the Agent onto its managed runtime.** Current
   Hermes Agent source installs relaunch any process that isn't on the Agent's managed interpreter,
   and that managed environment ships `ruamel.yaml` but not necessarily PyYAML. WebUI then never

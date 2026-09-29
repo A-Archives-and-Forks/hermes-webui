@@ -44,6 +44,17 @@
 
 ### Fixed
 
+- **Delegated subagent rows under a chat no longer repeat "Subagent: ".** Under a parent's "N
+  children" badge, each delegated child read `-> Subagent: Audit the retry path…`, which spent the
+  narrowest rows in the sidebar on a word the badge and indent already say. Those nested rows now
+  show the task itself. The stored title, rename, search, flat rows and the opened child's title
+  bar keep the full `Subagent: …` title, and fork children are unchanged. Thanks @carlotestor.
+  (#7884)
+- **On phones, the closed workspace drawer no longer traps keyboard focus.** The drawer only slid
+  off-screen when closed, so tabbing from the composer walked into its invisible buttons and could
+  open the hidden file picker. The closed drawer is now out of the tab order and ignores taps; the
+  slide animation and the open drawer are unchanged. Thanks @happy5318. (#7866, closes #7713)
+
 - **The conversation-lifecycle browser check no longer flakes at a minute boundary.** It compared a
   settled terminal row's text with the same row after a reload, and the trailing rendered clock
   (`12:34 PM` → `12:35 PM`) made them differ whenever the reload crossed a minute. It now strips only

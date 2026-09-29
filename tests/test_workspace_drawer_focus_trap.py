@@ -104,7 +104,7 @@ def _tab_hits_in_panel(page) -> list:
     return hits
 
 
-@pytest.mark.parametrize("viewport", _BANDS, ids=["390px", "800px"])
+@pytest.mark.parametrize("viewport", _BANDS, ids=["390px", "640px"])
 def test_closed_compact_drawer_is_out_of_the_tab_order(viewport):
     """The closed compact drawer must expose none of its controls to the tab
     sequence, and the open drawer must expose all of them (#7713)."""

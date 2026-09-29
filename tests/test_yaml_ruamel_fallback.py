@@ -97,6 +97,35 @@ def test_ruamel_load_duplicate_keys_last_wins_like_pyyaml(ruamel_compat):
     assert ruamel_compat.safe_load(doc) == {"model": "b", "display": {"tool_progress": False}}
 
 
+def test_ruamel_load_bare_y_n_stay_strings_like_pyyaml(ruamel_compat):
+    # ruamel's YAML 1.1 table makes bare y/n booleans; PyYAML (and every file it wrote) keeps them strings.
+    assert ruamel_compat.safe_load("model:\n  default: n\nflag: y\n") == {"model": {"default": "n"}, "flag": "y"}
+
+
+def test_ruamel_load_repeated_merge_keys_like_pyyaml(ruamel_compat):
+    doc = "b: &b {x: 1, y: 2}\no: &o {y: 3, z: 4}\nm:\n  <<: *b\n  <<: *o\n  w: 5\n"
+    loaded = ruamel_compat.safe_load(doc)
+    assert loaded["m"] == {"x": 1, "y": 3, "z": 4, "w": 5}
+
+
+def test_ruamel_load_matches_pyyaml_on_corpus(ruamel_compat):
+    corpus = (
+        "o: 010\np: 0x1F\nq: 1:30\nr: 1_000\ns: 1e3\nt: 1.5\nu: .inf\n",
+        "d: 2026-01-01\ne: ~\nf: null\ng:\nh: Null\n",
+        "base: &b {x: 1}\nm:\n  <<: [*b, {x: 9, q: 1}]\n  x: 7\n",
+        "=: value\n",
+    )
+    for doc in corpus:
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, yaml; print(repr(yaml.safe_load(sys.argv[1])), end='')", doc],
+            capture_output=True, text=True,
+        )
+        if out.returncode != 0:
+            pytest.skip("PyYAML not installed in test interpreter")
+        assert repr(ruamel_compat.safe_load(doc)) == out.stdout, doc
+
+
 @pytest.mark.parametrize("fn", ["safe_dump", "dump"])
 def test_ruamel_dump_quotes_yaml11_ambiguous_strings(ruamel_compat, fn):
     text = getattr(ruamel_compat, fn)(YAML11_STRINGS, sort_keys=False, allow_unicode=True)

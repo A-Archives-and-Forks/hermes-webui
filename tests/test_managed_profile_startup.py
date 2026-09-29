@@ -63,7 +63,7 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
         env["TMPDIR"] = os.environ["TMPDIR"]
     result = subprocess.run(
         [python, "-c", textwrap.dedent('''
-            import importlib, json, os, sys, sysconfig, threading, types
+            import importlib, importlib.util, json, os, sys, sysconfig, threading, types
             from pathlib import Path
 
             def deny_external_effects(event, args):

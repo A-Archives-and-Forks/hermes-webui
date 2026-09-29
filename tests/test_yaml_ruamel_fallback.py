@@ -79,6 +79,47 @@ def test_config_loader_reads_yaml_without_pyyaml(ruamel_compat, tmp_path, monkey
     assert onboarding._load_yaml_config(cfg) == CFG
 
 
+# YAML 1.1 words that PyYAML (and the Agent's hermes_yaml reader) treat as booleans.
+YAML11_DOC = "tool_progress: off\nshow_reasoning: no\nstreaming: on\nauto: yes\nquoted: 'off'\n"
+YAML11_STRINGS = {"tool_progress": "off", "reasoning": "no", "mode": "on", "flag": "yes", "n": "n"}
+
+
+def test_ruamel_load_keeps_yaml11_booleans(ruamel_compat):
+    assert ruamel_compat.safe_load(YAML11_DOC) == {
+        "tool_progress": False, "show_reasoning": False, "streaming": True, "auto": True,
+        "quoted": "off",
+    }
+
+
+@pytest.mark.parametrize("fn", ["safe_dump", "dump"])
+def test_ruamel_dump_quotes_yaml11_ambiguous_strings(ruamel_compat, fn):
+    text = getattr(ruamel_compat, fn)(YAML11_STRINGS, sort_keys=False, allow_unicode=True)
+    # Own loader round-trips the strings as strings.
+    assert ruamel_compat.safe_load(text) == YAML11_STRINGS
+    # A YAML 1.1 reader (PyYAML semantics) must also see strings, not booleans.
+    from ruamel.yaml import YAML
+
+    y11 = YAML(typ="safe", pure=True)
+    y11.version = (1, 1)
+    assert y11.load(text) == YAML11_STRINGS
+    assert "%YAML" not in text
+
+
+def test_ruamel_dump_matches_pyyaml_for_yaml11_strings(ruamel_compat):
+    # Bare y/n are excluded: ruamel's YAML 1.1 resolver (like the Agent's hermes_yaml)
+    # quotes them and PyYAML does not; both forms load back as the same strings.
+    words = {k: v for k, v in YAML11_STRINGS.items() if v not in ("y", "n")}
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, json, yaml; print(yaml.safe_dump(json.loads(sys.argv[1]), sort_keys=False), end='')",
+         __import__("json").dumps(words)],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        pytest.skip("PyYAML not installed in test interpreter")
+    assert ruamel_compat.safe_dump(words, sort_keys=False) == out.stdout
+
+
 def test_no_bare_pyyaml_imports_in_server_code():
     offenders = []
     for path in [REPO / "server.py", *sorted((REPO / "api").glob("*.py"))]:

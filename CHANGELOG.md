@@ -44,6 +44,12 @@
 
 ### Fixed
 
+- **The conversation-lifecycle browser check no longer flakes at a minute boundary.** It compared a
+  settled terminal row's text with the same row after a reload, and the trailing rendered clock
+  (`12:34 PM` → `12:35 PM`) made them differ whenever the reload crossed a minute. It now strips only
+  a trailing clock line before comparing; real content differences still fail. Test-only. Thanks
+  @webtecnica. (#7911, closes #7792)
+
 - **The Codex model picker no longer offers retired models when live discovery is unavailable.**
   When the WebUI couldn't reach Codex's account-aware catalog, the `openai-codex` picker fell back to
   a static list that still carried retired models (`gpt-5.3-codex`, `gpt-5.2-codex`,

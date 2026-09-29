@@ -630,14 +630,15 @@ def _expand_settled_worklog(page) -> None:
     )
 
 
+_RENDERED_TIMESTAMP_RE = re.compile(
+    r"(?:\r?\n)[ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*(?:AM|PM)?[ \t]*$",
+    re.IGNORECASE,
+)
+
+
 def _strip_rendered_timestamp(text: str) -> str:
-    """Strip trailing rendered clock timestamp from a row's innerText."""
-    lines = [line.strip() for line in (text or "").strip().splitlines() if line.strip()]
-    if not lines:
-        return ""
-    if len(lines) > 1 and re.match(r"^\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm)?$", lines[-1]):
-        return "\n".join(lines[:-1])
-    return "\n".join(lines)
+    """Strip trailing rendered clock timestamp from a row's innerText, preserving all internal whitespace."""
+    return _RENDERED_TIMESTAMP_RE.sub("", text or "")
 
 
 def _terminal_rows(snapshot: dict) -> list[dict]:

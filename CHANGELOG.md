@@ -44,6 +44,21 @@
 
 ### Fixed
 
+- **WebUI starts again after `hermes update` moves the Agent onto its managed runtime.** Current
+  Hermes Agent source installs relaunch any process that isn't on the Agent's managed interpreter,
+  and that managed environment ships `ruamel.yaml` but not necessarily PyYAML. WebUI then never
+  served: the bootstrap probe imported PyYAML before the Agent and rejected every interpreter (and
+  on some hosts tried to build a local venv and failed), and a direct `python server.py` launch died
+  on `No module named 'api'` or `'yaml'` after the relaunch. Startup now activates the Agent's
+  dependency layer (`hermes_bootstrap`) before any WebUI import that needs a third-party package,
+  without importing the Agent application before the active profile is selected (#7886), and keeps
+  its own directory importable through the relaunch. WebUI reads and writes YAML through a small
+  compatibility module that uses PyYAML when present and falls back to `ruamel.yaml` with the same
+  YAML 1.1 rules, so values like `tool_progress: off` keep their meaning, and the bootstrap probe
+  accepts either library. A broken Agent bootstrap now logs a warning instead of stopping WebUI.
+  The interim workaround `HERMES_DISABLE_LAZY_INSTALLS=1` is no longer needed. Thanks @snoyberg
+  (#7876) and @carlotestor (#7875); closes #7831, #7848.
+
 - **Gateway-backend turns survive a WebUI restart.** With the Gateway runs API enabled
   (`HERMES_WEBUI_CHAT_BACKEND=gateway` + `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`), the Gateway
   runs the turn, but restarting the WebUI still marked it interrupted, because the Gateway `run_id`
@@ -447,6 +462,14 @@
 
 ### Documentation
 
+- **The README's remote-access paragraph now leads with Tailscale Serve.** It sent users straight to a
+  `HERMES_WEBUI_HOST=0.0.0.0` bind, which contradicted the guide it links to. It now recommends Serve, which
+  keeps WebUI on loopback behind tailnet-only HTTPS, and keeps the authenticated direct-IP bind as the
+  fallback when Serve is unavailable. (#7420 by @taljeon)
+- **A Chinese remote-access guide.** `docs/remote-access-zh.md` covers Tailscale Serve, the direct tailnet-IP
+  fallback, SSH tunnels, a native-Windows setup with `start.ps1` (dependencies installed into the agent venv
+  that `start.ps1` actually uses, plus a Tailscale-only firewall rule), WSL-only login autostart, and the
+  security boundaries of each exposure level. The README links it. (#7814 by @happy5318)
 - **`AGENTS.md` now routes contributors to the references that match their change.** The old "read first" list asked for four files up front regardless of what was being changed, and carried a compressed copy of the ten change guidelines that `docs/GUIDELINES.md` owns. It now maps each reference to the kind of work it applies to and states explicit completion/verification criteria instead. No information is lost — the ten rules remain in `docs/GUIDELINES.md`, which the new version still points to. Thanks @steveafrost. (#7593)
 - **The `/api/models` cache invalidation contract is documented.** `#7556` shipped a change to the catalog cache's source fingerprint, and its review flagged the surrounding contract as undocumented runtime behavior. `docs/architecture/models-cache-invalidation.md` now records what is cached (in-memory snapshot, per-profile `models_cache.json`, cold vs hot path), the three source axes (`config_yaml` stat identity, `auth_json` content hash with a volatile-key deny-list, baked-in plus Codex catalog hashes) and why each is fingerprinted the way it is, and the invariant that both volatile-key sets are deny-lists that may only remove fields which provably do not gate the provider/model set. Changes no runtime behavior. Thanks @webtecnica. (#7560, #7556)
 

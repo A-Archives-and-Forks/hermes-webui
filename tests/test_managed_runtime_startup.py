@@ -97,6 +97,28 @@ def test_server_warns_and_continues_on_bootstrap_internal_import_failure(tmp_pat
     assert "deliberately_missing_agent_dependency" in result.stderr
 
 
+def test_legacy_agent_without_bootstrap_is_not_put_at_front_of_sys_path(tmp_path):
+    """Older Agents keep api.config's append-at-END placement (pip -t . shadowing guard)."""
+    agent_dir = tmp_path / "legacy-agent"
+    agent_dir.mkdir()
+    (agent_dir / "run_agent.py").write_text("class AIAgent: pass\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
+    script = (
+        "import sys, managed_agent_startup as m\n"
+        "m.activate_managed_agent()\n"
+        "print('INDEX', sys.path.index(sys.argv[1]) if sys.argv[1] in sys.path else -1)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(agent_dir)],
+        cwd=os.path.dirname(os.path.dirname(__file__)), env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "INDEX -1" in result.stdout
+
+
 def test_server_propagates_bootstrap_system_exit(tmp_path):
     """The Agent's own relaunch/repair exit (SystemExit) is not swallowed."""
     agent_dir = tmp_path / "exiting-agent"

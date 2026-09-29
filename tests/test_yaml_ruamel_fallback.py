@@ -91,6 +91,12 @@ def test_ruamel_load_keeps_yaml11_booleans(ruamel_compat):
     }
 
 
+def test_ruamel_load_duplicate_keys_last_wins_like_pyyaml(ruamel_compat):
+    # PyYAML keeps the last value; a config that loaded on PyYAML must not become {}.
+    doc = "model: a\nmodel: b\ndisplay:\n  tool_progress: all\n  tool_progress: off\n"
+    assert ruamel_compat.safe_load(doc) == {"model": "b", "display": {"tool_progress": False}}
+
+
 @pytest.mark.parametrize("fn", ["safe_dump", "dump"])
 def test_ruamel_dump_quotes_yaml11_ambiguous_strings(ruamel_compat, fn):
     text = getattr(ruamel_compat, fn)(YAML11_STRINGS, sort_keys=False, allow_unicode=True)

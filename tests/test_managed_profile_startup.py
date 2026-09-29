@@ -28,6 +28,13 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
         agent_dir = str(Path(spec.origin).parent)
     if not (Path(agent_dir) / "pm" / "environments.py").is_file():
         pytest.skip("requires a package-managed Hermes Agent")
+    python = os.environ.get("HERMES_WEBUI_PYTHON", sys.executable)
+    # The installed Agent's first-party YAML (hermes_yaml) needs ruamel.yaml; an
+    # interpreter without it cannot import run_agent at all, so the scenario this
+    # test models (a working managed runtime) does not exist there.
+    probe = subprocess.run([python, "-c", "import ruamel.yaml"], capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip("test interpreter cannot import ruamel.yaml (required by the installed Agent)")
     base = tmp_path / "base"
     home = base / "profiles" / "rocky"
     skill = home / "skills" / "named-only"
@@ -55,7 +62,7 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
     if "TMPDIR" in os.environ:
         env["TMPDIR"] = os.environ["TMPDIR"]
     result = subprocess.run(
-        [os.environ.get("HERMES_WEBUI_PYTHON", sys.executable), "-c", textwrap.dedent('''
+        [python, "-c", textwrap.dedent('''
             import importlib, json, os, sys, sysconfig, threading, types
             from pathlib import Path
 

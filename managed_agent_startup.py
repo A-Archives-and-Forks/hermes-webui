@@ -17,13 +17,16 @@ def activate_managed_agent() -> None:
     webui_root = str(Path(__file__).resolve().parent)
     if webui_root not in sys.path:
         sys.path.insert(0, webui_root)
-    # Bootstrap's probe adds the checkout to its own PYTHONPATH, not ours.
-    if agent_dir not in sys.path:
-        sys.path.insert(1, agent_dir)
     # Activate dependencies without importing the application: api.config must
     # select the active profile before Agent modules cache profile-sensitive paths.
-    # Older Agents and browser-only shims have no bootstrap layer to activate.
+    # Older Agents and browser-only shims have no bootstrap layer to activate; for
+    # them leave sys.path alone so api.config appends the Agent dir at the END as
+    # before (a front position lets `pip install -t .` packages in the checkout
+    # shadow site-packages).
     if (Path(agent_dir) / "hermes_bootstrap.py").is_file():
+        # Bootstrap's probe adds the checkout to its own PYTHONPATH, not ours.
+        if agent_dir not in sys.path:
+            sys.path.insert(1, agent_dir)
         try:
             importlib.import_module("hermes_bootstrap")
         except Exception as exc:  # noqa: BLE001 - SystemExit (relaunch/repair exit) still propagates

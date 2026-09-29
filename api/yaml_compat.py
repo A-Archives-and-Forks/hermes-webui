@@ -65,7 +65,33 @@ def safe_load(stream):
 
     y = YAML(typ="safe", pure=True)
     y.version = _YAML11
+    # PyYAML keeps the LAST value of a duplicated key; ruamel raises by default and
+    # keeps the FIRST with allow_duplicate_keys. A config that loaded on PyYAML must
+    # not turn into {} here (a later WebUI save would then overwrite the file).
+    constructor_cls = _last_value_wins_constructor()
+    if constructor_cls is not None:
+        y.Constructor = constructor_cls
     return y.load(stream)
+
+
+_constructor_cls = None
+
+
+def _last_value_wins_constructor():
+    """A SafeConstructor whose duplicate-key check keeps the last value, as PyYAML does."""
+    global _constructor_cls
+    if _constructor_cls is None:
+        try:
+            from ruamel.yaml.constructor import SafeConstructor
+        except ImportError:  # minimal/stub ruamel without the constructor module
+            return None
+
+        class _LastValueWinsConstructor(SafeConstructor):
+            def check_mapping_key(self, node, key_node, mapping, key, value):
+                return True
+
+        _constructor_cls = _LastValueWinsConstructor
+    return _constructor_cls
 
 
 def _ruamel_dump(data, stream, **options):

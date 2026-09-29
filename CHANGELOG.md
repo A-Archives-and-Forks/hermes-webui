@@ -44,6 +44,16 @@
 
 ### Fixed
 
+- **The Codex model picker no longer offers retired models when live discovery is unavailable.**
+  When the WebUI couldn't reach Codex's account-aware catalog, the `openai-codex` picker fell back to
+  a static list that still carried retired models (`gpt-5.3-codex`, `gpt-5.2-codex`,
+  `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `codex-mini-latest`) and a nonexistent `gpt-5.5-mini`,
+  and generic Agent-core seeding could add entitlement-dependent Codex IDs back. The fallback now
+  lists the current subscription models, Codex is excluded from core seeding (its live/cache path
+  owns freshness), `gpt-5.5-mini` is gone from the OpenAI fallbacks, and a Codex model is always
+  sent with its provider so an overlapping configured provider can't claim the bare ID.
+  Thanks @starship-s. (#6817)
+
 - **A brief server error while reloading no longer forgets which conversation you had open.** If
   the session's metadata request failed with a transient error (a 500, a timeout, a dropped
   connection) during a page reload, the WebUI treated that as proof the saved session no longer

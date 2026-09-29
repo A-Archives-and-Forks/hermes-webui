@@ -30396,7 +30396,7 @@ def _load_mcp_config_for_write(config_path: Path) -> dict:
     A config edit must do neither: preserve placeholders and let read/parse errors
     abort before the atomic save. Caller owns _cfg_lock for the whole transaction.
     """
-    import yaml
+    from api import yaml_compat as yaml
 
     try:
         raw = config_path.read_text(encoding="utf-8")

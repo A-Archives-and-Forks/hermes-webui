@@ -126,6 +126,11 @@ startup. If a restart fails, inspect the current service journal and selected
 interpreter. This ordering repair does not remove the static fallback lock or
 change cross-profile credential handling.
 
+Current Hermes managed environments ship `ruamel.yaml` and may not include
+PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
+PyYAML when it is importable and falls back to `ruamel.yaml` otherwise, and the
+bootstrap probe accepts either backend.
+
 ---
 
 ## "Response interrupted." marker keeps saying "no agent output was recovered"

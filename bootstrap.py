@@ -250,8 +250,11 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
 
 
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
-    # Hermes may activate its dependency environment during the Agent import.
-    script = "from run_agent import AIAgent\nimport yaml\n"
+    # Agent first: it may relaunch into its managed runtime, which ships ruamel.yaml only.
+    script = (
+        "from run_agent import AIAgent\n"
+        "try:\n    import yaml\nexcept ImportError:\n    import ruamel.yaml\n"
+    )
     env = os.environ.copy()
     if agent_dir:
         # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins

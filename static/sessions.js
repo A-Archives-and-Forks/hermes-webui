@@ -8126,6 +8126,13 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+// Nesting under the parent already marks a delegated run, so the nested label drops the
+// agent's "Subagent: " prefix. Display only: rename and search keep _sessionDisplayTitle().
+function _nestedChildTitle(s){
+  const title=_sessionDisplayTitle(s);
+  return _isDelegatedSubagentRow(s)?title.replace(/^Subagent:\s*/i,''):title;
+}
+
 function _isDelegatedSubagentRow(s){
   if(!_isChildSession(s)) return false;
   const role=[s.raw_source,s.source_tag,s.source].map(v=>String(v||'').trim().toLowerCase()).find(Boolean)||'';
@@ -8962,7 +8969,7 @@ function renderSessionListFromCache(){
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
-        const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
+        const childTitle=_nestedChildTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
         return `-> ${childTitle}${parentNote} - ${childTime}`;

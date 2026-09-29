@@ -74,7 +74,8 @@ def test_server_starts_without_agent_class(tmp_path, agent_source):
     assert result.returncode == 0, result.stderr
 
 
-def test_server_does_not_hide_bootstrap_internal_import_failure(tmp_path):
+def test_server_warns_and_continues_on_bootstrap_internal_import_failure(tmp_path):
+    """A broken Agent bootstrap must not abort WebUI startup (master's lazy import tolerated it)."""
     agent_dir = tmp_path / "broken-agent"
     agent_dir.mkdir()
     (agent_dir / "run_agent.py").write_text("class AIAgent: pass\n", encoding="utf-8")
@@ -86,12 +87,32 @@ def test_server_does_not_hide_bootstrap_internal_import_failure(tmp_path):
     env.pop("PYTHONPATH", None)
     env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
     result = subprocess.run(
-        [sys.executable, "-c", "import server"],
+        [sys.executable, "-c", "import server; print('SERVER_IMPORTED')"],
         cwd=os.path.dirname(os.path.dirname(__file__)), env=env,
         capture_output=True, text=True, timeout=30,
     )
-    assert result.returncode != 0
-    assert "No module named 'deliberately_missing_agent_dependency'" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "SERVER_IMPORTED" in result.stdout
+    assert "Hermes Agent dependency activation failed" in result.stderr
+    assert "deliberately_missing_agent_dependency" in result.stderr
+
+
+def test_server_propagates_bootstrap_system_exit(tmp_path):
+    """The Agent's own relaunch/repair exit (SystemExit) is not swallowed."""
+    agent_dir = tmp_path / "exiting-agent"
+    agent_dir.mkdir()
+    (agent_dir / "run_agent.py").write_text("class AIAgent: pass\n", encoding="utf-8")
+    (agent_dir / "hermes_bootstrap.py").write_text("raise SystemExit(7)\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
+    result = subprocess.run(
+        [sys.executable, "-c", "import server; print('SERVER_IMPORTED')"],
+        cwd=os.path.dirname(os.path.dirname(__file__)), env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 7
+    assert "SERVER_IMPORTED" not in result.stdout
 
 
 @pytest.mark.parametrize("with_bootstrap", [False, True])

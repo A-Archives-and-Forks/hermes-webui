@@ -119,8 +119,10 @@ and force turns and model-catalog scopes into the legacy whole-turn lock.
 The dependency layer retains Agent-owned activation and re-exec behavior; WebUI
 does not choose generation directories or install into an obsolete Agent venv.
 Legacy Agents and browser-only fixtures without `hermes_bootstrap.py` skip this
-early activation. Failures inside a present bootstrap are surfaced, not treated
-as an absent Agent. The interpreter compatibility probe may still import
+early activation. A failure inside a present bootstrap is logged as a warning
+and startup continues, as it did when the Agent import was lazy, so the UI,
+diagnostics and updater stay reachable; the Agent's own relaunch or repair exit
+still stops the process. The interpreter compatibility probe may still import
 `run_agent` in its disposable subprocess; that import must not leak into server
 startup. If a restart fails, inspect the current service journal and selected
 interpreter. This ordering repair does not remove the static fallback lock or
